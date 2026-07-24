@@ -9,20 +9,22 @@
 </head>
 <body>
 
-<header class="top">
+<header class="top" id="top">
   <div class="brand">
-    <span class="mark"></span>
+    <span class="mark"><img src="logo.png" alt="" onerror="this.remove()"></span>
     <div>
       <h1>Material intelligence</h1>
       <p id="ctx">No file loaded</p>
     </div>
   </div>
   <div class="topact">
+    <select id="proj" class="ctl" title="Switch project" hidden></select>
     <label class="lead">Lead time
-      <input id="lead" type="number" value="7" min="1" max="60"> days
+      <input id="lead" class="ctl" type="number" value="7" min="1" max="90"> days
     </label>
-    <button id="pick" class="btn primary">Upload register</button>
-    <a id="dl" class="btn ghost" hidden>Export CSV</a>
+    <button id="pick" class="btn primary">Upload</button>
+    <a id="dl" class="btn" hidden>Export</a>
+    <button id="del" class="btn danger" hidden>Delete</button>
     <input id="file" type="file" accept=".xlsx,.xlsm,.xls" hidden>
   </div>
 </header>
@@ -30,53 +32,70 @@
 <main>
 
 <section id="drop" class="drop">
-  <p class="dh">Drop your stock register or ProjectBase export here</p>
-  <p class="ds">One Excel file. The format is detected automatically, dates are
-     repaired, and Safety / PPE / Tools sheets are skipped.</p>
-  <button class="btn primary" onclick="document.getElementById('file').click()">Choose file</button>
+  <p class="dh">Drop a stock register or ProjectBase export here</p>
+  <p class="ds">One Excel file. Column names are detected automatically, so
+     registers from different sites all work. Safety, PPE, tools and item
+     master tabs are skipped.</p>
+  <div class="dropform">
+    <input id="pname" class="ctl" type="text" placeholder="Project name (optional)">
+    <button class="btn primary" onclick="document.getElementById('file').click()">Choose file</button>
+  </div>
 </section>
 
 <section id="busy" class="busy" hidden>
-  <div class="spin"></div><p>Reading the file, repairing dates, running the forecast…</p>
+  <div class="spin"></div><p id="busytxt">Reading the file…</p>
 </section>
 
 <section id="report" hidden>
 
   <div id="health"></div>
 
+  <details id="mapbox" class="mapbox">
+    <summary>How this file was read <span id="mapsum" class="mapsum"></span></summary>
+    <div id="mapbody"></div>
+  </details>
+
   <div class="kpis" id="kpis"></div>
 
   <div class="bar">
     <div class="tabs" id="svc"></div>
     <div class="right">
-      <input id="q" type="search" placeholder="Search material">
-      <select id="status">
+      <input id="q" class="ctl" type="search" placeholder="Search material">
+      <select id="status" class="ctl">
         <option value="STOCKED_OUT,RED,AMBER">Needs a decision</option>
-        <option value="">All statuses</option>
-        <option value="STOCKED_OUT">Stocked out</option>
+        <option value="">Everything</option>
+        <option value="STOCKED_OUT">Already out of stock</option>
         <option value="RED">Order now</option>
         <option value="AMBER">Order this week</option>
-        <option value="GREEN">Healthy</option>
-        <option value="OVERSTOCK,DEAD_STOCK">Idle capital</option>
+        <option value="GREEN">No action needed</option>
+        <option value="OVERSTOCK,DEAD_STOCK">Stop ordering</option>
         <option value="INSUFFICIENT_DATA">Not enough data</option>
       </select>
     </div>
   </div>
 
+  <p class="rule" id="rule"></p>
+
   <div class="tablewrap">
-    <table id="tbl">
+    <table>
+      <colgroup>
+        <col style="width:30%"><col style="width:23%"><col style="width:16%">
+        <col style="width:20%"><col style="width:11%">
+      </colgroup>
       <thead><tr>
-        <th class="w-mat">Material</th>
-        <th class="w-act">What to do</th>
-        <th class="n">Stock</th>
-        <th class="n">Use / day</th>
-        <th>Runs out</th>
-        <th class="w-trust">Trust</th>
+        <th>Material</th><th>What to do</th><th class="n">Stock</th>
+        <th>Runs out</th><th>Trust</th>
       </tr></thead>
       <tbody id="rows"></tbody>
     </table>
     <p id="empty" class="empty" hidden>Nothing matches this filter.</p>
   </div>
+
+  <p class="legend">
+    <span><b>●●●</b> 8+ days of consumption recorded</span>
+    <span><b>●●○</b> 4–7 days</span>
+    <span><b>●○○</b> 1–3 days — treat the date as a hint, not a promise</span>
+  </p>
 
 </section>
 </main>
@@ -85,11 +104,25 @@
   <div class="sheetin">
     <div class="sheethd">
       <div><h2 id="sname"></h2><p id="smeta"></p></div>
-      <button class="btn ghost" onclick="closeSheet()">Close</button>
+      <button class="btn" onclick="closeSheet()">Close</button>
     </div>
     <div id="spark"></div>
-    <table class="mini"><thead><tr><th>Date</th><th class="n">In</th><th class="n">Out</th><th class="n">Balance</th></tr></thead>
+    <table class="mini"><thead><tr><th>Date</th><th class="n">In</th>
+      <th class="n">Out</th><th class="n">Balance</th></tr></thead>
     <tbody id="srows"></tbody></table>
+  </div>
+</div>
+
+<div id="modal" class="sheet mid" hidden>
+  <div class="card">
+    <h2>Delete this project</h2>
+    <p id="mtext"></p>
+    <input id="mconfirm" class="ctl" type="text" placeholder="Type the project name">
+    <p id="merr" class="merr" hidden></p>
+    <div class="mact">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn danger" id="mgo">Delete permanently</button>
+    </div>
   </div>
 </div>
 

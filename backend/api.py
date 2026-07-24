@@ -1,6 +1,6 @@
 """HTTP layer. Thin on purpose - all real work lives in engine.py / health.py."""
-import io
 import json
+import re
 import shutil
 import uuid
 import datetime as dt
@@ -8,11 +8,11 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import engine, health
+from . import engine, health, schema
 
 ROOT = Path(__file__).resolve().parent.parent
 UPLOADS = ROOT / "data" / "uploads"
@@ -21,10 +21,9 @@ FRONTEND = ROOT / "frontend"
 for p in (UPLOADS, RUNS):
     p.mkdir(parents=True, exist_ok=True)
 
-SERVICE_HINTS = [("ELECTRIC", "Electrical"), ("PLUM", "Plumbing"),
-                 ("PHE", "Plumbing"), ("FIRE", "Fire & HVAC"),
-                 ("HVAC", "Fire & HVAC")]
-SKIP_HINTS = ["SAFETY", "PPE", "TOOL"]
+# Tabs that are never material movement: consumables logs and item masters.
+SKIP_SHEETS = ["SAFETY", "PPE", "TOOL", "ITEMMASTER", "MASTER",
+               "SUMMARY", "INDEX", "SHEET1"]
 
 app = FastAPI(title="Material Intelligence")
 
@@ -44,12 +43,34 @@ def sheet_plan(path):
     xl = pd.ExcelFile(path)
     keep, skipped = {}, []
     for s in xl.sheet_names:
-        u = s.upper()
-        if any(h in u for h in SKIP_HINTS):
-            skipped.append(s)
+        flat = re.sub(r"[^A-Z]", "", s.upper())
+        if any(h in flat for h in SKIP_SHEETS):
+            skipped.append({"sheet": s, "why": "excluded by name"})
             continue
-        keep[s] = next((v for k, v in SERVICE_HINTS if k in u), "Other")
+        keep[s] = s
     return keep, skipped
+
+
+NOISE = (r"stock|register|registers|material|materials|inward|outward|report|"
+         r"data|sheet|final|copy|new|old|updated|availability|valuation|"
+         r"jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|"
+         r"and|of|the|for|with|20\d\d|\d{1,4}")
+
+
+def project_from_filename(name):
+    """Guess a project name from the file name, and admit when it cannot."""
+    stem = re.sub(r"[_\-]+", " ", Path(name).stem)
+    stem = re.sub(r"[^\w &]+", " ", stem)
+    stem = re.sub(rf"\b({NOISE})\b", " ", stem, flags=re.I)
+    stem = re.sub(r"\s+", " ", stem).strip()
+    if len(re.sub(r"[^A-Za-z]", "", stem)) < 3:
+        return "Untitled project"
+    return stem.title()
+
+
+def safe_slug(name):
+    s = re.sub(r"[^A-Za-z0-9]+", "-", (name or "").strip()).strip("-").lower()
+    return s or "untitled"
 
 
 def jsonable(df):
@@ -62,44 +83,76 @@ def jsonable(df):
 
 def load_run(run_id):
     d = RUNS / run_id
-    if not d.exists():
+    if not d.exists() or not (d / "meta.json").exists():
         raise HTTPException(404, "run not found")
-    f = pd.read_parquet(d / "forecast.parquet")
-    meta = json.loads((d / "meta.json").read_text())
-    return f, meta
+    return pd.read_parquet(d / "forecast.parquet"), json.loads((d / "meta.json").read_text())
+
+
+def all_meta():
+    out = []
+    for d in RUNS.iterdir():
+        m = d / "meta.json"
+        if m.exists():
+            try:
+                out.append(json.loads(m.read_text()))
+            except Exception:
+                pass
+    return sorted(out, key=lambda j: j.get("created", ""), reverse=True)
+
+
+def summarise(f):
+    counts = f.status.value_counts().to_dict()
+    return {
+        "counts": {k: int(v) for k, v in counts.items()},
+        "materials": int(len(f)),
+        "act_today": int(f.status.isin(["STOCKED_OUT", "RED"]).sum()),
+        "idle_lines": int(f.status.isin(["OVERSTOCK", "DEAD_STOCK"]).sum()),
+        "services": sorted(f.service.dropna().unique().tolist()),
+        "overdue_orders": int((f.order_by.notna() &
+                               (f.order_by < pd.Timestamp.now())).sum()),
+    }
 
 
 # ------------------------------------------------------------------ routes
 @app.post("/api/upload")
 async def upload(file: UploadFile = File(...),
                  lead_time: int = Form(7),
+                 project: str = Form(""),
                  asof: str = Form("")):
     if not file.filename.lower().endswith((".xlsx", ".xlsm", ".xls")):
-        raise HTTPException(400, "upload an Excel file")
+        raise HTTPException(400, "upload an Excel file (.xlsx, .xlsm or .xls)")
 
     run_id = dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4]
     raw = UPLOADS / f"{run_id}__{file.filename}"
     with raw.open("wb") as fh:
         shutil.copyfileobj(file.file, fh)
 
+    project = (project or "").strip() or project_from_filename(file.filename)
     kind = detect(raw)
     try:
         if kind == "projectbase":
-            mv, _ = engine.parse_projectbase_movement(raw)
-            skipped = []
+            mv, rep = engine.parse_projectbase_movement(raw)
+            rep = {"sheets": [], "skipped": [], "date_swaps": 0, **rep}
         else:
-            plan, skipped = sheet_plan(raw)
-            mv, _ = engine.parse_site_register(raw, plan)
+            plan, name_skips = sheet_plan(raw)
+            mv, rep = engine.parse_site_register(raw, plan)
+            rep["skipped"] = name_skips + rep.get("skipped", [])
     except Exception as e:
+        raw.unlink(missing_ok=True)
         raise HTTPException(422, f"could not read this file: {e}")
 
     if mv.empty:
-        raise HTTPException(422, "no movement rows found in this file")
+        tried = ", ".join(s["sheet"] for s in rep.get("skipped", [])) or "none"
+        raw.unlink(missing_ok=True)
+        raise HTTPException(
+            422, "no stock movement found. Every sheet was skipped "
+                 f"({tried}). A register needs a material column plus IN and "
+                 "OUT columns under dates.")
 
     daily = engine.build_daily(mv)
     moved = daily[(daily.qty_out > 0) | (daily.qty_in > 0)]
-    default_asof = moved.date.max() if len(moved) else daily.date.max()
-    asof_ts = pd.Timestamp(asof) if asof else default_asof
+    asof_ts = pd.Timestamp(asof) if asof else (
+        moved.date.max() if len(moved) else daily.date.max())
 
     issues, stats = health.check(mv, daily, asof_ts)
     f = engine.forecast(daily[daily.date <= asof_ts],
@@ -111,38 +164,36 @@ async def upload(file: UploadFile = File(...),
     d.mkdir(parents=True, exist_ok=True)
     f.to_parquet(d / "forecast.parquet")
     daily.to_parquet(d / "daily.parquet")
-    meta = {"run_id": run_id, "filename": file.filename, "source": kind,
-            "sheets_skipped": skipped, "lead_time": lead_time,
+    meta = {"run_id": run_id, "project": project, "project_slug": safe_slug(project),
+            "filename": file.filename, "source": kind,
+            "lead_time": lead_time, "mapping": rep,
             "created": dt.datetime.now().isoformat(timespec="seconds"),
             "stats": stats, "issues": issues}
     (d / "meta.json").write_text(json.dumps(meta, indent=2))
     return {"run_id": run_id, "meta": meta, "summary": summarise(f)}
 
 
-def summarise(f):
-    counts = f.status.value_counts().to_dict()
-    urgent = f[f.status.isin(["STOCKED_OUT", "RED"])]
-    return {
-        "counts": {k: int(v) for k, v in counts.items()},
-        "materials": int(len(f)),
-        "act_today": int(len(urgent)),
-        "idle_lines": int(f.status.isin(["OVERSTOCK", "DEAD_STOCK"]).sum()),
-        "services": sorted(f.service.dropna().unique().tolist()),
-        "overdue_orders": int((f.order_by.notna() &
-                               (f.order_by < pd.Timestamp.now())).sum()),
-    }
+@app.get("/api/projects")
+def projects():
+    by = {}
+    for j in all_meta():
+        k = j.get("project_slug") or "untitled"
+        e = by.setdefault(k, {"slug": k, "project": j.get("project", "Untitled"),
+                              "runs": 0, "latest_run": None, "latest": None})
+        e["runs"] += 1
+        if e["latest_run"] is None:
+            e["latest_run"] = j["run_id"]
+            e["latest"] = j.get("created")
+    return sorted(by.values(), key=lambda e: e["latest"] or "", reverse=True)
 
 
 @app.get("/api/runs")
-def runs():
-    out = []
-    for d in sorted(RUNS.iterdir(), reverse=True):
-        m = d / "meta.json"
-        if m.exists():
-            j = json.loads(m.read_text())
-            out.append({k: j[k] for k in
-                        ("run_id", "filename", "source", "created", "stats")})
-    return out[:30]
+def runs(project: str = ""):
+    out = [j for j in all_meta()
+           if not project or j.get("project_slug") == project]
+    return [{k: j.get(k) for k in
+             ("run_id", "project", "project_slug", "filename", "source",
+              "created", "stats")} for j in out[:50]]
 
 
 @app.get("/api/run/{run_id}")
@@ -151,34 +202,65 @@ def run_detail(run_id: str):
     return {"meta": meta, "summary": summarise(f)}
 
 
+@app.delete("/api/run/{run_id}")
+def delete_run(run_id: str):
+    d = RUNS / run_id
+    if not d.exists():
+        raise HTTPException(404, "run not found")
+    shutil.rmtree(d)
+    for f in UPLOADS.glob(f"{run_id}__*"):
+        f.unlink(missing_ok=True)
+    return {"deleted": run_id}
+
+
+@app.delete("/api/project/{slug}")
+def delete_project(slug: str, confirm: str = ""):
+    """Destructive, so the caller must echo the project name back."""
+    metas = [j for j in all_meta() if j.get("project_slug") == slug]
+    if not metas:
+        raise HTTPException(404, "project not found")
+    name = metas[0].get("project", "")
+    if confirm.strip().lower() != name.strip().lower():
+        raise HTTPException(
+            400, f'type the project name exactly ("{name}") to confirm')
+    for j in metas:
+        rid = j["run_id"]
+        shutil.rmtree(RUNS / rid, ignore_errors=True)
+        for f in UPLOADS.glob(f"{rid}__*"):
+            f.unlink(missing_ok=True)
+    return {"deleted": slug, "runs": len(metas)}
+
+
 @app.get("/api/forecast/{run_id}")
 def forecast_rows(run_id: str, status: str = "", service: str = "",
-                  q: str = "", limit: int = 500):
+                  q: str = "", limit: int = 1000):
     f, _ = load_run(run_id)
     if status:
         f = f[f.status.isin(status.split(","))]
     if service:
         f = f[f.service == service]
     if q:
-        f = f[f.material.str.contains(q.upper(), regex=False)]
+        f = f[f.material.str.contains(q.strip().upper(), regex=False)]
     return jsonable(f.head(limit))
 
 
 @app.get("/api/material/{run_id}")
 def material_history(run_id: str, name: str):
     d = RUNS / run_id
+    if not (d / "daily.parquet").exists():
+        raise HTTPException(404, "run not found")
     daily = pd.read_parquet(d / "daily.parquet")
-    g = daily[daily.material == name.upper()].sort_values("date")
-    g = g[["date", "qty_in", "qty_out", "balance"]]
-    return jsonable(g)
+    g = daily[daily.material == name.strip().upper()].sort_values("date")
+    return jsonable(g[["date", "qty_in", "qty_out", "balance"]])
 
 
 @app.get("/api/export/{run_id}")
 def export_csv(run_id: str):
     d = RUNS / run_id
-    f = pd.read_parquet(d / "forecast.parquet")
+    if not (d / "forecast.parquet").exists():
+        raise HTTPException(404, "run not found")
     out = d / "forecast.csv"
-    f.to_csv(out, index=False)
+    pd.read_parquet(d / "forecast.parquet").to_csv(out, index=False)
     return FileResponse(out, filename=f"forecast_{run_id}.csv")
 
 

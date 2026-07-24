@@ -34,6 +34,11 @@ def _flip(ts):
         return pd.NaT
 
 
+def count_parseable_dates(values):
+    """How many of these cells look like a date? Used to locate the date row."""
+    return sum(1 for v in values if pd.notna(_try_date(v)[0]))
+
+
 def repair_date_sequence(raw_values):
     """Column dates run left->right in time order. Excel silently swaps day and
     month whenever both are <= 12, so those cells are ambiguous.
@@ -77,64 +82,104 @@ def repair_date_sequence(raw_values):
 
 
 # ------------------------------------------------------- adapter A: site sheet
-def parse_site_register(path, sheet_map, skip_sheets=()):
-    """Wide layout: fixed item columns then repeating IN/OUT/BALANCE per date."""
-    frames, report = [], {"sheets": {}, "date_swaps": 0}
-    for sheet, service in sheet_map.items():
+def parse_site_register(path, sheet_map=None, skip_sheets=()):
+    """Wide layout: item columns, then IN/OUT/(BALANCE) repeating per date.
+
+    Column names differ from project to project, so every sheet is inspected by
+    schema.detect() rather than assumed. Sheets that are not registers (item
+    masters, blank tabs) are skipped and reported, never guessed at.
+    """
+    from . import schema
+
+    xl = pd.ExcelFile(path)
+    names = list(xl.sheet_names) if sheet_map is None else list(sheet_map)
+    frames = []
+    report = {"sheets": [], "skipped": [], "date_swaps": 0}
+
+    for sheet in names:
         if sheet in skip_sheets:
+            report["skipped"].append({"sheet": sheet, "why": "excluded by name"})
             continue
-        raw = pd.read_excel(path, sheet_name=sheet, header=None)
-        hdr_row = None
-        for r in range(min(15, len(raw))):
-            vals = [str(x).strip().upper() for x in raw.iloc[r].tolist()]
-            if "MATERIAL DESCRIPTION" in vals and "BALANCE" in vals:
-                hdr_row = r
-                break
-        if hdr_row is None:
+
+        raw = xl.parse(sheet, header=None)
+        if raw.empty:
+            report["skipped"].append({"sheet": sheet, "why": "empty sheet"})
             continue
-        hdr = raw.iloc[hdr_row]
-        date_row = raw.iloc[hdr_row - 1]
 
-        def find(name):
-            for c in range(raw.shape[1]):
-                if str(hdr[c]).strip().upper() == name:
-                    return c
-            return None
+        m = schema.detect(raw)
+        if m is None:
+            report["skipped"].append(
+                {"sheet": sheet, "why": "no material / in / out columns found"})
+            continue
 
-        c_mat, c_unit = find("MATERIAL DESCRIPTION"), find("UNIT")
-        c_open = find("OPENING STOCK")
-        blocks = [c for c in range(raw.shape[1])
-                  if str(hdr[c]).strip().upper() == "IN"]
-        dates, sw = repair_date_sequence([date_row[c] for c in blocks])
-        report["date_swaps"] += sw
+        dates, swaps = repair_date_sequence(
+            [raw.iloc[m["date_row"]][c] for c in m["in_cols"]])
+        report["date_swaps"] += swaps
 
-        body = raw.iloc[hdr_row + 1:]
-        rows = []
-        for _, r in body.iterrows():
-            mat = r[c_mat]
-            if pd.isna(mat) or not str(mat).strip():
+        body = raw.iloc[m["header_row"] + 1:].reset_index(drop=True)
+        mats = body.iloc[:, m["col_material"]]
+        keep = mats.notna() & (mats.astype(str).str.strip() != "")
+        body = body[keep]
+        if body.empty:
+            report["skipped"].append({"sheet": sheet, "why": "no data rows"})
+            continue
+
+        material = (body.iloc[:, m["col_material"]].astype(str)
+                    .str.replace(r"\s+", " ", regex=True).str.strip().str.upper())
+        unit = (body.iloc[:, m["col_unit"]].astype(str).str.strip().str.upper()
+                if m["col_unit"] is not None else pd.Series("", index=body.index))
+
+        # Service comes from the sheet's own Groups column when it has one;
+        # that is per-row truth and beats guessing from the tab name.
+        default_service = schema.clean_service(
+            (sheet_map or {}).get(sheet) or sheet, fallback="Other")
+        if m["col_group"] is not None:
+            grp = body.iloc[:, m["col_group"]]
+            service = grp.map(lambda v: schema.clean_service(v, default_service))
+        else:
+            service = pd.Series(default_service, index=body.index)
+
+        opening = (pd.to_numeric(body.iloc[:, m["col_opening"]], errors="coerce")
+                   if m["col_opening"] is not None
+                   else pd.Series(np.nan, index=body.index))
+
+        blocks = []
+        for c, d in zip(m["in_cols"], dates):
+            if pd.isna(d):
                 continue
-            mat = re.sub(r"\s+", " ", str(mat)).strip().upper()
-            unit = str(r[c_unit]).strip().upper() if c_unit is not None else ""
-            opening = pd.to_numeric(r[c_open], errors="coerce") if c_open is not None else np.nan
-            for c, d in zip(blocks, dates):
-                if pd.isna(d):
-                    continue
-                qi = pd.to_numeric(r[c], errors="coerce")
-                qo = pd.to_numeric(r[c + 1], errors="coerce")
-                bal = pd.to_numeric(r[c + 2], errors="coerce")
-                if pd.isna(qi) and pd.isna(qo) and pd.isna(bal):
-                    continue
-                rows.append((d, service, mat, unit,
-                             0 if pd.isna(qi) else float(qi),
-                             0 if pd.isna(qo) else float(qo),
-                             np.nan if pd.isna(bal) else float(bal),
-                             np.nan if pd.isna(opening) else float(opening)))
-        df = pd.DataFrame(rows, columns=CANON + ["opening"])
-        report["sheets"][sheet] = {"materials": df.material.nunique(),
-                                   "rows": len(df)}
+            qi = pd.to_numeric(body.iloc[:, c], errors="coerce")
+            qo = pd.to_numeric(body.iloc[:, c + m["out_offset"]], errors="coerce")
+            if m["bal_offset"] is not None and c + m["bal_offset"] < body.shape[1]:
+                bal = pd.to_numeric(body.iloc[:, c + m["bal_offset"]], errors="coerce")
+            else:
+                bal = pd.Series(np.nan, index=body.index)
+            live = qi.notna() | qo.notna() | bal.notna()
+            if not live.any():
+                continue
+            blocks.append(pd.DataFrame({
+                "date": d, "service": service[live], "material": material[live],
+                "unit": unit[live], "qty_in": qi[live].fillna(0.0),
+                "qty_out": qo[live].fillna(0.0), "balance": bal[live],
+                "opening": opening[live]}))
+
+        if not blocks:
+            report["skipped"].append({"sheet": sheet, "why": "no dated movement columns"})
+            continue
+
+        df = pd.concat(blocks, ignore_index=True)
+        good = [d for d in dates if pd.notna(d)]
+        report["sheets"].append({
+            "sheet": sheet, "materials": int(df.material.nunique()),
+            "rows": int(len(df)), "date_columns": len(good),
+            "date_from": str(min(good).date()), "date_to": str(max(good).date()),
+            "columns": m["names"],
+            "header_row": m["header_row"] + 1,
+            "has_balance": m["bal_offset"] is not None,
+        })
         frames.append(df)
-    out = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=CANON)
+
+    out = (pd.concat(frames, ignore_index=True) if frames
+           else pd.DataFrame(columns=CANON + ["opening"]))
     return out, report
 
 

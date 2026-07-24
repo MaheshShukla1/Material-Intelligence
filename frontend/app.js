@@ -1,262 +1,321 @@
-/* Material Intelligence — frontend
- * Talks to the FastAPI backend in backend/api.py. No build step, no deps.
- */
-(() => {
-  "use strict";
+const $ = (id) => document.getElementById(id);
+let RUN = null, META = null, SVC = "", LEAD = 7;
 
-  const $ = (id) => document.getElementById(id);
-  const el = {
-    pick: $("pick"), file: $("file"), dl: $("dl"), lead: $("lead"), ctx: $("ctx"),
-    drop: $("drop"), busy: $("busy"), report: $("report"),
-    health: $("health"), kpis: $("kpis"), svc: $("svc"),
-    q: $("q"), status: $("status"), rows: $("rows"), empty: $("empty"),
-    sheet: $("sheet"), sname: $("sname"), smeta: $("smeta"),
-    spark: $("spark"), srows: $("srows"),
-  };
+const num = (v, d = 0) =>
+  v === null || v === undefined ? "—"
+    : Number(v).toLocaleString("en-IN", { maximumFractionDigits: d });
 
-  let state = { runId: null, meta: null, service: "", rows: [] };
+const MON = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const short = (iso) => {
+  if (!iso) return "";
+  const [, m, d] = iso.split("-").map(Number);
+  return `${d} ${MON[m - 1]}`;
+};
+const todayISO = () => new Date().toISOString().slice(0, 10);
+const daysTo = (iso) =>
+  Math.round((new Date(iso + "T00:00:00") - new Date(todayISO() + "T00:00:00")) / 864e5);
+const esc = (s) => String(s).replace(/[&<>"]/g,
+  (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
-  // ---------------------------------------------------------------- utils
-  const asDate = (v) => (!v || v === "NaT") ? null : new Date(v + "T00:00:00");
-  const fmtShort = (v) => {
-    const d = asDate(v);
-    if (!d) return null;
-    return d.toLocaleDateString("en-GB", { day: "numeric", month: "short" });
-  };
-  const fmtNum = (n) => (n === null || n === undefined)
-    ? "—" : Number(n).toLocaleString("en-IN", { maximumFractionDigits: 1 });
-
-  function relativeLabel(target, from) {
-    const d = asDate(target);
-    if (!d) return null;
-    const days = Math.round((d - from) / 86400000);
-    if (days < 0) return `${-days} day${-days === 1 ? "" : "s"} late`;
-    if (days === 0) return "today";
-    if (days === 1) return "tomorrow";
-    return `in ${days} days`;
+/* One plain instruction per row. The reader should never have to do arithmetic
+   across five number columns to work out what to do. */
+function action(r) {
+  const s = r.status;
+  if (s === "STOCKED_OUT") return ["out", "Already out", "site is running dry"];
+  if (s === "INSUFFICIENT_DATA") return ["none", "Not enough data", "log daily issues first"];
+  if (s === "DEAD_STOCK") return ["none", "Never issued", "received but unused"];
+  if (s === "NO_RECENT_USE") return ["none", "No recent use", ""];
+  if (s === "OVERSTOCK") {
+    const y = r.days_left ? (r.days_left / 365).toFixed(1) : null;
+    return ["stop", "Stop ordering", y ? `${y} years of cover` : "very long cover"];
   }
+  if (!r.order_by) return ["ok", "No action", ""];
+  const d = daysTo(r.order_by);
+  if (d < 0) return ["late", "Order now", `${-d} day${d === -1 ? "" : "s"} late`];
+  if (d === 0) return ["late", "Order today", ""];
+  if (d === 1) return ["soon", `Order by ${short(r.order_by)}`, "tomorrow"];
+  return ["soon", `Order by ${short(r.order_by)}`, `in ${d} days`];
+}
 
-  // -------------------------------------------------- "what to do" mapping
-  // Turns a forecast row (status/confidence/dates) into one action pill +
-  // one short reason line, so the person doesn't have to cross-reference
-  // five separate numbers to know what to do next.
-  function actionFor(row, today) {
-    switch (row.status) {
-      case "STOCKED_OUT":
-        return { cls: "a-out", label: "Already out", sub: "site is dry" };
+function runsOut(r) {
+  if (r.days_left === null || r.days_left === undefined) return ["—", ""];
+  const d = Math.round(r.days_left);
+  const main = d <= 0 ? "now" : d === 1 ? "in 1 day" : `in ${d} days`;
+  let sub = "";
+  if (r.exhaust_earliest && r.exhaust_latest)
+    sub = r.exhaust_earliest === r.exhaust_latest
+      ? short(r.exhaust_earliest)
+      : `${short(r.exhaust_earliest)} – ${short(r.exhaust_latest)}`;
+  return [main, sub];
+}
 
-      case "RED": {
-        const sub = relativeLabel(row.order_by, today) || "today";
-        return { cls: "a-now", label: "Order now", sub };
-      }
+const DOTS = { HIGH: "●●●", MEDIUM: "●●○", LOW: "●○○", NONE: "○○○" };
 
-      case "AMBER": {
-        const date = fmtShort(row.order_by);
-        const sub = relativeLabel(row.order_by, today) || "";
-        return { cls: "a-soon", label: date ? `Order by ${date}` : "Order soon", sub };
-      }
+/* ------------------------------------------------------------------ upload */
+$("pick").onclick = () => $("file").click();
+$("file").onchange = (e) => {
+  if (e.target.files[0]) send(e.target.files[0]);
+  e.target.value = "";
+};
 
-      case "GREEN": {
-        const sub = row.days_left != null ? `${fmtNum(row.days_left)}d in stock` : "stocked";
-        return { cls: "a-ok", label: "On track", sub };
-      }
+const drop = $("drop");
+["dragenter", "dragover"].forEach((t) => drop.addEventListener(t, (e) => {
+  e.preventDefault(); drop.classList.add("over");
+}));
+["dragleave", "drop"].forEach((t) => drop.addEventListener(t, (e) => {
+  e.preventDefault(); drop.classList.remove("over");
+}));
+drop.addEventListener("drop", (e) => {
+  if (e.dataTransfer.files[0]) send(e.dataTransfer.files[0]);
+});
 
-      case "OVERSTOCK": {
-        let sub = "excess stock";
-        if (row.days_left != null) {
-          sub = row.days_left >= 365
-            ? `${(row.days_left / 365).toFixed(1)} years of cover`
-            : `${Math.round(row.days_left)} days of cover`;
-        }
-        return { cls: "a-stop", label: "Stop ordering", sub };
-      }
-
-      case "DEAD_STOCK":
-      case "NO_RECENT_USE": {
-        const sub = row.days_idle != null ? `idle ${row.days_idle}d` : "not moving";
-        return { cls: "a-watch", label: "Review stock", sub };
-      }
-
-      case "INSUFFICIENT_DATA":
-      default:
-        return { cls: "a-watch", label: "Watching", sub: "not enough data yet" };
-    }
+async function send(file) {
+  LEAD = Number($("lead").value) || 7;
+  drop.hidden = true; $("report").hidden = true; $("busy").hidden = false;
+  $("busytxt").textContent =
+    "Reading the file, detecting columns, repairing dates…";
+  const fd = new FormData();
+  fd.append("file", file);
+  fd.append("lead_time", LEAD);
+  fd.append("project", $("pname").value.trim());
+  try {
+    const r = await fetch("/api/upload", { method: "POST", body: fd });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.detail || "upload failed");
+    await show(j.run_id, j.meta, j.summary);
+    await loadProjects();
+  } catch (err) {
+    $("busy").hidden = true; drop.hidden = false;
+    alert(err.message);
   }
+}
 
-  // Runs-out is only meaningful for rows with a live burn-rate projection.
-  // Already-out, idle, and data-starved rows show a dash instead of a guess.
-  function runsOutFor(row) {
-    if (!["RED", "AMBER", "GREEN"].includes(row.status) || row.days_left == null) {
-      return { bold: "—", sub: "", dash: true };
-    }
-    const bold = `in ${Math.round(row.days_left)} day${Math.round(row.days_left) === 1 ? "" : "s"}`;
-    const lo = fmtShort(row.exhaust_earliest), hi = fmtShort(row.exhaust_latest);
-    const single = fmtShort(row.exhaust_date);
-    const sub = (lo && hi && lo !== hi) ? `${lo} – ${hi}` : (single || "");
-    return { bold, sub, dash: false };
+async function show(runId, meta, summary) {
+  RUN = runId; META = meta;
+  LEAD = meta.lead_time || LEAD;
+  $("lead").value = LEAD;
+  paintHeader(meta);
+  paintHealth(meta.issues);
+  paintMapping(meta.mapping, meta.source);
+  paintKpis(summary);
+  paintTabs(summary.services);
+  $("rule").textContent =
+    `Lead time ${LEAD} days plus a 2 day buffer, so an order must be raised ` +
+    `${LEAD + 2} days before stock hits zero.`;
+  $("dl").hidden = false; $("dl").href = `/api/export/${RUN}`;
+  $("del").hidden = false;
+  await load();
+  $("busy").hidden = true; $("drop").hidden = true; $("report").hidden = false;
+  syncHeaderOffset();
+}
+
+/* Sticky column headers must park under the app bar whatever its height is
+   on this screen, so measure rather than guess. */
+function syncHeaderOffset() {
+  document.documentElement.style.setProperty(
+    "--hdr", Math.round($("top").getBoundingClientRect().height) + "px");
+}
+addEventListener("resize", syncHeaderOffset);
+
+/* ---------------------------------------------------------------- projects */
+async function loadProjects() {
+  const ps = await (await fetch("/api/projects")).json();
+  const sel = $("proj");
+  sel.hidden = ps.length === 0;
+  sel.innerHTML = ps.map((p) =>
+    `<option value="${esc(p.latest_run)}" data-slug="${esc(p.slug)}"
+      ${p.latest_run === RUN ? "selected" : ""}>${esc(p.project)} · ${p.runs} run${
+      p.runs === 1 ? "" : "s"}</option>`).join("");
+}
+$("proj").onchange = async (e) => {
+  const id = e.target.value;
+  $("report").hidden = true; $("busy").hidden = false;
+  $("busytxt").textContent = "Loading project…";
+  const j = await (await fetch(`/api/run/${id}`)).json();
+  await show(id, j.meta, j.summary);
+};
+
+/* ------------------------------------------------------------------ delete */
+$("del").onclick = () => {
+  if (!META) return;
+  $("mtext").innerHTML =
+    `This removes every run and every uploaded file for <b>${esc(META.project)}</b>. ` +
+    "It cannot be undone. Type the project name to confirm.";
+  $("mconfirm").value = ""; $("merr").hidden = true;
+  $("modal").hidden = false; $("mconfirm").focus();
+};
+function closeModal() { $("modal").hidden = true; }
+$("modal").onclick = (e) => { if (e.target.id === "modal") closeModal(); };
+$("mgo").onclick = async () => {
+  const typed = $("mconfirm").value;
+  const r = await fetch(
+    `/api/project/${META.project_slug}?confirm=${encodeURIComponent(typed)}`,
+    { method: "DELETE" });
+  if (!r.ok) {
+    const j = await r.json().catch(() => ({}));
+    $("merr").textContent = j.detail || "delete failed";
+    $("merr").hidden = false;
+    return;
   }
+  closeModal();
+  RUN = null; META = null;
+  $("report").hidden = true; $("del").hidden = true; $("dl").hidden = true;
+  $("ctx").textContent = "No file loaded";
+  $("drop").hidden = false;
+  await loadProjects();
+};
 
-  const TRUST = { HIGH: 3, MEDIUM: 2, LOW: 1, NONE: 0 };
-  function trustDots(confidence) {
-    const n = TRUST[confidence] ?? 0;
-    return `<div class="trust" data-level="${confidence}">` +
-      [0, 1, 2].map(i => `<span class="dot ${i < n ? "on" : ""}"></span>`).join("") +
-      `</div>`;
+/* ------------------------------------------------------------------ render */
+function paintHeader(m) {
+  const s = m.stats;
+  const src = m.source === "projectbase" ? "ProjectBase export" : "site register";
+  $("ctx").textContent =
+    `${m.project} · ${m.filename} · ${src} · as of ${s.asof} · ${s.materials} materials`;
+}
+
+function paintHealth(issues) {
+  if (!issues || !issues.length) { $("health").innerHTML = ""; return; }
+  const block = issues.filter((i) => i.level === "block");
+  const warn = issues.filter((i) => i.level !== "block");
+  let h = "";
+  if (block.length)
+    h += `<div class="note block"><b>Forecast dates are hidden</b>${
+      block.map((i) => esc(i.text)).join(" ")}</div>`;
+  if (warn.length)
+    h += `<div class="note warn"><b>Data health</b><ul>${
+      warn.map((i) => `<li>${esc(i.text)}</li>`).join("")}</ul></div>`;
+  $("health").innerHTML = h;
+}
+
+/* Show exactly which column was read as what. If detection went wrong, this is
+   where it becomes visible - before anyone acts on a number. */
+function paintMapping(map, source) {
+  if (!map) { $("mapbox").hidden = true; return; }
+  $("mapbox").hidden = false;
+  const sheets = map.sheets || [], skipped = map.skipped || [];
+  if (source === "projectbase") {
+    $("mapsum").textContent = `${map.rows || 0} transaction rows`;
+    $("mapbody").innerHTML =
+      "<div class='maprow'>Read as a ProjectBase transaction export. " +
+      "Negative quantities are treated as site issues.</div>";
+    return;
   }
+  $("mapsum").textContent =
+    `${sheets.length} sheet${sheets.length === 1 ? "" : "s"} read` +
+    (skipped.length ? `, ${skipped.length} skipped` : "") +
+    (map.date_swaps ? `, ${map.date_swaps} dates repaired` : "");
+  const chip = (label, v) =>
+    v ? `<span class="chip">${esc(label)} → ${esc(v)}</span>` : "";
+  $("mapbody").innerHTML = sheets.map((s) => `
+    <div class="maprow">
+      <b>${esc(s.sheet)}</b> — ${s.materials} materials, ${s.date_columns} dates
+      (${s.date_from} → ${s.date_to}), header on row ${s.header_row}
+      <div class="mapcols">
+        ${chip("material", s.columns.material)}${chip("unit", s.columns.unit)}
+        ${chip("opening", s.columns.opening)}${chip("in", s.columns.qty_in)}
+        ${chip("out", s.columns.qty_out)}${chip("balance", s.columns.balance)}
+        ${chip("group", s.columns.group)}
+      </div>
+    </div>`).join("") +
+    (skipped.length
+      ? `<p class="mapskip">Skipped: ${skipped.map(
+          (s) => `${esc(s.sheet)} (${esc(s.why)})`).join(" · ")}</p>`
+      : "");
+}
 
-  // -------------------------------------------------------------- upload
-  el.pick.addEventListener("click", () => el.file.click());
-  el.file.addEventListener("change", () => el.file.files[0] && upload(el.file.files[0]));
+function paintKpis(s) {
+  const c = s.counts, g = (k) => c[k] || 0;
+  const cards = [
+    ["Act today", g("STOCKED_OUT") + g("RED"), "out of stock or inside lead time", true],
+    ["Already out", g("STOCKED_OUT"), "zero on hand, still consuming", g("STOCKED_OUT") > 0],
+    ["Order date passed", s.overdue_orders, "should already have been raised", s.overdue_orders > 0],
+    ["Order this week", g("AMBER"), "inside twice the lead time", false],
+    ["Stop ordering", s.idle_lines, "overstocked or never issued", false],
+    ["No action", g("GREEN"), "healthy cover", false],
+  ];
+  $("kpis").innerHTML = cards.map(([l, v, h, hot]) =>
+    `<div class="kpi${hot ? " hot" : ""}"><p class="l">${l}</p>
+     <p class="v">${num(v)}</p><p class="h">${h}</p></div>`).join("");
+}
 
-  ["dragover", "dragleave", "drop"].forEach(evt =>
-    el.drop.addEventListener(evt, (e) => {
-      e.preventDefault();
-      el.drop.classList.toggle("over", evt === "dragover");
-      if (evt === "drop" && e.dataTransfer.files[0]) upload(e.dataTransfer.files[0]);
-    }));
-  el.drop.addEventListener("dragenter", (e) => e.preventDefault());
+function paintTabs(services) {
+  if (!services.includes(SVC)) SVC = "";
+  const all = ["", ...services];
+  $("svc").innerHTML = all.map((s) =>
+    `<button class="tab${s === SVC ? " on" : ""}" data-s="${esc(s)}">${
+      esc(s || "All services")}</button>`).join("");
+  $("svc").querySelectorAll(".tab").forEach((b) => {
+    b.onclick = () => { SVC = b.dataset.s; paintTabs(services); load(); };
+  });
+}
 
-  async function upload(file) {
-    el.drop.hidden = true; el.report.hidden = true; el.busy.hidden = false;
-    const fd = new FormData();
-    fd.append("file", file);
-    fd.append("lead_time", el.lead.value || "7");
-    try {
-      const res = await fetch("/api/upload", { method: "POST", body: fd });
-      const body = await res.json();
-      if (!res.ok) throw new Error(body.detail || "upload failed");
-      state.runId = body.run_id;
-      state.meta = body.meta;
-      state.service = "";
-      el.ctx.textContent = `${body.meta.filename} · ${body.meta.stats.materials} materials`;
-      el.dl.href = `/api/export/${state.runId}`;
-      el.dl.hidden = false;
-      renderHealth(body.meta);
-      renderKpis(body.summary);
-      renderServiceTabs(body.summary.services);
-      await loadRows();
-      el.busy.hidden = true; el.report.hidden = false;
-    } catch (err) {
-      el.busy.hidden = true; el.drop.hidden = false;
-      alert(`Could not process this file: ${err.message}`);
-    } finally {
-      el.file.value = "";
-    }
-  }
+function debounce(fn, ms) {
+  let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
+}
+$("q").oninput = debounce(load, 250);
+$("status").onchange = load;
 
-  function renderHealth(meta) {
-    const blocks = meta.issues.filter(i => i.level === "block");
-    const warns = meta.issues.filter(i => i.level === "warn");
-    let html = "";
-    if (blocks.length) {
-      html += `<div class="note block"><b>Forecast on hold</b>${blocks.map(b => `<div>${b.text}</div>`).join("")}</div>`;
-    }
-    if (warns.length) {
-      html += `<div class="note warn"><b>Worth checking</b><ul>${warns.map(w => `<li>${w.text}</li>`).join("")}</ul></div>`;
-    }
-    el.health.innerHTML = html;
-  }
+async function load() {
+  if (!RUN) return;
+  const p = new URLSearchParams({
+    status: $("status").value, service: SVC, q: $("q").value,
+  });
+  paintRows(await (await fetch(`/api/forecast/${RUN}?${p}`)).json());
+}
 
-  function renderKpis(s) {
-    const cards = [
-      { l: "Materials tracked", v: s.materials, h: "" },
-      { l: "Act today", v: s.act_today, h: "stocked out or ordering now", hot: s.act_today > 0 },
-      { l: "Idle capital", v: s.idle_lines, h: "overstock / dead stock" },
-      { l: "Overdue orders", v: s.overdue_orders, h: "past their order-by date" },
-    ];
-    el.kpis.innerHTML = cards.map(c =>
-      `<div class="kpi${c.hot ? " hot" : ""}"><p class="l">${c.l}</p><p class="v">${fmtNum(c.v)}</p><p class="h">${c.h}</p></div>`
-    ).join("");
-  }
+function paintRows(rows) {
+  $("empty").hidden = rows.length > 0;
+  $("rows").innerHTML = rows.map((r) => {
+    const [cls, main, sub] = action(r);
+    const [ro, roSub] = runsOut(r);
+    return `<tr data-m="${esc(r.material)}">
+      <td><div class="mat">${esc(r.material)}</div>
+          <div class="sub">${esc(r.service || "")} · ${esc(r.unit || "")}</div></td>
+      <td><span class="act a-${cls}">${main}</span>
+          ${sub ? `<div class="sub">${sub}</div>` : ""}</td>
+      <td class="n"><div class="big">${num(r.stock)}</div>
+          <div class="sub">${num(r.rate_per_day, 1)} / day</div></td>
+      <td><div>${ro}</div><div class="sub">${roSub}</div></td>
+      <td><div class="dots">${DOTS[r.confidence] || "○○○"}</div>
+          <div class="sub">${r.consumption_days}d</div></td>
+    </tr>`;
+  }).join("");
+  $("rows").querySelectorAll("tr").forEach((tr) => {
+    tr.onclick = () => openSheet(tr.dataset.m);
+  });
+}
 
-  function renderServiceTabs(services) {
-    const tabs = ["All", ...services];
-    el.svc.innerHTML = tabs.map(t =>
-      `<button class="tab${(t === "All" && !state.service) ? " on" : ""}" data-svc="${t === "All" ? "" : t}">${t}</button>`
-    ).join("");
-    el.svc.querySelectorAll(".tab").forEach(btn =>
-      btn.addEventListener("click", () => {
-        state.service = btn.dataset.svc;
-        el.svc.querySelectorAll(".tab").forEach(b => b.classList.toggle("on", b === btn));
-        loadRows();
-      }));
-  }
+/* ------------------------------------------------------------------ drawer */
+async function openSheet(name) {
+  const rows = await (await fetch(
+    `/api/material/${RUN}?name=${encodeURIComponent(name)}`)).json();
+  $("sname").textContent = name;
+  const moved = rows.filter((r) => r.qty_in > 0 || r.qty_out > 0);
+  $("smeta").textContent =
+    `${moved.length} days with movement · ${rows.length} days on record`;
+  $("spark").innerHTML = sparkline(rows);
+  $("srows").innerHTML = moved.slice(-40).reverse().map((r) =>
+    `<tr><td>${r.date}</td><td class="n">${r.qty_in || ""}</td>
+     <td class="n">${r.qty_out || ""}</td><td class="n">${num(r.balance)}</td></tr>`
+  ).join("");
+  $("sheet").hidden = false;
+}
+function closeSheet() { $("sheet").hidden = true; }
+$("sheet").onclick = (e) => { if (e.target.id === "sheet") closeSheet(); };
+addEventListener("keydown", (e) => {
+  if (e.key === "Escape") { closeSheet(); closeModal(); }
+});
 
-  // ------------------------------------------------------------- table
-  el.q.addEventListener("input", debounce(loadRows, 250));
-  el.status.addEventListener("change", loadRows);
+function sparkline(rows) {
+  const pts = rows.filter((r) => r.balance !== null);
+  if (pts.length < 2) return "";
+  const W = 500, H = 92, max = Math.max(...pts.map((p) => p.balance), 1);
+  const d = pts.map((p, i) =>
+    `${(i / (pts.length - 1)) * W},${H - (p.balance / max) * (H - 8) - 4}`).join(" ");
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}">
+    <polyline points="${d}" fill="none" stroke="#1c1c1b" stroke-width="1.5"/>
+    <line x1="0" y1="${H - 4}" x2="${W}" y2="${H - 4}" stroke="#e7e5df"/>
+  </svg><p class="sub">Balance over time · peak ${num(max)}</p>`;
+}
 
-  function debounce(fn, ms) {
-    let t;
-    return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
-  }
-
-  async function loadRows() {
-    if (!state.runId) return;
-    const p = new URLSearchParams({
-      status: el.status.value, service: state.service, q: el.q.value, limit: "1000",
-    });
-    const res = await fetch(`/api/forecast/${state.runId}?${p}`);
-    state.rows = await res.json();
-    renderRows();
-  }
-
-  function renderRows() {
-    const today = asDate(state.meta.stats.asof) || new Date();
-    if (!state.rows.length) {
-      el.rows.innerHTML = ""; el.empty.hidden = false; return;
-    }
-    el.empty.hidden = true;
-    el.rows.innerHTML = state.rows.map(r => {
-      const act = actionFor(r, today);
-      const run = runsOutFor(r);
-      return `
-      <tr data-mat="${r.material}">
-        <td>
-          <div class="mat">${title(r.material)}</div>
-          <div class="sub">${r.service || "—"} · ${r.unit || ""}</div>
-        </td>
-        <td>
-          <div class="act">
-            <span class="pill ${act.cls}">${act.label}</span>
-            <span class="sub">${act.sub}</span>
-          </div>
-        </td>
-        <td class="n">${fmtNum(r.stock)}</td>
-        <td class="n">${fmtNum(r.rate_per_day)}/day</td>
-        <td>
-          <div class="${run.dash ? "runs dash" : "runs"}">${run.bold}</div>
-          ${run.sub ? `<div class="sub">${run.sub}</div>` : ""}
-        </td>
-        <td>${trustDots(r.confidence)}</td>
-      </tr>`;
-    }).join("");
-
-    el.rows.querySelectorAll("tr").forEach(tr =>
-      tr.addEventListener("click", () => openSheet(tr.dataset.mat)));
-  }
-
-  function title(s) {
-    return s.replace(/\w\S*/g, t => t[0] + t.slice(1).toLowerCase());
-  }
-
-  // ------------------------------------------------------------- drawer
-  async function openSheet(material) {
-    el.sheet.hidden = false;
-    el.sname.textContent = title(material);
-    el.smeta.textContent = "Loading history…";
-    el.spark.innerHTML = ""; el.srows.innerHTML = "";
-    const res = await fetch(`/api/material/${state.runId}?name=${encodeURIComponent(material)}`);
-    const hist = await res.json();
-    el.smeta.textContent = `${hist.length} day${hist.length === 1 ? "" : "s"} of recorded movement`;
-    el.srows.innerHTML = hist.slice().reverse().map(h => `
-      <tr>
-        <td>${fmtShort(h.date) || h.date}</td>
-        <td class="n">${fmtNum(h.qty_in)}</td>
-        <td class="n">${fmtNum(h.qty_out)}</td>
-        <td class="n">${h.balance == null ? "—" : fmtNum(h.balance)}</td>
-      </tr>`).join("");
-  }
-  window.closeSheet = () => { el.sheet.hidden = true; };
-  el.sheet.addEventListener("click", (e) => { if (e.target === el.sheet) closeSheet(); });
-})();
+loadProjects();

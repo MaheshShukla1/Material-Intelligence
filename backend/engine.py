@@ -8,6 +8,8 @@ import datetime as dt
 import numpy as np
 import pandas as pd
 
+from . import rate as rate_mod
+
 CANON = ["date", "service", "material", "unit", "qty_in", "qty_out", "balance"]
 
 
@@ -233,17 +235,29 @@ def forecast(daily, asof=None, window=14, lead_time=7, buffer=2):
         n_days = int(cons.date.nunique())
         last_out = cons.date.max() if n_days else pd.NaT
 
-        recent = cons[cons.date > asof - pd.Timedelta(days=window)]
-        if len(recent):
-            rate = float(recent.qty_out.sum()) / window
-            basis, basis_days = f"last {window}d", int(recent.date.nunique())
-        elif n_days:
-            span = max((asof - cons.date.min()).days, 1)
-            rate, basis, basis_days = total_out / span, "project-to-date", n_days
-        else:
-            rate, basis, basis_days = 0.0, "no consumption", 0
+        rate, basis, basis_days, trend = rate_mod.estimate_rate(g, asof, window)
 
         idle = (asof - last_out).days if pd.notna(last_out) else None
+
+        if basis_days >= 8:
+            conf, band = "HIGH", 0.15
+        elif basis_days >= 4:
+            conf, band = "MEDIUM", 0.35
+        elif basis_days >= 1:
+            conf, band = "LOW", 0.60
+        else:
+            conf, band = "NONE", np.nan
+
+        # Widen the band for spiky consumption: a material issued 5, then 500,
+        # then 5 is less predictable than one issued 50 every day, even with the
+        # same day count. Only applied when we have a real rate.
+        if conf != "NONE" and rate > 0:
+            cv = float(cons.qty_out.std() / cons.qty_out.mean()) if n_days >= 2 else 0.0
+            if cv > 1.5:
+                band = min(band * 1.6, 0.85)
+            elif cv > 1.0:
+                band = min(band * 1.3, 0.85)
+
 
         # status: exhausted first, then rate-based
         if stock <= 0 and rate > 0:
@@ -254,7 +268,19 @@ def forecast(daily, asof=None, window=14, lead_time=7, buffer=2):
         else:
             days_left = stock / rate
             reorder = lead_time + buffer
-            if days_left <= reorder:
+            # optimistic days_left: if consumption is uncertain (wide band) or
+            # slowing, give the material the benefit of the doubt before RED.
+            band_mult = 1.0 + (band if isinstance(band, float) and not np.isnan(band) else 0.0)
+            if trend == "decelerating":
+                band_mult = max(band_mult, 1.25)
+            days_left_opt = days_left * band_mult
+            # Thin evidence (1-2 issue days) should not raise a hard RED on its
+            # own; the rate is one spike away from noise. Hold at AMBER unless
+            # stock is already critically low in absolute terms.
+            thin = basis_days <= 2
+            # RED only if even the optimistic estimate lands near the reorder
+            # point. Otherwise the risk is real but not yet urgent -> AMBER.
+            if days_left_opt <= reorder and not (thin and days_left > reorder * 0.5):
                 status = "RED"
             elif days_left <= reorder * 2:
                 status = "AMBER"
@@ -262,15 +288,6 @@ def forecast(daily, asof=None, window=14, lead_time=7, buffer=2):
                 status = "OVERSTOCK"
             else:
                 status = "GREEN"
-
-        if basis_days >= 8:
-            conf, band = "HIGH", 0.15
-        elif basis_days >= 4:
-            conf, band = "MEDIUM", 0.35
-        elif basis_days >= 1:
-            conf, band = "LOW", 0.60
-        else:
-            conf, band = "NONE", np.nan
 
         if np.isnan(days_left) or conf == "NONE":
             edate = elo = ehi = pd.NaT
@@ -288,6 +305,7 @@ def forecast(daily, asof=None, window=14, lead_time=7, buffer=2):
             days_left=(None if np.isnan(days_left) else round(days_left, 1)),
             status=status, confidence=conf, basis=basis,
             consumption_days=basis_days, total_consumed=round(total_out, 2),
+            trend=trend,
             days_idle=idle,
             exhaust_date=edate, exhaust_earliest=elo, exhaust_latest=ehi,
             order_by=order_by))

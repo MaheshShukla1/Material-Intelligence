@@ -232,7 +232,7 @@ function paintKpis(s) {
     ["Already out", g("STOCKED_OUT"), "zero on hand, still consuming", g("STOCKED_OUT") > 0],
     ["Order date passed", s.overdue_orders, "should already have been raised", s.overdue_orders > 0],
     ["Order this week", g("AMBER"), "inside twice the lead time", false],
-    ["Stop ordering", s.idle_lines, "overstocked or never issued", false],
+    ["Stop ordering", s.idle_lines, "overstocked, unused, or paused", false],
     ["No action", g("GREEN"), "healthy cover", false],
   ];
   $("kpis").innerHTML = cards.map(([l, v, h, hot]) =>

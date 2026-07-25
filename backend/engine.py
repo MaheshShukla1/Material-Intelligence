@@ -289,7 +289,17 @@ def forecast(daily, asof=None, window=14, lead_time=7, buffer=2):
             else:
                 status = "GREEN"
 
-        if np.isnan(days_left) or conf == "NONE":
+            # Stale-rate guard. If this material has not moved for longer than
+            # the forecast claims it has left, the activity that consumed it has
+            # paused - the rate is a memory of past work, not current reality.
+            # A material idle 12 days cannot be "2 days from empty". Surface it
+            # as paused so the team sees work stopped, not a false shortage.
+            if (status in ("RED", "AMBER") and idle is not None
+                    and idle >= reorder and idle > days_left):
+                status = "NO_RECENT_USE"
+                days_left = np.nan
+
+        if np.isnan(days_left) or conf == "NONE" or status == "NO_RECENT_USE":
             edate = elo = ehi = pd.NaT
         else:
             edate = asof + pd.Timedelta(days=float(days_left))

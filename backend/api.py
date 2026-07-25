@@ -106,7 +106,7 @@ def summarise(f):
         "counts": {k: int(v) for k, v in counts.items()},
         "materials": int(len(f)),
         "act_today": int(f.status.isin(["STOCKED_OUT", "RED"]).sum()),
-        "idle_lines": int(f.status.isin(["OVERSTOCK", "DEAD_STOCK"]).sum()),
+        "idle_lines": int(f.status.isin(["OVERSTOCK", "DEAD_STOCK", "NO_RECENT_USE"]).sum()),
         "services": sorted(f.service.dropna().unique().tolist()),
         "overdue_orders": int((f.order_by.notna() &
                                (f.order_by < pd.Timestamp.now())).sum()),

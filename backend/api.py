@@ -12,7 +12,7 @@ from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import engine, health, schema
+from . import engine, health, schema, subcat
 
 ROOT = Path(__file__).resolve().parent.parent
 UPLOADS = ROOT / "data" / "uploads"
@@ -157,6 +157,7 @@ async def upload(file: UploadFile = File(...),
     issues, stats = health.check(mv, daily, asof_ts)
     f = engine.forecast(daily[daily.date <= asof_ts],
                         asof=asof_ts, lead_time=lead_time)
+    f = subcat.add_subcategory(f)
     if not stats["forecast_ready"]:
         f = health.suppress(f)
 
@@ -233,15 +234,35 @@ def delete_project(slug: str, confirm: str = ""):
 
 @app.get("/api/forecast/{run_id}")
 def forecast_rows(run_id: str, status: str = "", service: str = "",
-                  q: str = "", limit: int = 1000):
+                  subcategory: str = "", q: str = "", limit: int = 1000):
     f, _ = load_run(run_id)
+    if "subcategory" not in f.columns:            # older runs, tag on the fly
+        f = subcat.add_subcategory(f)
     if status:
         f = f[f.status.isin(status.split(","))]
     if service:
         f = f[f.service == service]
+    if subcategory:
+        f = f[f.subcategory == subcategory]
     if q:
         f = f[f.material.str.contains(q.strip().upper(), regex=False)]
     return jsonable(f.head(limit))
+
+
+@app.get("/api/subcategories/{run_id}")
+def subcategories(run_id: str):
+    """Which sub-categories exist in this run, grouped by service, with counts.
+    Drives the type dropdown: a service shows only the types actually present."""
+    f, _ = load_run(run_id)
+    if "subcategory" not in f.columns:
+        f = subcat.add_subcategory(f)
+    by_service = {}
+    for svc, g in f.groupby("service"):
+        counts = g.subcategory.value_counts()
+        by_service[svc] = [{"name": k, "count": int(v)} for k, v in counts.items()]
+    allc = f.subcategory.value_counts()
+    return {"by_service": by_service,
+            "all": [{"name": k, "count": int(v)} for k, v in allc.items()]}
 
 
 @app.get("/api/material/{run_id}")

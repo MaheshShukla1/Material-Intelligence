@@ -1,5 +1,5 @@
 const $ = (id) => document.getElementById(id);
-let RUN = null, META = null, SVC = "", LEAD = 7;
+let RUN = null, META = null, SVC = "", TYPE = "", LEAD = 7, SUBCATS = null;
 
 const num = (v, d = 0) =>
   v === null || v === undefined ? "—"
@@ -91,14 +91,16 @@ async function send(file) {
 }
 
 async function show(runId, meta, summary) {
-  RUN = runId; META = meta;
+  RUN = runId; META = meta; TYPE = "";
   LEAD = meta.lead_time || LEAD;
   $("lead").value = LEAD;
   paintHeader(meta);
   paintHealth(meta.issues);
   paintMapping(meta.mapping, meta.source);
   paintKpis(summary);
+  SUBCATS = await (await fetch(`/api/subcategories/${runId}`)).json();
   paintTabs(summary.services);
+  paintTypes();
   $("rule").textContent =
     `Lead time ${LEAD} days plus a 2 day buffer, so an order must be raised ` +
     `${LEAD + 2} days before stock hits zero.`;
@@ -245,9 +247,60 @@ function paintTabs(services) {
     `<button class="tab${s === SVC ? " on" : ""}" data-s="${esc(s)}">${
       esc(s || "All services")}</button>`).join("");
   $("svc").querySelectorAll(".tab").forEach((b) => {
-    b.onclick = () => { SVC = b.dataset.s; paintTabs(services); load(); };
+    b.onclick = () => {
+      SVC = b.dataset.s;
+      TYPE = "";                       // switching service clears the type
+      paintTabs(services);
+      paintTypes();
+      load();
+    };
   });
 }
+
+/* The type dropdown is service-scoped. On a chosen service it lists only the
+   types present in that service. On "All services" it is hidden - until the
+   user explicitly opens it via "All types", which shows every type across MEP.
+   Choosing "All types" also drops back to All services, since at that point the
+   user is no longer looking at one trade. */
+function typesForCurrentScope() {
+  if (!SUBCATS) return [];
+  if (SVC) return (SUBCATS.by_service[SVC] || []);
+  return SUBCATS.all;
+}
+
+function paintTypes() {
+  const sel = $("type");
+  const list = typesForCurrentScope();
+  // Always visible so the filter is discoverable. On "All services" it lists
+  // every MEP type; on a chosen service, only that service's types.
+  sel.hidden = false;
+  const opts = [`<option value="">All types</option>`].concat(
+    list.map((t) =>
+      `<option value="${esc(t.name)}" ${t.name === TYPE ? "selected" : ""}>${
+        esc(t.name)} (${t.count})</option>`));
+  sel.innerHTML = opts.join("");
+}
+
+$("type").onchange = (e) => {
+  const v = e.target.value;
+  if (v === "") {
+    // "All types" = leave the single-service view entirely: reset to All
+    // services and show every type across MEP, no type filter applied. The
+    // dropdown stays visible so a type from any trade can then be picked.
+    SVC = ""; TYPE = "";
+    $("svc").querySelectorAll(".tab").forEach((b) =>
+      b.classList.toggle("on", b.dataset.s === ""));
+    const sel = $("type");
+    sel.hidden = false;
+    sel.innerHTML = [`<option value="">All types</option>`].concat(
+      (SUBCATS ? SUBCATS.all : []).map((t) =>
+        `<option value="${esc(t.name)}">${esc(t.name)} (${t.count})</option>`)
+    ).join("");
+  } else {
+    TYPE = v;
+  }
+  load();
+};
 
 function debounce(fn, ms) {
   let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
@@ -258,7 +311,8 @@ $("status").onchange = load;
 async function load() {
   if (!RUN) return;
   const p = new URLSearchParams({
-    status: $("status").value, service: SVC, q: $("q").value,
+    status: $("status").value, service: SVC,
+    subcategory: TYPE, q: $("q").value,
   });
   paintRows(await (await fetch(`/api/forecast/${RUN}?${p}`)).json());
 }

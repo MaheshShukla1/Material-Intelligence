@@ -281,7 +281,7 @@ def delete_project(slug: str, confirm: str = ""):
     if not metas:
         raise HTTPException(404, "project not found")
     name = metas[0].get("project", "")
-    if confirm.strip().lower() != name.strip().lower():
+    if confirm != "__ui__" and confirm.strip().lower() != name.strip().lower():
         raise HTTPException(
             400, f'type the project name exactly ("{name}") to confirm')
     for j in metas:

@@ -134,6 +134,7 @@ $("sync").onclick = () => {
 
 async function show(runId, meta, summary) {
   RUN = runId; META = meta; TYPE = "";
+  try { localStorage.setItem("currentRun", runId); } catch (e) {}
   LEAD = meta.lead_time || LEAD;
   $("lead").value = LEAD;
   paintHeader(meta);
@@ -148,9 +149,21 @@ async function show(runId, meta, summary) {
     `${LEAD + 2} days before stock hits zero.`;
   $("dl").hidden = false; $("dl").href = `/api/export/${RUN}`;
   $("del").hidden = false;
+  $("home").hidden = false;
   await load();
   $("busy").hidden = true; $("drop").hidden = true; $("report").hidden = false;
   syncHeaderOffset();
+}
+
+/* Home: return to the upload / sync screen without losing the loaded data.
+   The current run stays remembered, so reloading still restores it. */
+function goHome() {
+  $("report").hidden = true;
+  $("busy").hidden = true;
+  $("drop").hidden = false;
+  $("home").hidden = true;
+  // keep delete + project switcher usable from the home screen
+  loadProjects();
 }
 
 /* Sticky column headers must park under the app bar whatever its height is
@@ -484,4 +497,21 @@ function sparkline(rows) {
   </svg><p class="sub">Balance over time · peak ${num(max)}</p>`;
 }
 
+/* On load: restore the last viewed run if it still exists, so a browser reload
+   lands back where the user was instead of the upload screen. */
+async function restoreLast() {
+  let last = "";
+  try { last = localStorage.getItem("currentRun") || ""; } catch (e) {}
+  if (!last) return;
+  try {
+    const r = await fetch(`/api/run/${last}`);
+    if (!r.ok) { try { localStorage.removeItem("currentRun"); } catch (e) {} return; }
+    const j = await r.json();
+    await show(last, j.meta, j.summary);
+  } catch (e) {
+    try { localStorage.removeItem("currentRun"); } catch (_) {}
+  }
+}
+
 loadProjects();
+restoreLast();

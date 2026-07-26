@@ -128,6 +128,17 @@ async def upload(file: UploadFile = File(...),
         shutil.copyfileobj(file.file, fh)
 
     project = (project or "").strip() or project_from_filename(file.filename)
+    return _process_file(raw, run_id, project, file.filename,
+                         lead_time, asof, source_link=None)
+
+
+def _process_file(raw, run_id, project, filename, lead_time, asof, source_link):
+    """Parse a saved Excel file, build the forecast, and persist the run.
+
+    Shared by manual upload and Google-Sheet sync so both go through exactly
+    the same parsing, date-repair, forecast and gate logic - a synced run is
+    never treated differently from an uploaded one.
+    """
     kind = detect(raw)
     try:
         if kind == "projectbase":
@@ -166,12 +177,61 @@ async def upload(file: UploadFile = File(...),
     f.to_parquet(d / "forecast.parquet")
     daily.to_parquet(d / "daily.parquet")
     meta = {"run_id": run_id, "project": project, "project_slug": safe_slug(project),
-            "filename": file.filename, "source": kind,
+            "filename": filename, "source": kind,
             "lead_time": lead_time, "mapping": rep,
             "created": dt.datetime.now().isoformat(timespec="seconds"),
             "stats": stats, "issues": issues}
+    if source_link:
+        meta["source_link"] = source_link
     (d / "meta.json").write_text(json.dumps(meta, indent=2))
     return {"run_id": run_id, "meta": meta, "summary": summarise(f)}
+
+
+def _fetch_sheet_xlsx(link, dest):
+    """Download a published Google Sheet (or any direct xlsx URL) to `dest`.
+
+    Google 'Publish to web' links redirect to a googleusercontent host and need
+    a browser-like User-Agent, so we follow redirects and set one. The result
+    must actually be an xlsx (zip), not an HTML error page - we check the magic
+    bytes so a bad link fails loudly here instead of deep in the parser.
+    """
+    import urllib.request
+
+    req = urllib.request.Request(link, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = resp.read()
+    except Exception as e:
+        raise HTTPException(400, f"could not reach the sheet link: {e}")
+    # xlsx files are zip archives and start with 'PK'. HTML error pages don't.
+    if data[:2] != b"PK":
+        raise HTTPException(
+            400, "the link did not return an Excel file. Make sure the sheet is "
+                 "Published to web as Microsoft Excel (.xlsx) and the link ends "
+                 "in output=xlsx.")
+    with open(dest, "wb") as fh:
+        fh.write(data)
+
+
+@app.post("/api/sync-sheet")
+def sync_sheet(link: str = Form(...),
+               lead_time: int = Form(7),
+               project: str = Form(""),
+               asof: str = Form("")):
+    """Pull the latest data straight from a published Google Sheet and build a
+    run from it - no manual download or upload. Same parser, same forecast."""
+    link = link.strip()
+    if not link.startswith("http"):
+        raise HTTPException(400, "enter a valid https link to the published sheet")
+
+    run_id = dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4]
+    fname = "google-sheet.xlsx"
+    raw = UPLOADS / f"{run_id}__{fname}"
+    _fetch_sheet_xlsx(link, raw)
+
+    project = (project or "").strip() or "Live Sheet"
+    return _process_file(raw, run_id, project, fname,
+                         lead_time, asof, source_link=link)
 
 
 @app.get("/api/projects")

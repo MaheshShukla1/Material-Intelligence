@@ -23,6 +23,7 @@
       <input id="lead" class="ctl" type="number" value="7" min="1" max="90"> days
     </label>
     <button id="pick" class="btn primary">Upload</button>
+    <button id="sync" class="btn">Sync sheet</button>
     <a id="dl" class="btn" hidden>Export</a>
     <button id="del" class="btn danger" hidden>Delete</button>
     <input id="file" type="file" accept=".xlsx,.xlsm,.xls" hidden>
@@ -40,6 +41,15 @@
     <input id="pname" class="ctl" type="text" placeholder="Project name (optional)">
     <button class="btn primary" onclick="document.getElementById('file').click()">Choose file</button>
   </div>
+  <div class="dropor">or connect a live Google Sheet</div>
+  <div class="dropform">
+    <input id="sheetlink" class="ctl wide" type="text"
+           placeholder="Paste the published Google Sheet link (output=xlsx)">
+    <button class="btn" id="syncgo">Sync now</button>
+  </div>
+  <p class="dshint">In Google Sheets: File → Share → Publish to web → whole
+     document → Microsoft Excel (.xlsx). Paste that link here. Re-sync anytime
+     to pull the latest.</p>
 </section>
 
 <section id="busy" class="busy" hidden>
@@ -116,14 +126,24 @@
 </div>
 
 <div id="modal" class="sheet mid" hidden>
-  <div class="card">
-    <h2>Delete this project</h2>
-    <p id="mtext"></p>
-    <input id="mconfirm" class="ctl" type="text" placeholder="Type the project name">
+  <div class="card wide">
+    <div class="mhd">
+      <h2>Manage uploads</h2>
+      <button class="btn" onclick="closeModal()">Close</button>
+    </div>
+    <p class="msub">Delete a single upload, or a whole project and all its uploads. This cannot be undone.</p>
+    <div id="mlist" class="mlist"></div>
     <p id="merr" class="merr" hidden></p>
+  </div>
+</div>
+
+<div id="confirm" class="sheet mid" hidden>
+  <div class="card">
+    <h2 id="ctitle">Delete?</h2>
+    <p id="ctext"></p>
     <div class="mact">
-      <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn danger" id="mgo">Delete permanently</button>
+      <button class="btn" onclick="closeConfirm()">Cancel</button>
+      <button class="btn danger" id="cgo">Delete permanently</button>
     </div>
   </div>
 </div>

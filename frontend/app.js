@@ -90,6 +90,48 @@ async function send(file) {
   }
 }
 
+/* Pull the latest data straight from a published Google Sheet. Same backend
+   processing as an upload - only the source differs. The link is remembered so
+   the top-bar "Sync sheet" button can re-pull with one click. */
+async function syncFromSheet(link, project) {
+  link = (link || "").trim();
+  if (!link) { alert("Paste the published Google Sheet link first."); return; }
+  LEAD = Number($("lead").value) || 7;
+  drop.hidden = true; $("report").hidden = true; $("busy").hidden = false;
+  $("busytxt").textContent = "Fetching the latest data from your Google Sheet…";
+  const fd = new FormData();
+  fd.append("link", link);
+  fd.append("lead_time", LEAD);
+  fd.append("project", (project || "").trim());
+  try {
+    const r = await fetch("/api/sync-sheet", { method: "POST", body: fd });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.detail || "sync failed");
+    try { localStorage.setItem("sheetLink", link); } catch (e) {}
+    await show(j.run_id, j.meta, j.summary);
+    await loadProjects();
+  } catch (err) {
+    $("busy").hidden = true; drop.hidden = false;
+    alert(err.message);
+  }
+}
+
+$("syncgo").onclick = () =>
+  syncFromSheet($("sheetlink").value, $("pname").value);
+
+/* Top-bar button re-syncs from whichever sheet was last connected. */
+$("sync").onclick = () => {
+  let saved = "";
+  try { saved = localStorage.getItem("sheetLink") || ""; } catch (e) {}
+  const link = (META && META.source_link) || saved;
+  if (!link) {
+    alert("No Google Sheet connected yet. Paste a link in the sync box below first.");
+    drop.hidden = false; $("report").hidden = true;
+    return;
+  }
+  syncFromSheet(link, META ? META.project : "");
+};
+
 async function show(runId, meta, summary) {
   RUN = runId; META = meta; TYPE = "";
   LEAD = meta.lead_time || LEAD;
@@ -124,6 +166,7 @@ async function loadProjects() {
   const ps = await (await fetch("/api/projects")).json();
   const sel = $("proj");
   sel.hidden = ps.length === 0;
+  $("del").hidden = ps.length === 0;   // manage-uploads available whenever data exists
   sel.innerHTML = ps.map((p) =>
     `<option value="${esc(p.latest_run)}" data-slug="${esc(p.slug)}"
       ${p.latest_run === RUN ? "selected" : ""}>${esc(p.project)} · ${p.runs} run${
@@ -138,33 +181,102 @@ $("proj").onchange = async (e) => {
 };
 
 /* ------------------------------------------------------------------ delete */
-$("del").onclick = () => {
-  if (!META) return;
-  $("mtext").innerHTML =
-    `This removes every run and every uploaded file for <b>${esc(META.project)}</b>. ` +
-    "It cannot be undone. Type the project name to confirm.";
-  $("mconfirm").value = ""; $("merr").hidden = true;
-  $("modal").hidden = false; $("mconfirm").focus();
-};
+/* The delete button opens a manager listing every project and every upload
+   under it. Each row has its own delete control, so removing one upload or a
+   whole project is a click - no typing a name to confirm. A small confirm
+   dialog still guards the actual deletion, since it cannot be undone. */
+$("del").onclick = () => openManager();
+
+async function openManager() {
+  $("merr").hidden = true;
+  $("modal").hidden = false;
+  $("mlist").innerHTML = "<p class='mempty'>Loading…</p>";
+  const [projects, runs] = await Promise.all([
+    (await fetch("/api/projects")).json(),
+    (await fetch("/api/runs")).json(),
+  ]);
+  if (!projects.length) {
+    $("mlist").innerHTML = "<p class='mempty'>Nothing uploaded yet.</p>";
+    return;
+  }
+  const runsByProject = {};
+  runs.forEach((r) => {
+    (runsByProject[r.project_slug] = runsByProject[r.project_slug] || []).push(r);
+  });
+  $("mlist").innerHTML = projects.map((p) => {
+    const rs = runsByProject[p.slug] || [];
+    const rows = rs.map((r) => {
+      const when = (r.created || "").replace("T", " ").slice(0, 16);
+      const mats = r.stats && r.stats.materials ? `${r.stats.materials} materials` : "";
+      return `<div class="mrun">
+        <div class="mrun-info">
+          <span class="mrun-file">${esc(r.filename || r.run_id)}</span>
+          <span class="mrun-meta">${esc(when)}${mats ? " · " + mats : ""}</span>
+        </div>
+        <button class="btn danger sm" data-run="${esc(r.run_id)}">Delete</button>
+      </div>`;
+    }).join("");
+    return `<div class="mproj">
+      <div class="mproj-hd">
+        <div>
+          <span class="mproj-name">${esc(p.project)}</span>
+          <span class="mproj-count">${rs.length} upload${rs.length === 1 ? "" : "s"}</span>
+        </div>
+        <button class="btn danger sm" data-project="${esc(p.slug)}" data-name="${esc(p.project)}">Delete project</button>
+      </div>
+      ${rows}
+    </div>`;
+  }).join("");
+
+  $("mlist").querySelectorAll("[data-run]").forEach((b) => {
+    b.onclick = () => askConfirm("run", b.dataset.run,
+      "Delete this upload?",
+      "This removes one uploaded file and its forecast. It cannot be undone.");
+  });
+  $("mlist").querySelectorAll("[data-project]").forEach((b) => {
+    b.onclick = () => askConfirm("project", b.dataset.project,
+      `Delete "${b.dataset.name}"?`,
+      "This removes the whole project and every upload under it. It cannot be undone.");
+  });
+}
+
 function closeModal() { $("modal").hidden = true; }
 $("modal").onclick = (e) => { if (e.target.id === "modal") closeModal(); };
-$("mgo").onclick = async () => {
-  const typed = $("mconfirm").value;
-  const r = await fetch(
-    `/api/project/${META.project_slug}?confirm=${encodeURIComponent(typed)}`,
-    { method: "DELETE" });
+
+let PENDING = null;
+function askConfirm(kind, id, title, text) {
+  PENDING = { kind, id };
+  $("ctitle").textContent = title;
+  $("ctext").textContent = text;
+  $("confirm").hidden = false;
+}
+function closeConfirm() { $("confirm").hidden = true; PENDING = null; }
+$("confirm").onclick = (e) => { if (e.target.id === "confirm") closeConfirm(); };
+
+$("cgo").onclick = async () => {
+  if (!PENDING) return;
+  const url = PENDING.kind === "run"
+    ? `/api/run/${PENDING.id}`
+    : `/api/project/${PENDING.id}?confirm=__ui__`;
+  const r = await fetch(url, { method: "DELETE" });
   if (!r.ok) {
     const j = await r.json().catch(() => ({}));
     $("merr").textContent = j.detail || "delete failed";
     $("merr").hidden = false;
+    closeConfirm();
     return;
   }
-  closeModal();
-  RUN = null; META = null;
-  $("report").hidden = true; $("del").hidden = true; $("dl").hidden = true;
-  $("ctx").textContent = "No file loaded";
-  $("drop").hidden = false;
-  await loadProjects();
+  const deletedCurrent = (PENDING.kind === "run" && PENDING.id === RUN) ||
+    (PENDING.kind === "project" && META && PENDING.id === META.project_slug);
+  closeConfirm();
+  await openManager();          // refresh the list in place
+  await loadProjects();         // refresh the header switcher
+  if (deletedCurrent) {
+    RUN = null; META = null;
+    $("report").hidden = true; $("del").hidden = true; $("dl").hidden = true;
+    $("ctx").textContent = "No file loaded";
+    $("drop").hidden = false;
+  }
 };
 
 /* ------------------------------------------------------------------ render */

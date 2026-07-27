@@ -617,11 +617,17 @@ function sparkline(rows) {
   const d = pts.map((p, i) =>
     `${(i / (pts.length - 1)) * W},${H - (p.balance / max) * (H - 8) - 4}`).join(" ");
   const received = rows.reduce((t, r) => t + (r.qty_in > 0 ? r.qty_in : 0), 0);
+  // If nothing was received in this register, the item started from opening
+  // stock — show that instead of a bare "0", which reads like an error.
+  const firstBal = pts.length ? pts[0].balance : 0;
+  const receivedLine = received > 0
+    ? `Total received · ${num(received)}`
+    : `Opening stock · ${num(firstBal)}`;
   return `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}">
     <polyline points="${d}" fill="none" stroke="#1c1c1b" stroke-width="1.5"/>
     <line x1="0" y1="${H - 4}" x2="${W}" y2="${H - 4}" stroke="#e7e5df"/>
   </svg><p class="sub">Balance over time · peak ${num(max)}</p>
-  <p class="sub">Total received · ${num(received)}</p>`;
+  <p class="sub">${receivedLine}</p>`;
 }
 
 /* On load: restore the last viewed run if it still exists, so a browser reload

@@ -180,7 +180,7 @@ def _process_file(raw, run_id, project, filename, lead_time, asof, source_link):
     meta = {"run_id": run_id, "project": project, "project_slug": safe_slug(project),
             "filename": filename, "source": kind,
             "lead_time": lead_time, "mapping": rep,
-            "created": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+            "created": dt.datetime.now().isoformat(timespec="seconds"),
             "stats": stats, "issues": issues}
     if source_link:
         meta["source_link"] = source_link

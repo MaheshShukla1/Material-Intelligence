@@ -27,11 +27,11 @@ def main():
     print(f"\n  Material Intelligence  ->  http://127.0.0.1:{port}")
     print("  Press CTRL+C to stop\n")
     if reload_on:
-        uvicorn.run("backend.api:app", host="0.0.0.0", port=port,
+        uvicorn.run("backend.api:app", host="127.0.0.1", port=port,
                     reload=True, reload_dirs=[str(ROOT)], app_dir=str(ROOT))
     else:
         from backend.api import app
-        uvicorn.run(app, host="0.0.0.0", port=port)
+        uvicorn.run(app, host="127.0.0.1", port=port)
 
 
 if __name__ == "__main__":

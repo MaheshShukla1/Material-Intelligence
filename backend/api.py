@@ -167,7 +167,8 @@ def _process_file(raw, run_id, project, filename, lead_time, asof, source_link):
 
     issues, stats = health.check(mv, daily, asof_ts)
     f = engine.forecast(daily[daily.date <= asof_ts],
-                        asof=asof_ts, lead_time=lead_time)
+                        asof=asof_ts, lead_time=lead_time,
+                        today=pd.Timestamp.now().normalize())
     f = subcat.add_subcategory(f)
     if not stats["forecast_ready"]:
         f = health.suppress(f)
@@ -219,7 +220,13 @@ def sync_sheet(link: str = Form(...),
                project: str = Form(""),
                asof: str = Form("")):
     """Pull the latest data straight from a published Google Sheet and build a
-    run from it - no manual download or upload. Same parser, same forecast."""
+    run from it - no manual download or upload. Same parser, same forecast.
+
+    Each distinct sheet link is its own project, so syncing a second sheet does
+    not overwrite the first. Re-syncing the *same* link reuses that project's
+    name, so it updates in place (a new run under the same project) instead of
+    piling up unrelated 'Live Sheet' runs.
+    """
     link = link.strip()
     if not link.startswith("http"):
         raise HTTPException(400, "enter a valid https link to the published sheet")
@@ -229,7 +236,21 @@ def sync_sheet(link: str = Form(...),
     raw = UPLOADS / f"{run_id}__{fname}"
     _fetch_sheet_xlsx(link, raw)
 
-    project = (project or "").strip() or "Live Sheet"
+    project = (project or "").strip()
+    if not project:
+        # Re-use the project name already tied to this exact link, if any, so a
+        # re-sync updates the same project rather than creating a new one.
+        for j in all_meta():
+            if j.get("source_link") == link and j.get("project"):
+                project = j["project"]
+                break
+    if not project:
+        # First time we see this link: give it a short stable label derived from
+        # the link, so different sheets land in different projects.
+        import hashlib
+        tag = hashlib.md5(link.encode()).hexdigest()[:4].upper()
+        project = f"Live Sheet {tag}"
+
     return _process_file(raw, run_id, project, fname,
                          lead_time, asof, source_link=link)
 

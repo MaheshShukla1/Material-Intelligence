@@ -117,7 +117,44 @@ async function syncFromSheet(link, project) {
 }
 
 $("syncgo").onclick = () =>
-  syncFromSheet($("sheetlink").value, $("pname").value);
+  syncFromSheet($("sheetlink").value, $("sheetname").value);
+
+/* -------------------------------------------------------------- auto-refresh
+   When the currently loaded run came from a Google Sheet, quietly re-pull the
+   latest every few minutes so the dashboard stays fresh without anyone having
+   to press a button. Silent: no busy screen, no scroll jump - it just updates
+   the numbers and the "synced X ago" line. Only runs while the tab is open. */
+const AUTO_MINUTES = 10;
+let autoTimer = null;
+
+function startAuto() {
+  stopAuto();
+  autoTimer = setInterval(autoSync, AUTO_MINUTES * 60 * 1000);
+}
+function stopAuto() {
+  if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
+}
+
+async function autoSync() {
+  // only if the open run is sheet-backed and the report is visible
+  if (!META || !META.source_link || $("report").hidden) return;
+  if (document.hidden) return;                 // tab in background - skip
+  try {
+    const fd = new FormData();
+    fd.append("link", META.source_link);
+    fd.append("lead_time", LEAD);
+    fd.append("project", META.project || "");
+    const r = await fetch("/api/sync-sheet", { method: "POST", body: fd });
+    if (!r.ok) return;                          // stay on current data silently
+    const j = await r.json();
+    RUN = j.run_id; META = j.meta;
+    try { localStorage.setItem("currentRun", j.run_id); } catch (e) {}
+    paintHeader(j.meta);
+    paintKpis(j.summary);
+    await load();                              // refresh the visible table
+    await loadProjects();
+  } catch (e) { /* offline or transient - keep showing what we have */ }
+}
 
 /* Top-bar button re-syncs from whichever sheet was last connected. */
 $("sync").onclick = () => {
@@ -153,6 +190,8 @@ async function show(runId, meta, summary) {
   await load();
   $("busy").hidden = true; $("drop").hidden = true; $("report").hidden = false;
   syncHeaderOffset();
+  // Keep sheet-backed runs fresh automatically; uploads have no live source.
+  if (meta.source_link) startAuto(); else stopAuto();
 }
 
 /* Home: return to the upload / sync screen without losing the loaded data.
@@ -162,8 +201,10 @@ function goHome() {
   $("busy").hidden = true;
   $("drop").hidden = false;
   $("home").hidden = true;
-  // keep delete + project switcher usable from the home screen
-  loadProjects();
+  stopAuto();
+  // Reset the switcher to a neutral prompt so that picking ANY project next -
+  // including the one that was open - registers as a change and loads it.
+  loadProjects(true);
 }
 
 /* Sticky column headers must park under the app bar whatever its height is
@@ -175,23 +216,41 @@ function syncHeaderOffset() {
 addEventListener("resize", syncHeaderOffset);
 
 /* ---------------------------------------------------------------- projects */
-async function loadProjects() {
+async function loadProjects(neutral) {
   const ps = await (await fetch("/api/projects")).json();
   const sel = $("proj");
   sel.hidden = ps.length === 0;
   $("del").hidden = ps.length === 0;   // manage-uploads available whenever data exists
-  sel.innerHTML = ps.map((p) =>
+  // `neutral` adds a placeholder first option so that picking any real project
+  // afterwards counts as a change and loads it (used when returning to Home).
+  const head = neutral
+    ? `<option value="" selected disabled>Open a project…</option>` : "";
+  sel.innerHTML = head + ps.map((p) =>
     `<option value="${esc(p.latest_run)}" data-slug="${esc(p.slug)}"
-      ${p.latest_run === RUN ? "selected" : ""}>${esc(p.project)} · ${p.runs} run${
+      ${!neutral && p.latest_run === RUN ? "selected" : ""}>${esc(p.project)} · ${p.runs} run${
       p.runs === 1 ? "" : "s"}</option>`).join("");
 }
-$("proj").onchange = async (e) => {
-  const id = e.target.value;
-  $("report").hidden = true; $("busy").hidden = false;
+$("proj").onchange = (e) => switchProject(e.target.value);
+/* If the user reopens the switcher and picks the project that is already
+   selected, onchange will not fire. Loading on focus-then-select is unreliable
+   across browsers, so instead we reload the report view when Home is left, and
+   keep the switcher purely for changing to a different project. */
+
+/* Load a project's latest run explicitly. Used by the switcher and by any code
+   path (e.g. returning from Home) where the dropdown value may not have changed
+   and so would not fire onchange on its own. */
+async function switchProject(id) {
+  if (!id) return;
+  $("report").hidden = true; $("drop").hidden = true; $("busy").hidden = false;
   $("busytxt").textContent = "Loading project…";
-  const j = await (await fetch(`/api/run/${id}`)).json();
-  await show(id, j.meta, j.summary);
-};
+  try {
+    const j = await (await fetch(`/api/run/${id}`)).json();
+    await show(id, j.meta, j.summary);
+  } catch (e) {
+    $("busy").hidden = true; $("drop").hidden = false;
+    alert("Could not load that project.");
+  }
+}
 
 /* ------------------------------------------------------------------ delete */
 /* The delete button opens a manager listing every project and every upload
@@ -281,23 +340,79 @@ $("cgo").onclick = async () => {
   }
   const deletedCurrent = (PENDING.kind === "run" && PENDING.id === RUN) ||
     (PENDING.kind === "project" && META && PENDING.id === META.project_slug);
+  // if the deleted run was the one we remembered, forget it
+  try {
+    if (PENDING.kind === "run" && localStorage.getItem("currentRun") === PENDING.id)
+      localStorage.removeItem("currentRun");
+  } catch (e) {}
   closeConfirm();
-  await openManager();          // refresh the list in place
-  await loadProjects();         // refresh the header switcher
+
+  const projects = await (await fetch("/api/projects")).json();
+
   if (deletedCurrent) {
     RUN = null; META = null;
+    if (projects.length) {
+      // Auto-load a remaining project instead of leaving a blank screen.
+      // (The switcher can't be relied on to fire onchange when its value is
+      // already the target, so we load explicitly.)
+      const next = projects[0];
+      $("modal").hidden = true;
+      const j = await (await fetch(`/api/run/${next.latest_run}`)).json();
+      await show(next.latest_run, j.meta, j.summary);
+      await loadProjects();
+      return;
+    }
+    // nothing left — go to the home screen cleanly
+    try { localStorage.removeItem("currentRun"); } catch (e) {}
     $("report").hidden = true; $("del").hidden = true; $("dl").hidden = true;
+    $("home").hidden = true;
     $("ctx").textContent = "No file loaded";
     $("drop").hidden = false;
+    await openManager();
+    await loadProjects();
+    return;
   }
+
+  // deleted something else — just refresh the list and switcher
+  await openManager();
+  await loadProjects();
 };
 
 /* ------------------------------------------------------------------ render */
+function relTime(iso) {
+  if (!iso) return "";
+  const then = new Date(iso), now = new Date();
+  const mins = Math.round((now - then) / 60000);
+  if (isNaN(mins)) return "";
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins} min ago`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return `${hrs} hour${hrs === 1 ? "" : "s"} ago`;
+  const days = Math.round(hrs / 24);
+  return `${days} day${days === 1 ? "" : "s"} ago`;
+}
+
 function paintHeader(m) {
   const s = m.stats;
   const src = m.source === "projectbase" ? "ProjectBase export" : "site register";
+  const synced = m.source_link ? "Synced" : "Loaded";
+  const rel = relTime(m.created);
   $("ctx").textContent =
     `${m.project} · ${m.filename} · ${src} · as of ${s.asof} · ${s.materials} materials`;
+  // Freshness line: how long ago this data was pulled, with a warning if it's
+  // old enough that a decision might be made on stale numbers. No button here -
+  // the top-bar "Sync sheet" is the single place to re-sync, to avoid two
+  // controls doing the same thing.
+  const bar = $("fresh");
+  if (bar) {
+    const ageMin = (new Date() - new Date(m.created)) / 60000;
+    const stale = !isNaN(ageMin) && ageMin > 24 * 60;   // older than a day
+    bar.innerHTML = rel
+      ? `${synced} ${rel}`
+        + (stale ? ' · <span class="staleflag">data may be out of date</span>' : "")
+      : "";
+    bar.hidden = !rel;
+  }
 }
 
 function paintHealth(issues) {

@@ -15,6 +15,7 @@
     <div>
       <h1>Material intelligence</h1>
       <p id="ctx">No file loaded</p>
+      <p id="fresh" class="fresh" hidden></p>
     </div>
   </div>
   <div class="topact">
@@ -44,6 +45,7 @@
   </div>
   <div class="dropor">or connect a live Google Sheet</div>
   <div class="dropform">
+    <input id="sheetname" class="ctl" type="text" placeholder="Sheet name (optional)">
     <input id="sheetlink" class="ctl wide" type="text"
            placeholder="Paste the published Google Sheet link (output=xlsx)">
     <button class="btn" id="syncgo">Sync now</button>

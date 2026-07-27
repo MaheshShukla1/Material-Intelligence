@@ -217,8 +217,17 @@ def build_daily(mv):
     return g
 
 
-def forecast(daily, asof=None, window=14, lead_time=7, buffer=2):
+def forecast(daily, asof=None, window=14, lead_time=7, buffer=2, today=None):
     asof = pd.Timestamp(asof or daily.date.max()).normalize()
+    # "today" is the real calendar day the user is viewing on. It is usually
+    # later than asof (the last date present in the register), because sites
+    # don't always enter data every day. Reading the forecast from today - not
+    # from a stale asof - is what stops "runs out 25 Jul" showing on the 27th
+    # while the stock is visibly still on the shelf.
+    today = pd.Timestamp(today).normalize() if today is not None else asof
+    if today < asof:
+        today = asof
+    gap = (today - asof).days
     out = []
     for (svc, mat, unit), g in daily.groupby(["service", "material", "unit"]):
         g = g.sort_values("date")
@@ -237,7 +246,7 @@ def forecast(daily, asof=None, window=14, lead_time=7, buffer=2):
 
         rate, basis, basis_days, trend = rate_mod.estimate_rate(g, asof, window)
 
-        idle = (asof - last_out).days if pd.notna(last_out) else None
+        idle = (today - last_out).days if pd.notna(last_out) else None
 
         if basis_days >= 8:
             conf, band = "HIGH", 0.15
@@ -299,12 +308,25 @@ def forecast(daily, asof=None, window=14, lead_time=7, buffer=2):
                 status = "NO_RECENT_USE"
                 days_left = np.nan
 
+            # "Past-due but still here" guard. The forecast is anchored at asof
+            # (the last date in the file). If enough calendar days have passed
+            # since then that the material should already be empty - yet stock is
+            # still on hand - then reality has diverged from the rate: it was not
+            # consumed as predicted. Showing a runs-out date now in the past
+            # ("out 25 Jul" seen on the 27th) destroys trust. Treat it as paused.
+            if (status in ("RED", "AMBER") and gap > 0
+                    and days_left < gap and stock > 0):
+                status = "NO_RECENT_USE"
+                days_left = np.nan
+
         if np.isnan(days_left) or conf == "NONE" or status == "NO_RECENT_USE":
             edate = elo = ehi = pd.NaT
         else:
-            edate = asof + pd.Timedelta(days=float(days_left))
-            elo = asof + pd.Timedelta(days=float(days_left) * (1 - band))
-            ehi = asof + pd.Timedelta(days=float(days_left) * (1 + band))
+            # Count remaining life from today, not from the stale asof, so the
+            # date shown is always in the future relative to the viewer.
+            edate = today + pd.Timedelta(days=float(days_left))
+            elo = today + pd.Timedelta(days=float(days_left) * (1 - band))
+            ehi = today + pd.Timedelta(days=float(days_left) * (1 + band))
 
         order_by = (edate - pd.Timedelta(days=lead_time + buffer)
                     if pd.notna(edate) else pd.NaT)

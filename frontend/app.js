@@ -379,9 +379,19 @@ $("cgo").onclick = async () => {
 };
 
 /* ------------------------------------------------------------------ render */
+/* Parse a stored timestamp safely. Runs written before the UTC fix have no
+   timezone marker but were in the server's UTC clock, so append Z when missing.
+   Newer runs carry +00:00 and parse as-is. */
+function parseTS(iso) {
+  if (!iso) return new Date(NaN);
+  const hasTZ = /[zZ]|[+-]\d\d:?\d\d$/.test(iso);
+  return new Date(hasTZ ? iso : iso + "Z");
+}
+
 function relTime(iso) {
   if (!iso) return "";
-  const then = new Date(iso), now = new Date();
+  const then = parseTS(iso);
+  const now = new Date();
   const mins = Math.round((now - then) / 60000);
   if (isNaN(mins)) return "";
   if (mins < 1) return "just now";
@@ -405,7 +415,7 @@ function paintHeader(m) {
   // controls doing the same thing.
   const bar = $("fresh");
   if (bar) {
-    const ageMin = (new Date() - new Date(m.created)) / 60000;
+    const ageMin = (new Date() - parseTS(m.created)) / 60000;
     const stale = !isNaN(ageMin) && ageMin > 24 * 60;   // older than a day
     bar.innerHTML = rel
       ? `${synced} ${rel}`

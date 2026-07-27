@@ -32,7 +32,7 @@ function action(r) {
   if (!r.order_by) return ["ok", "No action", ""];
   const d = daysTo(r.order_by);
   if (d < 0) return ["late", "Order now", `${-d} day${d === -1 ? "" : "s"} late`];
-  if (d === 0) return ["late", "Order today", ""];
+  if (d === 0) return ["late", "Order today", "last day to order"];
   if (d === 1) return ["soon", `Order by ${short(r.order_by)}`, "tomorrow"];
   return ["soon", `Order by ${short(r.order_by)}`, `in ${d} days`];
 }
@@ -616,10 +616,12 @@ function sparkline(rows) {
   const W = 500, H = 92, max = Math.max(...pts.map((p) => p.balance), 1);
   const d = pts.map((p, i) =>
     `${(i / (pts.length - 1)) * W},${H - (p.balance / max) * (H - 8) - 4}`).join(" ");
+  const received = rows.reduce((t, r) => t + (r.qty_in > 0 ? r.qty_in : 0), 0);
   return `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}">
     <polyline points="${d}" fill="none" stroke="#1c1c1b" stroke-width="1.5"/>
     <line x1="0" y1="${H - 4}" x2="${W}" y2="${H - 4}" stroke="#e7e5df"/>
-  </svg><p class="sub">Balance over time · peak ${num(max)}</p>`;
+  </svg><p class="sub">Balance over time · peak ${num(max)}</p>
+  <p class="sub">Total received · ${num(received)}</p>`;
 }
 
 /* On load: restore the last viewed run if it still exists, so a browser reload

@@ -31,8 +31,15 @@ function action(r) {
   }
   if (!r.order_by) return ["ok", "No action", ""];
   const d = daysTo(r.order_by);
-  if (d < 0) return ["late", "Order now", `${-d} day${d === -1 ? "" : "s"} late`];
-  if (d === 0) return ["late", "Order today", "last day to order"];
+  // RED = order now. AMBER = order this week. Keep the label aligned to status
+  // so an item never shows "Order now" while sitting under "Order this week".
+  if (s === "RED") {
+    if (d < 0) return ["late", "Order now", `${-d} day${d === -1 ? "" : "s"} late`];
+    if (d === 0) return ["late", "Order today", "last day to order"];
+    return ["late", "Order now", d === 1 ? "tomorrow" : `in ${d} days`];
+  }
+  // AMBER (order this week)
+  if (d <= 0) return ["soon", "Order this week", "order soon"];
   if (d === 1) return ["soon", `Order by ${short(r.order_by)}`, "tomorrow"];
   return ["soon", `Order by ${short(r.order_by)}`, `in ${d} days`];
 }

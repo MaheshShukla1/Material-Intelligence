@@ -210,6 +210,11 @@ def parse_projectbase_movement(path):
 # ------------------------------------------------------------------- engine
 def build_daily(mv):
     """Collapse to one row per material per day, then rebuild running balance."""
+    mv = mv.copy()
+    # A missing unit must not make the whole material disappear: pandas groupby
+    # silently drops rows whose key is NaN, which would zero-out that item's
+    # received/issued totals. Give unit-less rows a stable placeholder instead.
+    mv["unit"] = mv["unit"].astype("object").fillna("-").replace("", "-")
     g = (mv.groupby(["service", "material", "unit", "date"], as_index=False)
            .agg(qty_in=("qty_in", "sum"), qty_out=("qty_out", "sum"),
                 balance=("balance", "last"), opening=("opening", "first")))

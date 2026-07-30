@@ -21,9 +21,21 @@ FRONTEND = ROOT / "frontend"
 for p in (UPLOADS, RUNS):
     p.mkdir(parents=True, exist_ok=True)
 
-# Tabs that are never material movement: consumables logs and item masters.
-SKIP_SHEETS = ["SAFETY", "PPE", "TOOL", "ITEMMASTER", "MASTER",
+# Tabs the register parser must never treat as MEP material movement.
+# Item masters and summary/index tabs carry no dated in/out, so they stay out.
+# PPE is a per-person issue log, not a stock register - it is pulled separately
+# by parse_ppe_log() and shown as an issue-log tab, so it is skipped here too.
+# SAFETY and TOOL used to be skipped; they ARE stock registers (item + count),
+# so they now flow through the normal parser and are marked inventory-only
+# afterwards (INVENTORY_SERVICES) rather than being dropped.
+SKIP_SHEETS = ["PPE", "ITEMMASTER", "MASTER",
                "SUMMARY", "INDEX", "SHEET1"]
+
+# Services shown as plain stock counts: no forecast, no RED/AMBER, no runs-out
+# date. Helmets and drills do not "run out" like cable, so a shortage alert on
+# them would be noise. Populated by schema.clean_service folding Safety/Tools
+# tabs (or Groups values) onto these exact labels.
+INVENTORY_SERVICES = ("Safety", "Tools")
 
 app = FastAPI(title="Material Intelligence")
 
@@ -49,6 +61,126 @@ def sheet_plan(path):
             continue
         keep[s] = s
     return keep, skipped
+
+
+# Columns the PPE issue log is expected to carry. Matching is by meaning, not
+# exact spelling, so "CONTARCTOR NAME" (a real typo in the field) still lands.
+PPE_FIELDS = {
+    "date": ["DATE"],
+    "name": ["NAME", "WORKER", "EMPLOYEE", "PERSON"],
+    "shoes_size": ["SHOES NUMBER", "SHOE SIZE", "SHOES SIZE", "SIZE"],
+    "shoes": ["SHOES", "SHOE", "SAFETY SHOES"],
+    "helmet": ["HELMET"],
+    "jacket": ["JACKET", "VEST", "REFLECTIVE JACKET"],
+    "blanket": ["FAIR BLANKET", "BLANKET", "FIRE BLANKET"],
+    "unit": ["UNIT", "UOM"],
+    "contractor": ["CONTRACTOR NAME", "CONTRACTOR", "CONTARCTOR NAME", "CONTARCTOR",
+                   "AGENCY", "VENDOR"],
+    "signature": ["SIGNATURE", "SIGN"],
+}
+
+
+def _ppe_sheet_names(path):
+    """Names of tabs that are PPE issue logs (skipped by the register parser)."""
+    out = []
+    for s in pd.ExcelFile(path).sheet_names:
+        flat = re.sub(r"[^A-Z]", "", s.upper())
+        if "PPE" in flat:
+            out.append(s)
+    return out
+
+
+def parse_ppe_log(path, max_rows=5000):
+    """Read a per-person PPE issue sheet into a plain 'who got what' log.
+
+    The PPE tab is NOT a stock register - it is one row per person per issue
+    (DATE, NAME, SHOES, HELMET, JACKET, CONTRACTOR...). So it never goes through
+    the forecast pipeline. We locate the header row by finding the row that
+    names a NAME column plus at least one PPE item column, map columns by
+    meaning, and return tidy records plus a small summary for the UI.
+
+    Returns None when the file has no PPE tab, so callers can simply skip it.
+    """
+    names = _ppe_sheet_names(path)
+    if not names:
+        return None
+
+    def col_for(hdr_vals, field):
+        wanted = PPE_FIELDS[field]
+        for c, v in enumerate(hdr_vals):
+            n = schema.norm(v)
+            if n in wanted or any(w == n for w in wanted):
+                return c
+        # loose contains-match as a fallback (e.g. "SHOES " with trailing space)
+        for c, v in enumerate(hdr_vals):
+            n = schema.norm(v)
+            if n and any(w in n or n in w for w in wanted):
+                return c
+        return None
+
+    records, sheets_used = [], []
+    for sheet in names:
+        raw = pd.ExcelFile(path).parse(sheet, header=None)
+        if raw.empty:
+            continue
+        # find header row: the first row (scan up to 15) naming NAME + an item
+        hdr_row = None
+        for r in range(min(15, len(raw))):
+            vals = raw.iloc[r].tolist()
+            has_name = col_for(vals, "name") is not None
+            has_item = any(col_for(vals, k) is not None
+                           for k in ("shoes", "helmet", "jacket"))
+            if has_name and has_item:
+                hdr_row = r
+                break
+        if hdr_row is None:
+            continue
+        hdr = raw.iloc[hdr_row].tolist()
+        cmap = {k: col_for(hdr, k) for k in PPE_FIELDS}
+        body = raw.iloc[hdr_row + 1:]
+        name_c = cmap["name"]
+        for _, row in body.iterrows():
+            nm = row.iloc[name_c] if name_c is not None else None
+            if pd.isna(nm) or not str(nm).strip():
+                continue
+            rec = {}
+            for k, c in cmap.items():
+                if c is None or c >= len(row):
+                    rec[k] = None
+                    continue
+                v = row.iloc[c]
+                if pd.isna(v):
+                    rec[k] = None
+                elif isinstance(v, (dt.datetime, pd.Timestamp)):
+                    rec[k] = pd.Timestamp(v).strftime("%Y-%m-%d")
+                else:
+                    rec[k] = str(v).strip()
+            records.append(rec)
+            if len(records) >= max_rows:
+                break
+        sheets_used.append(sheet)
+
+    if not records:
+        return None
+
+    def issued_count(field):
+        n = 0
+        for r in records:
+            v = (r.get(field) or "").strip()
+            if v and v not in ("-", "0", "NAN", "NONE"):
+                n += 1
+        return n
+
+    summary = {
+        "people": len({r.get("name") for r in records if r.get("name")}),
+        "issues": len(records),
+        "shoes": issued_count("shoes"),
+        "helmet": issued_count("helmet"),
+        "jacket": issued_count("jacket"),
+        "blanket": issued_count("blanket"),
+        "sheets": sheets_used,
+    }
+    return {"records": records, "summary": summary}
 
 
 NOISE = (r"stock|register|registers|material|materials|inward|outward|report|"
@@ -173,15 +305,45 @@ def _process_file(raw, run_id, project, filename, lead_time, asof, source_link):
     if not stats["forecast_ready"]:
         f = health.suppress(f)
 
+    # Inventory-only override. Safety and Tools are stock counts, not burn-rate
+    # forecasts: a helmet does not "run out" like cable, so any RED/AMBER/date on
+    # them is noise that erodes trust. Runs AFTER forecast() and health.suppress()
+    # so it is the final word, and touches ONLY rows whose service is Safety/Tools
+    # - every MEP row is provably untouched (those services never carry this tag).
+    if len(f) and "service" in f.columns:
+        inv = f.service.isin(INVENTORY_SERVICES)
+        if inv.any():
+            f.loc[inv, "status"] = "INVENTORY"
+            for c in ("days_left", "rate_per_day"):
+                if c in f.columns:
+                    f.loc[inv, c] = np.nan
+            for c in ("exhaust_date", "exhaust_earliest", "exhaust_latest",
+                      "order_by"):
+                if c in f.columns:
+                    f.loc[inv, c] = pd.NaT
+
+    # PPE is a per-person issue log, parsed separately and stored alongside the
+    # run so the UI can show a "who was issued what" tab. Absent -> simply None.
+    ppe = None
+    if kind != "projectbase":
+        try:
+            ppe = parse_ppe_log(raw)
+        except Exception:
+            ppe = None
+
     d = RUNS / run_id
     d.mkdir(parents=True, exist_ok=True)
     f.to_parquet(d / "forecast.parquet")
     daily.to_parquet(d / "daily.parquet")
+    if ppe:
+        (d / "ppe.json").write_text(json.dumps(ppe))
     meta = {"run_id": run_id, "project": project, "project_slug": safe_slug(project),
             "filename": filename, "source": kind,
             "lead_time": lead_time, "mapping": rep,
             "created": dt.datetime.now().isoformat(timespec="seconds"),
-            "stats": stats, "issues": issues}
+            "stats": stats, "issues": issues,
+            "has_ppe": bool(ppe),
+            "ppe_summary": ppe["summary"] if ppe else None}
     if source_link:
         meta["source_link"] = source_link
     (d / "meta.json").write_text(json.dumps(meta, indent=2))
@@ -282,6 +444,17 @@ def runs(project: str = ""):
 def run_detail(run_id: str):
     f, meta = load_run(run_id)
     return {"meta": meta, "summary": summarise(f)}
+
+
+@app.get("/api/ppe/{run_id}")
+def ppe_log(run_id: str):
+    """The PPE issue log for this run, or an empty payload if the file had none.
+    Kept separate from /forecast because PPE is a per-person log, not stock."""
+    d = RUNS / run_id
+    p = d / "ppe.json"
+    if not p.exists():
+        return {"records": [], "summary": None}
+    return json.loads(p.read_text())
 
 
 @app.delete("/api/run/{run_id}")

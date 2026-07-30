@@ -206,6 +206,13 @@ SERVICE_RULES = [
     ("PLUM", "Plumbing"), ("PHE", "Plumbing"), ("SANITARY", "Plumbing"),
     ("HVAC", "Fire & HVAC"), ("FIRE", "Fire & HVAC"),
     ("ELV", "ELV"), ("BMS", "ELV"),
+    # Consumables tracked as plain inventory, not forecast. One tab / Groups
+    # value spells each of these many ways ("Safety details", "Tools Details",
+    # "PPE.S DETAILS"); fold them onto one stable label so the inventory-only
+    # tabs and the PPE issue-log route reliably regardless of the source words.
+    ("SAFETY", "Safety"),
+    ("TOOL", "Tools"),
+    ("PPE", "PPE"),
 ]
 _MONTHS = ("JAN", "FEB", "MAR", "APR", "MAY", "JUN",
            "JUL", "AUG", "SEP", "OCT", "NOV", "DEC")

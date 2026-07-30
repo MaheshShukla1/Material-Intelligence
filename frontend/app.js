@@ -497,9 +497,24 @@ function paintKpis(s) {
      <p class="v">${num(v)}</p><p class="h">${h}</p></div>`).join("");
 }
 
+/* Which view a tab drives:
+   - "Safety"/"Tools" -> inventory-only (count, no forecast)
+   - "PPE"            -> per-person issue log
+   - everything else  -> the normal MEP forecast table                     */
+const INVENTORY_SVCS = ["Safety", "Tools"];
+function modeFor(svc) {
+  if (svc === "PPE") return "ppe";
+  if (INVENTORY_SVCS.includes(svc)) return "inventory";
+  return "forecast";
+}
+
 function paintTabs(services) {
-  if (!services.includes(SVC)) SVC = "";
-  const all = ["", ...services];
+  if (!services.includes(SVC) && SVC !== "PPE") SVC = "";
+  // Order the tabs: All services, then MEP trades, then Safety/Tools, then PPE.
+  const inv = services.filter((s) => INVENTORY_SVCS.includes(s));
+  const mep = services.filter((s) => !INVENTORY_SVCS.includes(s));
+  const all = ["", ...mep, ...inv];
+  if (META && META.has_ppe) all.push("PPE");
   $("svc").innerHTML = all.map((s) =>
     `<button class="tab${s === SVC ? " on" : ""}" data-s="${esc(s)}">${
       esc(s || "All services")}</button>`).join("");
@@ -527,6 +542,9 @@ function typesForCurrentScope() {
 
 function paintTypes() {
   const sel = $("type");
+  // Inventory (Safety/Tools) and the PPE log have no MEP sub-types, so the
+  // type filter is meaningless there - hide it to keep those views clean.
+  if (modeFor(SVC) !== "forecast") { sel.hidden = true; return; }
   const list = typesForCurrentScope();
   // Always visible so the filter is discoverable. On "All services" it lists
   // every MEP type; on a chosen service, only that service's types.
@@ -567,11 +585,113 @@ $("status").onchange = load;
 
 async function load() {
   if (!RUN) return;
+  const mode = modeFor(SVC);
+  applyMode(mode);
+  if (mode === "ppe") return loadPPE();
+  if (mode === "inventory") return loadInventory();
+
   const p = new URLSearchParams({
     status: $("status").value, service: SVC,
     subcategory: TYPE, q: $("q").value,
   });
   paintRows(await (await fetch(`/api/forecast/${RUN}?${p}`)).json());
+}
+
+/* Reshape the shared table chrome for the current mode. The forecast table has
+   five columns; inventory needs three; PPE brings its own header. We swap the
+   <thead> cells and hide forecast-only controls, then restore them on the way
+   back so the MEP view is untouched. */
+function applyMode(mode) {
+  const head = document.querySelector("#report thead tr");
+  const status = $("status");
+  const rule = $("rule");
+  const legend = document.querySelector(".legend");
+  const note = ensureInvNote();
+  const colgroup = document.querySelector("#report colgroup");
+  // The fixed 5-column widths only make sense for the forecast table. Disable
+  // them in the other modes so 3/4-column layouts size naturally.
+  if (colgroup) colgroup.style.display = mode === "forecast" ? "" : "none";
+  if (mode === "forecast") {
+    head.innerHTML =
+      `<th>Material</th><th>What to do</th><th class="n">Stock</th>` +
+      `<th>Runs out</th><th>Trust</th>`;
+    status.hidden = false; rule.hidden = false;
+    if (legend) legend.hidden = false;
+    note.hidden = true;
+  } else if (mode === "inventory") {
+    head.innerHTML =
+      `<th>Item</th><th class="n">Stock</th><th>Type</th>`;
+    status.hidden = true; rule.hidden = true;
+    if (legend) legend.hidden = true;
+    note.textContent = "Inventory view — count only, no forecast.";
+    note.hidden = false;
+  } else { // ppe
+    head.innerHTML =
+      `<th>Name</th><th>Issued</th><th>Contractor</th><th>Date</th>`;
+    status.hidden = true; rule.hidden = true;
+    if (legend) legend.hidden = true;
+    note.textContent =
+      "Issue log — who was issued what. Not a stock count.";
+    note.hidden = false;
+  }
+}
+
+/* A one-line note above the table, created once and reused. */
+function ensureInvNote() {
+  let el = $("invnote");
+  if (!el) {
+    el = document.createElement("p");
+    el.id = "invnote";
+    el.className = "invnote";
+    el.hidden = true;
+    const wrap = document.querySelector(".tablewrap");
+    wrap.parentNode.insertBefore(el, wrap);
+  }
+  return el;
+}
+
+async function loadInventory() {
+  // Reuse the forecast endpoint (Safety/Tools rows carry status INVENTORY) and
+  // apply the search box client-side. No status/type filter in this mode.
+  const p = new URLSearchParams({ service: SVC, q: $("q").value });
+  const rows = await (await fetch(`/api/forecast/${RUN}?${p}`)).json();
+  $("empty").hidden = rows.length > 0;
+  $("rows").innerHTML = rows.map((r) =>
+    `<tr data-m="${esc(r.material)}">
+      <td><div class="mat">${esc(r.material)}</div>
+          <div class="sub">${esc(r.unit || "")}</div></td>
+      <td class="n"><div class="big">${num(r.stock)}</div></td>
+      <td>${esc(r.subcategory || "—")}</td>
+    </tr>`).join("");
+  $("rows").querySelectorAll("tr").forEach((tr) => {
+    tr.onclick = () => openSheet(tr.dataset.m);
+  });
+}
+
+async function loadPPE() {
+  const data = await (await fetch(`/api/ppe/${RUN}`)).json();
+  let recs = data.records || [];
+  const q = $("q").value.trim().toUpperCase();
+  if (q) recs = recs.filter((r) =>
+    (r.name || "").toUpperCase().includes(q) ||
+    (r.contractor || "").toUpperCase().includes(q));
+  $("empty").hidden = recs.length > 0;
+  const yes = (v) => v && !["-", "0", "NONE", "NAN"].includes(String(v).toUpperCase());
+  $("rows").innerHTML = recs.map((r) => {
+    const items = [];
+    if (yes(r.shoes)) items.push(r.shoes_size ? `Shoes (${esc(r.shoes_size)})` : "Shoes");
+    if (yes(r.helmet)) items.push("Helmet");
+    if (yes(r.jacket)) items.push("Jacket");
+    if (yes(r.blanket)) items.push("Blanket");
+    return `<tr>
+      <td><div class="mat">${esc(r.name || "—")}</div></td>
+      <td>${items.length ? items.map(esc).join(", ") : "—"}</td>
+      <td>${esc(r.contractor || "—")}</td>
+      <td class="n">${esc(r.date || "—")}</td>
+    </tr>`;
+  }).join("");
+  // PPE rows are people, not materials - no drill-in drawer.
+  $("rows").querySelectorAll("tr").forEach((tr) => { tr.onclick = null; });
 }
 
 function paintRows(rows) {

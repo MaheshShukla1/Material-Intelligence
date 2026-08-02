@@ -73,19 +73,25 @@
   <div class="bar">
     <div class="tabs" id="svc"></div>
     <div class="right">
-      <select id="type" class="ctl" title="Material type" hidden></select>
+      <select id="type" class="ctl" title="Type" hidden></select>
+      <select id="size" class="ctl" title="Size" hidden></select>
+      <select id="contractor" class="ctl" title="Contractor" hidden></select>
       <input id="q" class="ctl" type="search" placeholder="Search material">
-      <select id="status" class="ctl">
-        <option value="STOCKED_OUT,RED,AMBER">Needs a decision</option>
-        <option value="">Everything</option>
-        <option value="STOCKED_OUT">Already out of stock</option>
-        <option value="RED">Order now</option>
-        <option value="AMBER">Order this week</option>
-        <option value="GREEN">No action needed</option>
-        <option value="NO_RECENT_USE">Paused (no recent use)</option>
-        <option value="OVERSTOCK,DEAD_STOCK,NO_RECENT_USE">Stop ordering</option>
-        <option value="INSUFFICIENT_DATA">Not enough data</option>
-      </select>
+      <label class="showme" id="statuswrap">Show me
+        <select id="status" class="ctl">
+          <option value="STOCKED_OUT,RED,AMBER">Needs a decision</option>
+          <option value="STOCKED_OUT,RED">Act today (order now)</option>
+          <option value="STOCKED_OUT">Already out of stock</option>
+          <option value="__overdue__">Order date passed</option>
+          <option value="RED">Order now</option>
+          <option value="AMBER">Order this week</option>
+          <option value="GREEN">No action needed</option>
+          <option value="NO_RECENT_USE">Paused (no recent use)</option>
+          <option value="OVERSTOCK,DEAD_STOCK,NO_RECENT_USE">Stop ordering</option>
+          <option value="">Everything</option>
+          <option value="INSUFFICIENT_DATA">Not enough data</option>
+        </select>
+      </label>
     </div>
   </div>
 

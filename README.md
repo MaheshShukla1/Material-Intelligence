@@ -26,6 +26,10 @@ Enterprise ERPs (SAP, Oracle) and construction suites all demand the same thing 
 - **Reads the forecast from today, not from stale data.** If the register's last entry is a few days old, the forecast is still anchored to the real calendar day — so a runs-out date never shows up already in the past while the stock is visibly on the shelf.
 - **Knows "running out" from "work paused."** A material that should already be empty but still has stock — or that's been idle far longer than its forecast — is flagged *No recent use* instead of a false *Order now*. This removes the single biggest source of false alarms.
 - **Sub-categorises every material** (Cable, Wire, Conduit, Pipe, Duct, Valve, Saddle, Sprinkler, Data/CCTV, and more) so a 300-line register filters to just the cables in one click. Service-scoped: pick Electrical, see only electrical types; pick "All types" to look across every trade.
+- **Splits inventory from forecasts.** Safety gear (shoes, helmets, jackets), Tools (ladder, hammer, grinder), and PPE issue logs are shown as plain stock counts, not forecasts. Each is its own tab with tailored filters: Safety and Tools filter by type and size; PPE shows who received what, filtered by item type, shoe size, and contractor.
+- **Classifies safety and tools correctly.** A "8 FEET LADDER" is tagged as a Ladder, not confused with cable types — safety and tool names use a dedicated classifier that works across any register and any spelling variant.
+- **KPI cards are clickable filters.** Six cards show "Act today", "Already out", "Order date passed", "Order this week", "Stop ordering", and "No action" — click any card to apply that exact filter to the forecast, with live highlighting so you know which card is active.
+- **Detects overdue orders.** Separate from status buckets, the "Order date passed" card catches materials whose order-by date was in the past, whether they're red-flagged or not — so overdue items never slip through mixed into another status.
 - **Refuses to guess when data is thin.** If too few materials have real consumption history, predicted dates are blanked and the run is marked `INSUFFICIENT_DATA`. One confident wrong date costs more trust than ten honest blanks.
 - **Says how much to trust each row.** Every forecast carries a confidence level (HIGH / MEDIUM / LOW), widened when usage is erratic.
 - **Connects to a live Google Sheet.** Publish a sheet once, paste the link, and the dashboard pulls the latest itself — and auto-refreshes every few minutes while open. A "synced X ago" line shows how fresh the data is, with a warning when it's stale.
@@ -102,6 +106,7 @@ Detection is automatic — there is no format picker, because a format picker is
 
 | Status | Meaning |
 |---|---|
+| `INVENTORY` | Safety / Tools / PPE — plain stock, no forecast (count-only) |
 | `STOCKED_OUT` | Zero on hand and still being consumed (checked first) |
 | `RED` | Runs out within lead time + buffer — order now |
 | `AMBER` | Runs out within twice the lead time — order this week |
@@ -110,6 +115,8 @@ Detection is automatic — there is no format picker, because a format picker is
 | `DEAD_STOCK` | Received, never issued |
 | `NO_RECENT_USE` | Consumed before, but paused — not a real shortage |
 | `INSUFFICIENT_DATA` | Reliability gate tripped, no forecast shown |
+
+**Note:** The "Order date passed" KPI card is separate — it catches materials whose order-by date is in the past, across any status (RED, AMBER, or STOCKED_OUT). Use it to find overdue orders that may have mixed into the active forecast.
 
 ## Confidence
 
@@ -144,7 +151,8 @@ material-intel/
     schema.py         column detection by meaning (synonyms + fuzzy)
     engine.py         date repair, parsing, forecast maths, status, today-anchoring
     rate.py           EWMA + active-day + surge consumption rate
-    subcat.py         material sub-category detection from names
+    subcat.py         material sub-category detection (MEP trades)
+    toolcat.py        safety and tool type detection (ladder, helmet, grinder, etc.)
     health.py         data-quality gate (can block a run)
     api.py            FastAPI: upload, sync-sheet, forecast, subcategories, delete, export
   frontend/

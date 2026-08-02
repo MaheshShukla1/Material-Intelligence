@@ -12,7 +12,7 @@ from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import engine, health, schema, subcat
+from . import engine, health, schema, subcat, toolcat
 
 ROOT = Path(__file__).resolve().parent.parent
 UPLOADS = ROOT / "data" / "uploads"
@@ -322,6 +322,12 @@ def _process_file(raw, run_id, project, filename, lead_time, asof, source_link):
                 if c in f.columns:
                     f.loc[inv, c] = pd.NaT
 
+    # Tag Safety/Tools rows with a tool-native type (Ladder, Hammer, Safety
+    # Shoes...) using the dedicated tool classifier - NOT the material subcat,
+    # which mislabels them (a ladder is not a cable tray). MEP rows are left
+    # untouched (tool_type stays None), so the forecast table is unaffected.
+    f = toolcat.add_tooltype(f, INVENTORY_SERVICES)
+
     # PPE is a per-person issue log, parsed separately and stored alongside the
     # run so the UI can show a "who was issued what" tab. Absent -> simply None.
     ppe = None
@@ -488,10 +494,19 @@ def delete_project(slug: str, confirm: str = ""):
 
 @app.get("/api/forecast/{run_id}")
 def forecast_rows(run_id: str, status: str = "", service: str = "",
-                  subcategory: str = "", q: str = "", limit: int = 1000):
+                  subcategory: str = "", q: str = "", overdue: int = 0,
+                  limit: int = 1000):
     f, _ = load_run(run_id)
     if "subcategory" not in f.columns:            # older runs, tag on the fly
         f = subcat.add_subcategory(f)
+    if "tool_type" not in f.columns:              # older runs, tag on the fly
+        f = toolcat.add_tooltype(f, INVENTORY_SERVICES)
+    # "Order date passed" (overdue) is defined by the order-by date being in the
+    # past, NOT by a status set - an overdue item may be RED, STOCKED_OUT or even
+    # AMBER. It must use the SAME test as summarise() so the KPI card count and
+    # this filter's row count are identical.
+    if overdue:
+        f = f[f.order_by.notna() & (f.order_by < pd.Timestamp.now())]
     if status:
         f = f[f.status.isin(status.split(","))]
     if service:
@@ -510,6 +525,12 @@ def subcategories(run_id: str):
     f, _ = load_run(run_id)
     if "subcategory" not in f.columns:
         f = subcat.add_subcategory(f)
+    # The material type filter is for MEP trades only. Safety/Tools carry their
+    # own tool types (see /api/forecast tool_type), and running the material
+    # classifier on them produces junk ("Cable tray" for a ladder), so keep them
+    # out of this list entirely.
+    if "service" in f.columns:
+        f = f[~f.service.isin(INVENTORY_SERVICES)]
     by_service = {}
     for svc, g in f.groupby("service"):
         counts = g.subcategory.value_counts()

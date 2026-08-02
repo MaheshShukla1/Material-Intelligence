@@ -1,5 +1,8 @@
 const $ = (id) => document.getElementById(id);
 let RUN = null, META = null, SVC = "", TYPE = "", LEAD = 7, SUBCATS = null;
+// Facet filters for the inventory (Safety/Tools) and PPE tabs, plus caches so a
+// facet change re-filters the already-loaded rows without a re-fetch.
+let SIZE = "", CONTRACTOR = "", INV_ROWS = [], PPE_ROWS = [], LAST_SERVICES = [];
 
 const num = (v, d = 0) =>
   v === null || v === undefined ? "—"
@@ -186,6 +189,7 @@ async function show(runId, meta, summary) {
   paintMapping(meta.mapping, meta.source);
   paintKpis(summary);
   SUBCATS = await (await fetch(`/api/subcategories/${runId}`)).json();
+  LAST_SERVICES = summary.services || [];
   paintTabs(summary.services);
   paintTypes();
   $("rule").textContent =
@@ -482,19 +486,69 @@ function paintMapping(map, source) {
       : "");
 }
 
+/* Each KPI card maps to ONE filter that returns exactly the card's number, so
+   clicking a card shows precisely those items. Note the two that are not plain
+   single-status filters:
+   - "Act today" = STOCKED_OUT + RED (a two-status set), and
+   - "Order date passed" = order-by date in the past (the "__overdue__" token,
+     handled in load()); it is NOT a status set - an overdue item may be RED,
+     STOCKED_OUT or even AMBER, which is exactly the mismatch this fixes. */
+const KPI_CARDS = [
+  ["Act today", "out of stock or inside lead time", "STOCKED_OUT,RED"],
+  ["Already out", "zero on hand, still consuming", "STOCKED_OUT"],
+  ["Order date passed", "should already have been raised", "__overdue__"],
+  ["Order this week", "inside twice the lead time", "AMBER"],
+  ["Stop ordering", "overstocked, unused, or paused",
+   "OVERSTOCK,DEAD_STOCK,NO_RECENT_USE"],
+  ["No action", "healthy cover", "GREEN"],
+];
+
 function paintKpis(s) {
   const c = s.counts, g = (k) => c[k] || 0;
-  const cards = [
-    ["Act today", g("STOCKED_OUT") + g("RED"), "out of stock or inside lead time", true],
-    ["Already out", g("STOCKED_OUT"), "zero on hand, still consuming", g("STOCKED_OUT") > 0],
-    ["Order date passed", s.overdue_orders, "should already have been raised", s.overdue_orders > 0],
-    ["Order this week", g("AMBER"), "inside twice the lead time", false],
-    ["Stop ordering", s.idle_lines, "overstocked, unused, or paused", false],
-    ["No action", g("GREEN"), "healthy cover", false],
-  ];
-  $("kpis").innerHTML = cards.map(([l, v, h, hot]) =>
-    `<div class="kpi${hot ? " hot" : ""}"><p class="l">${l}</p>
-     <p class="v">${num(v)}</p><p class="h">${h}</p></div>`).join("");
+  const val = {
+    "STOCKED_OUT,RED": g("STOCKED_OUT") + g("RED"),
+    "STOCKED_OUT": g("STOCKED_OUT"),
+    "__overdue__": s.overdue_orders,
+    "AMBER": g("AMBER"),
+    "OVERSTOCK,DEAD_STOCK,NO_RECENT_USE": s.idle_lines,
+    "GREEN": g("GREEN"),
+  };
+  const hot = { "STOCKED_OUT,RED": true, "STOCKED_OUT": g("STOCKED_OUT") > 0,
+                "__overdue__": s.overdue_orders > 0 };
+  $("kpis").innerHTML = KPI_CARDS.map(([l, h, tok]) =>
+    `<div class="kpi${hot[tok] ? " hot" : ""}" role="button" tabindex="0"
+       data-tok="${esc(tok)}" title="Click to filter the table to these ${
+       num(val[tok])} items">
+       <p class="l">${l}</p><p class="v">${num(val[tok])}</p>
+       <p class="h">${h}</p></div>`).join("");
+  $("kpis").querySelectorAll(".kpi").forEach((el) => {
+    el.onclick = () => clickKpi(el.dataset.tok);
+    el.onkeydown = (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); clickKpi(el.dataset.tok); }
+    };
+  });
+  syncKpiHighlight();
+}
+
+/* Clicking a card drops any trade/type filter (the numbers are whole-project),
+   sets the matching status filter, and loads the table so the engineer sees
+   exactly where that card's items are. */
+function clickKpi(tok) {
+  SVC = ""; TYPE = ""; SIZE = ""; CONTRACTOR = "";
+  $("status").value = tok;
+  paintTabs(LAST_SERVICES || []);
+  paintTypes();
+  load();
+}
+
+/* Show which card (if any) the current view corresponds to. A card is "active"
+   only in the whole-project forecast view (no trade/type filter) whose status
+   matches the card's token. */
+function syncKpiHighlight() {
+  const active = (SVC === "" && TYPE === "") ? $("status").value : null;
+  $("kpis").querySelectorAll(".kpi").forEach((el) => {
+    el.classList.toggle("sel", active !== null && el.dataset.tok === active);
+  });
 }
 
 /* Which view a tab drives:
@@ -521,7 +575,7 @@ function paintTabs(services) {
   $("svc").querySelectorAll(".tab").forEach((b) => {
     b.onclick = () => {
       SVC = b.dataset.s;
-      TYPE = "";                       // switching service clears the type
+      TYPE = ""; SIZE = ""; CONTRACTOR = "";   // switching service clears facets
       paintTabs(services);
       paintTypes();
       load();
@@ -557,6 +611,9 @@ function paintTypes() {
 }
 
 $("type").onchange = (e) => {
+  // In the inventory / PPE tabs the type filter is a plain facet over the loaded
+  // rows - just set it and re-filter from cache, no service reset.
+  if (modeFor(SVC) !== "forecast") { TYPE = e.target.value; rerenderFacets(); return; }
   const v = e.target.value;
   if (v === "") {
     // "All types" = leave the single-service view entirely: reset to All
@@ -577,6 +634,43 @@ $("type").onchange = (e) => {
   load();
 };
 
+$("size").onchange = (e) => { SIZE = e.target.value; rerenderFacets(); };
+$("contractor").onchange = (e) => { CONTRACTOR = e.target.value; rerenderFacets(); };
+
+/* Re-filter the already-loaded inventory / PPE rows after a facet change,
+   without a network round-trip. */
+function rerenderFacets() {
+  const mode = modeFor(SVC);
+  if (mode === "inventory") renderInventory(INV_ROWS);
+  else if (mode === "ppe") renderPPE(PPE_ROWS);
+}
+
+/* Count occurrences of each value and return them highest-first (ties by name).
+   Drives every facet dropdown so the busiest type/size/contractor sits on top. */
+function facetCounts(values) {
+  const m = new Map();
+  values.forEach((v) => m.set(v, (m.get(v) || 0) + 1));
+  return [...m.entries()]
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count || String(a.name).localeCompare(b.name));
+}
+
+/* Fill a facet <select> with an "all" row plus counted options, preserving the
+   current selection. */
+function fillFacet(sel, allLabel, list, current) {
+  sel.innerHTML = [`<option value="">${allLabel}</option>`].concat(
+    list.map((t) =>
+      `<option value="${esc(t.name)}" ${t.name === current ? "selected" : ""}>${
+        esc(t.name)} (${t.count})</option>`)).join("");
+}
+
+/* Normalise a hand-typed PPE shoe size ("6 NUMBER", "7 NIMBER", "9*NUMBER") down
+   to just the number so sizes group. Empty when there is no number. */
+const shoeSize = (v) => {
+  const m = String(v || "").match(/([0-9]{1,2})/);
+  return m ? m[1] : "";
+};
+
 function debounce(fn, ms) {
   let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
 }
@@ -590,11 +684,15 @@ async function load() {
   if (mode === "ppe") return loadPPE();
   if (mode === "inventory") return loadInventory();
 
-  const p = new URLSearchParams({
-    status: $("status").value, service: SVC,
-    subcategory: TYPE, q: $("q").value,
-  });
+  // "Order date passed" is not a status - it is the overdue (order-by in the
+  // past) set, so it is sent as its own flag to match the KPI card exactly.
+  const stVal = $("status").value;
+  const params = { service: SVC, subcategory: TYPE, q: $("q").value };
+  if (stVal === "__overdue__") params.overdue = 1;
+  else params.status = stVal;
+  const p = new URLSearchParams(params);
   paintRows(await (await fetch(`/api/forecast/${RUN}?${p}`)).json());
+  syncKpiHighlight();
 }
 
 /* Reshape the shared table chrome for the current mode. The forecast table has
@@ -603,11 +701,16 @@ async function load() {
    back so the MEP view is untouched. */
 function applyMode(mode) {
   const head = document.querySelector("#report thead tr");
-  const status = $("status");
+  const statuswrap = $("statuswrap");
   const rule = $("rule");
   const legend = document.querySelector(".legend");
   const note = ensureInvNote();
   const colgroup = document.querySelector("#report colgroup");
+  // Facet selects are owned by whichever loader is about to run. Hide the two
+  // extra ones on every mode entry; the forecast type filter is managed by
+  // paintTypes, the inventory/PPE ones by their loaders below.
+  $("size").hidden = true;
+  $("contractor").hidden = true;
   // The fixed 5-column widths only make sense for the forecast table. Disable
   // them in the other modes so 3/4-column layouts size naturally.
   if (colgroup) colgroup.style.display = mode === "forecast" ? "" : "none";
@@ -615,20 +718,20 @@ function applyMode(mode) {
     head.innerHTML =
       `<th>Material</th><th>What to do</th><th class="n">Stock</th>` +
       `<th>Runs out</th><th>Trust</th>`;
-    status.hidden = false; rule.hidden = false;
+    statuswrap.hidden = false; rule.hidden = false;
     if (legend) legend.hidden = false;
     note.hidden = true;
   } else if (mode === "inventory") {
     head.innerHTML =
       `<th>Item</th><th class="n">Stock</th><th>Type</th>`;
-    status.hidden = true; rule.hidden = true;
+    statuswrap.hidden = true; rule.hidden = true;
     if (legend) legend.hidden = true;
     note.textContent = "Inventory view — count only, no forecast.";
     note.hidden = false;
   } else { // ppe
     head.innerHTML =
       `<th>Name</th><th>Issued</th><th>Contractor</th><th>Date</th>`;
-    status.hidden = true; rule.hidden = true;
+    statuswrap.hidden = true; rule.hidden = true;
     if (legend) legend.hidden = true;
     note.textContent =
       "Issue log — who was issued what. Not a stock count.";
@@ -652,37 +755,113 @@ function ensureInvNote() {
 
 async function loadInventory() {
   // Reuse the forecast endpoint (Safety/Tools rows carry status INVENTORY) and
-  // apply the search box client-side. No status/type filter in this mode.
+  // the search box server-side. Cache the rows so type/size facet changes
+  // re-filter without re-fetching.
   const p = new URLSearchParams({ service: SVC, q: $("q").value });
-  const rows = await (await fetch(`/api/forecast/${RUN}?${p}`)).json();
-  $("empty").hidden = rows.length > 0;
-  $("rows").innerHTML = rows.map((r) =>
+  INV_ROWS = await (await fetch(`/api/forecast/${RUN}?${p}`)).json();
+  renderInventory(INV_ROWS);
+}
+
+/* Inventory table + facets. The Type column and the type filter use tool_type
+   (the dedicated tool/safety classifier), NOT the material sub-category - a
+   ladder is a Ladder here, not a "Cable tray". Sizes appear only when the
+   register writes them into the name (safety shoes), otherwise the size filter
+   is hidden and we fall back to type-only. */
+function renderInventory(rows) {
+  const types = facetCounts(rows.map((r) => r.tool_type).filter(Boolean));
+  const sizes = facetCounts(rows.map((r) => r.tool_size).filter(Boolean));
+  fillFacet($("type"), "All types", types, TYPE);
+  $("type").hidden = false;
+  if (sizes.length) {
+    fillFacet($("size"), "All sizes", sizes, SIZE);
+    $("size").hidden = false;
+  } else { $("size").hidden = true; SIZE = ""; }
+
+  let out = rows;
+  if (TYPE) out = out.filter((r) => (r.tool_type || "") === TYPE);
+  if (SIZE) out = out.filter((r) => (r.tool_size || "") === SIZE);
+  $("empty").hidden = out.length > 0;
+  $("rows").innerHTML = out.map((r) =>
     `<tr data-m="${esc(r.material)}">
       <td><div class="mat">${esc(r.material)}</div>
           <div class="sub">${esc(r.unit || "")}</div></td>
       <td class="n"><div class="big">${num(r.stock)}</div></td>
-      <td>${esc(r.subcategory || "—")}</td>
+      <td>${esc(r.tool_type || "—")}${
+        r.tool_size ? ` <span class="sub">· size ${esc(r.tool_size)}</span>` : ""}</td>
     </tr>`).join("");
   $("rows").querySelectorAll("tr").forEach((tr) => {
     tr.onclick = () => openSheet(tr.dataset.m);
   });
 }
 
+const ppeYes = (v) =>
+  v && !["-", "0", "NONE", "NAN", ""].includes(String(v).trim().toUpperCase());
+
 async function loadPPE() {
   const data = await (await fetch(`/api/ppe/${RUN}`)).json();
-  let recs = data.records || [];
+  PPE_ROWS = data.records || [];
+  renderPPE(PPE_ROWS);
+}
+
+/* PPE issue log + facets. Filterable BOTH ways, as the engineer asked:
+   - by TYPE (Shoes / Helmet / Jacket / Blanket) and by shoe SIZE - the primary
+     filters, just like materials have; and
+   - by CONTRACTOR - who was issued how much, busiest contractor on top.
+   The table itself is ordered so the highest-issuing contractor's people sit at
+   the top. */
+function renderPPE(recs) {
+  const ITEMS = [["shoes", "Shoes"], ["helmet", "Helmet"],
+                 ["jacket", "Jacket"], ["blanket", "Blanket"]];
+
+  // ---- facet option lists (built from the full record set) ----
+  const typeVals = [];
+  recs.forEach((r) => ITEMS.forEach(([k, label]) => { if (ppeYes(r[k])) typeVals.push(label); }));
+  const sizeVals = recs.filter((r) => ppeYes(r.shoes))
+    .map((r) => shoeSize(r.shoes_size)).filter(Boolean);
+  const contrVals = recs.map((r) => (r.contractor || "").trim()).filter(Boolean);
+  const contr = facetCounts(contrVals);
+
+  fillFacet($("type"), "All types", facetCounts(typeVals), TYPE);
+  $("type").hidden = false;
+  if (sizeVals.length) {
+    fillFacet($("size"), "All shoe sizes", facetCounts(sizeVals), SIZE);
+    $("size").hidden = false;
+  } else { $("size").hidden = true; SIZE = ""; }
+  fillFacet($("contractor"), "All contractors", contr, CONTRACTOR);
+  $("contractor").hidden = false;
+
+  // rank each contractor by total issues so the table can lead with the biggest
+  const rank = new Map(contr.map((c, i) => [c.name, i]));
+
+  // ---- filtering ----
   const q = $("q").value.trim().toUpperCase();
-  if (q) recs = recs.filter((r) =>
-    (r.name || "").toUpperCase().includes(q) ||
-    (r.contractor || "").toUpperCase().includes(q));
-  $("empty").hidden = recs.length > 0;
-  const yes = (v) => v && !["-", "0", "NONE", "NAN"].includes(String(v).toUpperCase());
-  $("rows").innerHTML = recs.map((r) => {
+  let out = recs.filter((r) => {
+    if (q && !((r.name || "").toUpperCase().includes(q) ||
+               (r.contractor || "").toUpperCase().includes(q))) return false;
+    if (TYPE) {
+      const key = ITEMS.find(([, l]) => l === TYPE);
+      if (!key || !ppeYes(r[key[0]])) return false;
+    }
+    if (SIZE && !(ppeYes(r.shoes) && shoeSize(r.shoes_size) === SIZE)) return false;
+    if (CONTRACTOR && (r.contractor || "").trim() !== CONTRACTOR) return false;
+    return true;
+  });
+
+  // busiest contractor first, then contractor name, then person
+  out = out.slice().sort((a, b) => {
+    const ra = rank.has((a.contractor || "").trim()) ? rank.get((a.contractor || "").trim()) : 1e9;
+    const rb = rank.has((b.contractor || "").trim()) ? rank.get((b.contractor || "").trim()) : 1e9;
+    return ra - rb || String(a.contractor || "").localeCompare(b.contractor || "")
+      || String(a.name || "").localeCompare(b.name || "");
+  });
+
+  $("empty").hidden = out.length > 0;
+  $("rows").innerHTML = out.map((r) => {
     const items = [];
-    if (yes(r.shoes)) items.push(r.shoes_size ? `Shoes (${esc(r.shoes_size)})` : "Shoes");
-    if (yes(r.helmet)) items.push("Helmet");
-    if (yes(r.jacket)) items.push("Jacket");
-    if (yes(r.blanket)) items.push("Blanket");
+    if (ppeYes(r.shoes)) items.push(shoeSize(r.shoes_size) ? `Shoes (${esc(shoeSize(r.shoes_size))})` : "Shoes");
+    if (ppeYes(r.helmet)) items.push("Helmet");
+    if (ppeYes(r.jacket)) items.push("Jacket");
+    if (ppeYes(r.blanket)) items.push("Blanket");
     return `<tr>
       <td><div class="mat">${esc(r.name || "—")}</div></td>
       <td>${items.length ? items.map(esc).join(", ") : "—"}</td>

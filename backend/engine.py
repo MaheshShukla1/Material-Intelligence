@@ -309,8 +309,7 @@ def forecast(daily, asof=None, window=14, lead_time=7, buffer=2, today=None):
             # A material idle 12 days cannot be "2 days from empty". Surface it
             # as paused so the team sees work stopped, not a false shortage.
             if (status in ("RED", "AMBER") and idle is not None
-                    and ((idle >= reorder and idle > days_left)
-                         or (idle >= 8 and idle > days_left * 2))):
+                    and idle >= reorder and idle > days_left):
                 status = "NO_RECENT_USE"
                 days_left = np.nan
 

@@ -222,7 +222,19 @@ def build_daily(mv):
     return g
 
 
-def forecast(daily, asof=None, window=14, lead_time=7, buffer=2, today=None):
+def forecast(daily, asof=None, window=14, lead_time=7, buffer=2, today=None,
+             lead_time_by_material=None):
+    """lead_time_by_material: optional {material: real_lead_days} (from
+    leadtime.py, built off actual PO->GRN history). When given, a material
+    found in it uses ITS OWN lead time for the reorder point and order_by
+    date instead of the one global `lead_time` number - this is what actually
+    changes which status bucket (RED/AMBER/GREEN/...) a material lands in,
+    not just a cosmetic label. A material absent from the lookup (no usable
+    PO/GRN history) falls back to `lead_time` exactly as before - nothing here
+    ever invents a number for a material with no real data behind it. Passing
+    nothing at all (the default) reproduces the old single-global-number
+    behaviour byte-for-byte.
+    """
     asof = pd.Timestamp(asof or daily.date.max()).normalize()
     # "today" is the real calendar day the user is viewing on. It is usually
     # later than asof (the last date present in the register), because sites
@@ -253,6 +265,16 @@ def forecast(daily, asof=None, window=14, lead_time=7, buffer=2, today=None):
 
         idle = (today - last_out).days if pd.notna(last_out) else None
 
+        # Real per-material lead time when we have usable PO->GRN history for
+        # it; otherwise the one global number, unchanged from before.
+        mat_lt = lead_time_by_material.get(mat) if lead_time_by_material else None
+        if mat_lt is not None:
+            lt, lt_basis, lt_n = float(mat_lt["lead_days"]), mat_lt["basis"], mat_lt["n"]
+            lt_confident = bool(mat_lt.get("confident", False))
+        else:
+            lt, lt_basis, lt_n = float(lead_time), "default", None
+            lt_confident = False
+
         if basis_days >= 8:
             conf, band = "HIGH", 0.15
         elif basis_days >= 4:
@@ -281,7 +303,7 @@ def forecast(daily, asof=None, window=14, lead_time=7, buffer=2, today=None):
             days_left = np.nan
         else:
             days_left = stock / rate
-            reorder = lead_time + buffer
+            reorder = lt + buffer
             # optimistic days_left: if consumption is uncertain (wide band) or
             # slowing, give the material the benefit of the doubt before RED.
             band_mult = 1.0 + (band if isinstance(band, float) and not np.isnan(band) else 0.0)
@@ -333,7 +355,7 @@ def forecast(daily, asof=None, window=14, lead_time=7, buffer=2, today=None):
             elo = today + pd.Timedelta(days=float(days_left) * (1 - band))
             ehi = today + pd.Timedelta(days=float(days_left) * (1 + band))
 
-        order_by = (edate - pd.Timedelta(days=lead_time + buffer)
+        order_by = (edate - pd.Timedelta(days=lt + buffer)
                     if pd.notna(edate) else pd.NaT)
 
         out.append(dict(
@@ -345,7 +367,9 @@ def forecast(daily, asof=None, window=14, lead_time=7, buffer=2, today=None):
             trend=trend,
             days_idle=idle,
             exhaust_date=edate, exhaust_earliest=elo, exhaust_latest=ehi,
-            order_by=order_by))
+            order_by=order_by,
+            lead_time_days=round(lt, 1), lead_time_basis=lt_basis,
+            lead_time_n=lt_n, lead_time_confident=lt_confident))
 
     df = pd.DataFrame(out)
     prio = {"STOCKED_OUT": 0, "RED": 1, "AMBER": 2, "OVERSTOCK": 3,

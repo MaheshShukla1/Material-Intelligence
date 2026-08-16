@@ -42,7 +42,16 @@ function action(r) {
     return ["late", "Order now", d === 1 ? "tomorrow" : `in ${d} days`];
   }
   // AMBER (order this week)
-  if (d <= 0) return ["soon", "Order this week", "order soon"];
+  if (d <= 0) {
+    // Raw numbers say the order date has passed, but status only reached
+    // AMBER - that gap means engine.py's confidence cushion held it back
+    // from RED (thin consumption history, or a decelerating trend). Saying
+    // just "order soon" hid that reasoning; naming it stops it looking like
+    // a contradiction between "runs out soon" and "only this week".
+    const thin = r.confidence === "LOW" || r.confidence === "MEDIUM";
+    return ["soon", "Order this week",
+      thin ? "borderline — thin data, worth a look" : "borderline, worth a look"];
+  }
   if (d === 1) return ["soon", `Order by ${short(r.order_by)}`, "tomorrow"];
   return ["soon", `Order by ${short(r.order_by)}`, `in ${d} days`];
 }
@@ -61,12 +70,47 @@ function runsOut(r) {
 
 const DOTS = { HIGH: "●●●", MEDIUM: "●●○", LOW: "●○○", NONE: "○○○" };
 
+/* Real per-material lead time (from actual PO->GRN history) shows as a small
+   tag under "What to do" - ONLY when a real number was used. A material still
+   on the default global lead time gets no tag at all, same restraint as the
+   rest of this app: nothing is shown unless it is real. This is also exactly
+   what changed the RED/AMBER/GREEN bucket itself (not a cosmetic add-on) -
+   the tag just makes that visible instead of silent. */
+function leadTag(r) {
+  const basis = r.lead_time_basis;
+  if (basis !== "material" && basis !== "supplier" && basis !== "subcategory") return "";
+  const src = basis === "material" ? "this item"
+            : basis === "supplier" ? "its supplier"
+            : "similar items in its category";
+  const n = r.lead_time_n ? `${r.lead_time_n} orders` : "";
+  const thin = !r.lead_time_confident;
+  const cls = thin ? "leadtag thin" : "leadtag";
+  const note = thin ? " — thin data, treat as a hint" : "";
+  return `<div class="${cls}" title="Real lead time from ${esc(src)}'s PO→GRN history (${esc(n)})${esc(note)}">` +
+    `${thin ? "~" : ""}Real lead ${num(r.lead_time_days, 0)}d${n ? ` · ${esc(n)}` : ""}</div>`;
+}
+
 /* ------------------------------------------------------------------ upload */
 $("pick").onclick = () => $("file").click();
+$("pickHome").onclick = () => $("file").click();
 $("file").onchange = (e) => {
   if (e.target.files[0]) send(e.target.files[0]);
   e.target.value = "";
 };
+
+/* Home screen's Upload file / Connect Google Sheet segmented toggle. Purely
+   which pane is visible -- both panes' inputs/handlers are untouched, so
+   switching back and forth never loses anything typed. */
+function setHomePane(which) {
+  $("paneUpload").hidden = which !== "upload";
+  $("paneSheet").hidden = which !== "sheet";
+  $("segUpload").classList.toggle("on", which === "upload");
+  $("segSheet").classList.toggle("on", which === "sheet");
+  $("segUpload").setAttribute("aria-selected", which === "upload");
+  $("segSheet").setAttribute("aria-selected", which === "sheet");
+}
+$("segUpload").onclick = () => setHomePane("upload");
+$("segSheet").onclick = () => setHomePane("sheet");
 
 const drop = $("drop");
 ["dragenter", "dragover"].forEach((t) => drop.addEventListener(t, (e) => {
@@ -79,11 +123,96 @@ drop.addEventListener("drop", (e) => {
   if (e.dataTransfer.files[0]) send(e.dataTransfer.files[0]);
 });
 
+/* Staged loading screen -- a progress ring + step checklist, shown while an
+   upload or sync is genuinely reading sheets, detecting columns, and
+   computing the forecast. Upload/sync is a single request-response (no
+   real per-stage signal streams back from the backend), so the ring's
+   motion between stages is an ESTIMATE -- sized from the actual file being
+   processed (its byte size for an upload; no size is knowable upfront for
+   a sync, so that case uses a flat typical duration) and spread across the
+   real phases in the order they actually run. It never claims completion
+   on its own terms: the animated fill caps at 92% and holds there if the
+   estimate runs out before the real response lands. finish()/fail() -- the
+   only things allowed to move it past that cap -- are driven by the actual
+   fetch resolving, never by the clock. That keeps the number honest: a
+   smooth, predictable feel while genuinely waiting, never a completion
+   claim ahead of the real result. */
+const BUSY_STAGES = [
+  { label: "Fetching your Google Sheet", detail: "Downloading the latest version", to: 12 },
+  { label: "Reading sheets", detail: "Every service tab, one at a time", to: 45 },
+  { label: "Detecting columns", detail: "Matching headers, repairing dates", to: 70 },
+  { label: "Computing forecast", detail: "Consumption rates, reorder points", to: 92 },
+  { label: "Done", detail: "Opening your dashboard", to: 100 },
+];
+function busyEstimateMs(fileSizeBytes) {
+  if (!fileSizeBytes) return 9000;   // sync: no size known upfront -- a typical mid-size run
+  const mb = fileSizeBytes / (1024 * 1024);
+  return Math.round(Math.max(4000, Math.min(25000, mb * 2200 + 3000)));
+}
+function startBusyProgress(uploadLabel, fileSizeBytes) {
+  const ring = $("busy-ring");
+  ring.classList.remove("indeterminate");
+  const stages = BUSY_STAGES.map((s, i) => (i === 0 && uploadLabel) ? { ...s, label: uploadLabel } : s);
+  $("busy-steps").innerHTML = stages.map((s, i) => `
+    <div class="busy-step"><span class="busy-stepicon" data-i="${i}">${i + 1}</span>
+      <div><div class="busy-steplabel" data-i="${i}">${esc(s.label)}</div>
+      <div class="busy-stepdetail" data-i="${i}">${esc(s.detail)}</div></div>
+    </div>`).join("");
+  const total = busyEstimateMs(fileSizeBytes);
+  const CIRC = 364.4;
+  const t0 = Date.now();
+  let done = false;
+  function paint(pct, stageIdx) {
+    const allDone = pct >= 100;
+    $("busy-pct").textContent = Math.round(pct) + "%";
+    $("busy-arc").style.strokeDashoffset = CIRC - (CIRC * pct / 100);
+    $("busytxt").textContent = stages[stageIdx].label;
+    stages.forEach((s, i) => {
+      const icon = document.querySelector(`.busy-stepicon[data-i="${i}"]`);
+      const label = document.querySelector(`.busy-steplabel[data-i="${i}"]`);
+      const detail = document.querySelector(`.busy-stepdetail[data-i="${i}"]`);
+      // once truly finished (100%, driven by the real fetch resolving, never
+      // the clock) every step -- including the last one -- reads as done,
+      // not just "current": there is nothing left in progress at that point.
+      const isDone = i < stageIdx || (allDone && i === stageIdx);
+      const isCurrent = i === stageIdx && !allDone;
+      icon.className = "busy-stepicon" + (isDone ? " done" : isCurrent ? " current" : "");
+      icon.textContent = isDone ? "✓" : String(i + 1);
+      label.className = "busy-steplabel" + (isDone ? " done" : isCurrent ? " current" : "");
+      detail.classList.toggle("show", isCurrent);
+    });
+  }
+  paint(0, 0);
+  const tick = setInterval(() => {
+    if (done) return;
+    const elapsed = Date.now() - t0;
+    const pct = Math.min(92, 100 * elapsed / total);
+    let stageIdx = stages.findIndex((s) => pct <= s.to);
+    if (stageIdx === -1 || stageIdx === stages.length - 1) stageIdx = stages.length - 2;
+    const remainMs = Math.max(total - elapsed, 0);
+    const remainS = Math.ceil(remainMs / 1000);
+    $("busy-eta").textContent = remainMs > 500 ? `About ${remainS} second${remainS === 1 ? "" : "s"} left` : "Almost there";
+    paint(pct, stageIdx);
+  }, 150);
+  return {
+    finish() { done = true; clearInterval(tick); $("busy-eta").textContent = ""; paint(100, stages.length - 1); },
+    fail() { done = true; clearInterval(tick); },
+  };
+}
+/* No real stages to narrate here -- switching to an already-loaded project
+   just re-fetches a stored run, nothing is being re-parsed or recomputed. */
+function startBusySimple(label) {
+  $("busy-ring").classList.add("indeterminate");
+  $("busy-steps").innerHTML = "";
+  $("busy-eta").textContent = "";
+  $("busy-pct").textContent = "";
+  $("busytxt").textContent = label;
+}
+
 async function send(file) {
   LEAD = Number($("lead").value) || 7;
   drop.hidden = true; $("report").hidden = true; $("busy").hidden = false;
-  $("busytxt").textContent =
-    "Reading the file, detecting columns, repairing dates…";
+  const progress = startBusyProgress("Uploading your file", file.size);
   const fd = new FormData();
   fd.append("file", file);
   fd.append("lead_time", LEAD);
@@ -92,9 +221,11 @@ async function send(file) {
     const r = await fetch("/api/upload", { method: "POST", body: fd });
     const j = await r.json();
     if (!r.ok) throw new Error(j.detail || "upload failed");
+    progress.finish();
     await show(j.run_id, j.meta, j.summary);
     await loadProjects();
   } catch (err) {
+    progress.fail();
     $("busy").hidden = true; drop.hidden = false;
     alert(err.message);
   }
@@ -108,7 +239,7 @@ async function syncFromSheet(link, project) {
   if (!link) { alert("Paste the published Google Sheet link first."); return; }
   LEAD = Number($("lead").value) || 7;
   drop.hidden = true; $("report").hidden = true; $("busy").hidden = false;
-  $("busytxt").textContent = "Fetching the latest data from your Google Sheet…";
+  const progress = startBusyProgress(null, null);
   const fd = new FormData();
   fd.append("link", link);
   fd.append("lead_time", LEAD);
@@ -118,9 +249,11 @@ async function syncFromSheet(link, project) {
     const j = await r.json();
     if (!r.ok) throw new Error(j.detail || "sync failed");
     try { localStorage.setItem("sheetLink", link); } catch (e) {}
+    progress.finish();
     await show(j.run_id, j.meta, j.summary);
     await loadProjects();
   } catch (err) {
+    progress.fail();
     $("busy").hidden = true; drop.hidden = false;
     alert(err.message);
   }
@@ -192,12 +325,19 @@ async function show(runId, meta, summary) {
   LAST_SERVICES = summary.services || [];
   paintTabs(summary.services);
   paintTypes();
-  $("rule").textContent =
-    `Lead time ${LEAD} days plus a 2 day buffer, so an order must be raised ` +
-    `${LEAD + 2} days before stock hits zero.`;
+  {
+    const lt = meta.leadtime;
+    $("rule").textContent = (lt && lt.materials_with_real_lead_time)
+      ? `Real PO→GRN lead time used for ${lt.materials_with_real_lead_time} of ` +
+        `${lt.materials_in_run} materials; everything else uses the default ` +
+        `${LEAD} days plus a 2 day buffer.`
+      : `Lead time ${LEAD} days plus a 2 day buffer, so an order must be raised ` +
+        `${LEAD + 2} days before stock hits zero.`;
+  }
   $("dl").hidden = false; $("dl").href = `/api/export/${RUN}`;
   $("del").hidden = false;
   $("home").hidden = false;
+  $("pick").hidden = false; $("sync").hidden = false; $("leadwrap").hidden = false;
   await load();
   $("busy").hidden = true; $("drop").hidden = true; $("report").hidden = false;
   syncHeaderOffset();
@@ -212,6 +352,7 @@ function goHome() {
   $("busy").hidden = true;
   $("drop").hidden = false;
   $("home").hidden = true;
+  $("pick").hidden = true; $("sync").hidden = true; $("leadwrap").hidden = true;
   stopAuto();
   // Reset the switcher to a neutral prompt so that picking ANY project next -
   // including the one that was open - registers as a change and loads it.
@@ -240,6 +381,40 @@ async function loadProjects(neutral) {
     `<option value="${esc(p.latest_run)}" data-slug="${esc(p.slug)}"
       ${!neutral && p.latest_run === RUN ? "selected" : ""}>${esc(p.project)} · ${p.runs} run${
       p.runs === 1 ? "" : "s"}</option>`).join("");
+  await renderRecentProjects(ps);
+}
+
+/* Home screen's "Recent projects" list -- one click opens that project's
+   latest run via the same switchProject() the header dropdown uses. Reuses
+   /api/projects (already fetched by the caller) + /api/runs for the per-run
+   material count and date, same two endpoints the Manage-uploads modal
+   already relies on -- no new backend route needed. */
+async function renderRecentProjects(ps) {
+  const wrap = $("recent");
+  if (!wrap) return;
+  if (!ps || !ps.length) { wrap.hidden = true; return; }
+  let runs = [];
+  try { runs = await (await fetch("/api/runs")).json(); } catch (e) { runs = []; }
+  const runById = new Map(runs.map((r) => [r.run_id, r]));
+  $("recentlist").innerHTML = ps.map((p) => {
+    const r = runById.get(p.latest_run);
+    const mats = r && r.stats && r.stats.materials ? `${num(r.stats.materials)} materials` : "";
+    const when = r && r.created ? relTime(r.created) : "";
+    const bits = [`${p.runs} run${p.runs === 1 ? "" : "s"}`, mats,
+      when ? `updated ${when}` : ""].filter(Boolean).join(" · ");
+    return `<div class="rp" data-run="${esc(p.latest_run)}" role="button" tabindex="0">
+      <div><div class="rp-name">${esc(p.project)}</div>
+      <div class="rp-meta">${bits}</div></div>
+      <span class="rp-open">Open →</span>
+    </div>`;
+  }).join("");
+  $("recentlist").querySelectorAll(".rp").forEach((el) => {
+    el.onclick = () => switchProject(el.dataset.run);
+    el.onkeydown = (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); switchProject(el.dataset.run); }
+    };
+  });
+  wrap.hidden = false;
 }
 $("proj").onchange = (e) => switchProject(e.target.value);
 /* If the user reopens the switcher and picks the project that is already
@@ -253,7 +428,7 @@ $("proj").onchange = (e) => switchProject(e.target.value);
 async function switchProject(id) {
   if (!id) return;
   $("report").hidden = true; $("drop").hidden = true; $("busy").hidden = false;
-  $("busytxt").textContent = "Loading project…";
+  startBusySimple("Loading project…");
   try {
     const j = await (await fetch(`/api/run/${id}`)).json();
     await show(id, j.meta, j.summary);
@@ -269,6 +444,33 @@ async function switchProject(id) {
    whole project is a click - no typing a name to confirm. A small confirm
    dialog still guards the actual deletion, since it cannot be undone. */
 $("del").onclick = () => openManager();
+
+/* One upload row: a file icon, filename, real timestamp + material count,
+   and a compact icon-only delete button. `isCurrent` adds the green "Current"
+   badge -- the run this project's header/switcher would actually open. */
+function mrunRowHTML(r, isCurrent) {
+  const when = (r.created || "").replace("T", " ").slice(0, 16);
+  const mats = r.stats && r.stats.materials ? `${r.stats.materials} materials` : "";
+  return `<div class="mrun">
+    <div class="mrun-ic"><svg class="mrun-svg" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6Z" stroke="currentColor" stroke-width="1.5"/>
+      <path d="M14 2v6h6" stroke="currentColor" stroke-width="1.5"/>
+    </svg></div>
+    <div class="mrun-info">
+      <div class="mrun-toprow">
+        <span class="mrun-file">${esc(r.filename || r.run_id)}</span>
+        ${isCurrent ? '<span class="mrun-badge">Current</span>' : ""}
+      </div>
+      <span class="mrun-meta">${esc(when)}${mats ? " · " + mats : ""}</span>
+    </div>
+    <button class="mrun-del" data-run="${esc(r.run_id)}" aria-label="Delete this upload" title="Delete this upload">
+      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path d="M4 7h16M9 7V4h6v3M6 7l1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13"
+          stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </button>
+  </div>`;
+}
 
 async function openManager() {
   $("merr").hidden = true;
@@ -286,31 +488,40 @@ async function openManager() {
   runs.forEach((r) => {
     (runsByProject[r.project_slug] = runsByProject[r.project_slug] || []).push(r);
   });
-  $("mlist").innerHTML = projects.map((p) => {
-    const rs = runsByProject[p.slug] || [];
-    const rows = rs.map((r) => {
-      const when = (r.created || "").replace("T", " ").slice(0, 16);
-      const mats = r.stats && r.stats.materials ? `${r.stats.materials} materials` : "";
-      return `<div class="mrun">
-        <div class="mrun-info">
-          <span class="mrun-file">${esc(r.filename || r.run_id)}</span>
-          <span class="mrun-meta">${esc(when)}${mats ? " · " + mats : ""}</span>
-        </div>
-        <button class="btn danger sm" data-run="${esc(r.run_id)}">Delete</button>
-      </div>`;
-    }).join("");
-    return `<div class="mproj">
-      <div class="mproj-hd">
-        <div>
-          <span class="mproj-name">${esc(p.project)}</span>
-          <span class="mproj-count">${rs.length} upload${rs.length === 1 ? "" : "s"}</span>
-        </div>
-        <button class="btn danger sm" data-project="${esc(p.slug)}" data-name="${esc(p.project)}">Delete project</button>
-      </div>
-      ${rows}
+
+  const groups = projects.map((p) => {
+    const rs = (runsByProject[p.slug] || []).slice()
+      .sort((a, b) => (b.created || "").localeCompare(a.created || ""));
+    const current = rs.find((r) => r.run_id === p.latest_run) || rs[0];
+    const older = rs.filter((r) => r !== current);
+    return `<div class="mproj" data-slug="${esc(p.slug)}">
+      <div class="mproj-hd"><span class="mproj-name">${esc(p.project)}</span></div>
+      ${current ? mrunRowHTML(current, true) : ""}
+      ${older.length ? `
+        <button type="button" class="mshowmore">Show ${older.length} older upload${older.length === 1 ? "" : "s"}</button>
+        <div class="molder" hidden>${older.map((r) => mrunRowHTML(r, false)).join("")}</div>` : ""}
     </div>`;
   }).join("");
 
+  const danger = `<div class="mdanger">
+    <div class="mdanger-title">Danger zone</div>
+    <div class="mdanger-list">${projects.map((p) =>
+      `<button class="btn danger sm" data-project="${esc(p.slug)}" data-name="${esc(p.project)}">Delete ${esc(p.project)}</button>`
+    ).join("")}</div>
+  </div>`;
+
+  $("mlist").innerHTML = groups + danger;
+
+  $("mlist").querySelectorAll(".mshowmore").forEach((btn) => {
+    btn.onclick = () => {
+      const box = btn.nextElementSibling;
+      const wasOpen = !box.hidden;
+      box.hidden = wasOpen;
+      const n = box.querySelectorAll(".mrun").length;
+      btn.textContent = wasOpen
+        ? `Show ${n} older upload${n === 1 ? "" : "s"}` : "Hide older uploads";
+    };
+  });
   $("mlist").querySelectorAll("[data-run]").forEach((b) => {
     b.onclick = () => askConfirm("run", b.dataset.run,
       "Delete this upload?",
@@ -706,6 +917,7 @@ function applyMode(mode) {
   const legend = document.querySelector(".legend");
   const note = ensureInvNote();
   const colgroup = document.querySelector("#report colgroup");
+  const kpis = $("kpis");
   // Facet selects are owned by whichever loader is about to run. Hide the two
   // extra ones on every mode entry; the forecast type filter is managed by
   // paintTypes, the inventory/PPE ones by their loaders below.
@@ -714,6 +926,16 @@ function applyMode(mode) {
   // The fixed 5-column widths only make sense for the forecast table. Disable
   // them in the other modes so 3/4-column layouts size naturally.
   if (colgroup) colgroup.style.display = mode === "forecast" ? "" : "none";
+  // The KPI row (Act today / Already out / ...) is Forecast-specific — it
+  // counts RED/AMBER/GREEN shortage status, which Safety/Tools inventory
+  // rows and the PPE issue log don't have at all. It used to render
+  // unconditionally regardless of mode, so it kept showing (with numbers
+  // that have nothing to do with what's on screen) on Inventory and PPE too.
+  if (kpis) kpis.hidden = mode !== "forecast";
+  // The PPE summary banner is PPE-only -- hide it on every mode entry;
+  // renderPPE() below re-shows it once a TYPE is actually selected.
+  const ppeSummaryEl = ensurePpeSummary();
+  if (mode !== "ppe") ppeSummaryEl.hidden = true;
   if (mode === "forecast") {
     head.innerHTML =
       `<th>Material</th><th>What to do</th><th class="n">Stock</th>` +
@@ -751,6 +973,31 @@ function ensureInvNote() {
     wrap.parentNode.insertBefore(el, wrap);
   }
   return el;
+}
+
+/* PPE's "how many of this were issued" banner -- a big bold count, created
+   once and reused, sitting right above the table (after the invnote). Only
+   shown while a TYPE is selected (a bare headcount across every item type
+   mixed together isn't a meaningful single number); updates live as TYPE /
+   SIZE / CONTRACTOR change so nobody has to count table rows by hand. */
+function ensurePpeSummary() {
+  let el = $("ppesummary");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "ppesummary";
+    el.className = "ppesummary";
+    el.hidden = true;
+    const wrap = document.querySelector(".tablewrap");
+    wrap.parentNode.insertBefore(el, wrap);
+  }
+  return el;
+}
+function ppeSummaryText(type, size, contractor, count) {
+  const noun = type === "Shoes"
+    ? (size ? `pairs of size ${size} Shoes` : "pairs of Shoes")
+    : `${type}s`;
+  const who = contractor ? ` to ${esc(contractor)}` : "";
+  return `<b>${count}</b><span>${esc(noun)} issued${who}</span>`;
 }
 
 async function loadInventory() {
@@ -847,6 +1094,20 @@ function renderPPE(recs) {
     return true;
   });
 
+  // ---- summary banner: "N Jackets issued[ to CONTRACTOR]" / "N pairs of
+  // size S Shoes issued[ to CONTRACTOR]" -- exactly what's in the table
+  // below it (same `out`, same filters, search included), so nobody has to
+  // count rows by hand. Shown only once a TYPE is picked; a bare headcount
+  // across every mixed item type isn't one meaningful number. Works for any
+  // type in ITEMS, not just Jacket -- nothing here is type-specific. ----
+  const summary = ensurePpeSummary();
+  if (TYPE) {
+    summary.innerHTML = ppeSummaryText(TYPE, SIZE, CONTRACTOR, out.length);
+    summary.hidden = false;
+  } else {
+    summary.hidden = true;
+  }
+
   // busiest contractor first, then contractor name, then person
   out = out.slice().sort((a, b) => {
     const ra = rank.has((a.contractor || "").trim()) ? rank.get((a.contractor || "").trim()) : 1e9;
@@ -857,11 +1118,19 @@ function renderPPE(recs) {
 
   $("empty").hidden = out.length > 0;
   $("rows").innerHTML = out.map((r) => {
+    // TYPE filter narrows WHICH ROWS show (a person who got a jacket), but
+    // the Issued column used to always list everything that person ever
+    // received - so filtering to "Jacket" still showed their Shoes/Helmet
+    // too, which read as if the filter wasn't working. When a type is
+    // selected, the column now only shows that one item; with no type
+    // filter, it still shows everything, unchanged.
     const items = [];
-    if (ppeYes(r.shoes)) items.push(shoeSize(r.shoes_size) ? `Shoes (${esc(shoeSize(r.shoes_size))})` : "Shoes");
-    if (ppeYes(r.helmet)) items.push("Helmet");
-    if (ppeYes(r.jacket)) items.push("Jacket");
-    if (ppeYes(r.blanket)) items.push("Blanket");
+    const showAll = !TYPE;
+    if ((showAll || TYPE === "Shoes") && ppeYes(r.shoes))
+      items.push(shoeSize(r.shoes_size) ? `Shoes (${esc(shoeSize(r.shoes_size))})` : "Shoes");
+    if ((showAll || TYPE === "Helmet") && ppeYes(r.helmet)) items.push("Helmet");
+    if ((showAll || TYPE === "Jacket") && ppeYes(r.jacket)) items.push("Jacket");
+    if ((showAll || TYPE === "Blanket") && ppeYes(r.blanket)) items.push("Blanket");
     return `<tr>
       <td><div class="mat">${esc(r.name || "—")}</div></td>
       <td>${items.length ? items.map(esc).join(", ") : "—"}</td>
@@ -882,7 +1151,8 @@ function paintRows(rows) {
       <td><div class="mat">${esc(r.material)}</div>
           <div class="sub">${esc(r.service || "")} · ${esc(r.unit || "")}</div></td>
       <td><span class="act a-${cls}">${main}</span>
-          ${sub ? `<div class="sub">${sub}</div>` : ""}</td>
+          ${sub ? `<div class="sub">${sub}</div>` : ""}
+          ${leadTag(r)}</td>
       <td class="n"><div class="big">${num(r.stock)}</div>
           <div class="sub">${num(r.rate_per_day, 1)} / day</div></td>
       <td><div>${ro}</div><div class="sub">${roSub}</div></td>
@@ -922,12 +1192,20 @@ function sparkline(rows) {
   const W = 500, H = 92, max = Math.max(...pts.map((p) => p.balance), 1);
   const d = pts.map((p, i) =>
     `${(i / (pts.length - 1)) * W},${H - (p.balance / max) * (H - 8) - 4}`).join(" ");
-  const received = rows.reduce((t, r) => t + (r.qty_in > 0 ? r.qty_in : 0), 0);
+  // "Total received" = everything that ever came in -- the register's own
+  // Opening Stock for this material PLUS every dated IN transaction since.
+  // Opening is constant across every row (the backend broadcasts it), so
+  // any row carries it; summing dated IN alone used to show "0 received"
+  // for a material whose entire supply arrived as an opening balance with
+  // no subsequent purchases, even though it clearly has real stock.
+  const opening = rows.length && rows[0].opening != null ? Number(rows[0].opening) || 0 : 0;
+  const datedIn = rows.reduce((t, r) => t + (r.qty_in > 0 ? r.qty_in : 0), 0);
+  const received = opening + datedIn;
   return `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}">
     <polyline points="${d}" fill="none" stroke="#1c1c1b" stroke-width="1.5"/>
     <line x1="0" y1="${H - 4}" x2="${W}" y2="${H - 4}" stroke="#e7e5df"/>
   </svg><p class="sub">Balance over time · peak ${num(max)}</p>
-  <p class="sub">Total received · ${num(received)}</p>`;
+  <p class="sub sp-totrecv">Total received · <b>${num(received)}</b>${opening > 0 ? ` <span class="sub">(${num(opening)} opening + ${num(datedIn)} received since)</span>` : ""}</p>`;
 }
 
 /* On load: restore the last viewed run if it still exists, so a browser reload

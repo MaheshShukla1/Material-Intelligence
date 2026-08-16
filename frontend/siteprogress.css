@@ -1,0 +1,327 @@
+/* Site Progress — additive styles. Every class is sp- prefixed so nothing here
+   can touch the existing Forecast/Inventory UI. Reuses the app's design tokens
+   (--ink, --line, --green ...) so it is visually seamless. */
+
+@media (prefers-reduced-motion:reduce){.sp *{transition:none!important;animation:none!important}}
+
+/* top nav (Forecast · Site Progress · Inventory) injected into the header */
+.spnav{display:flex;gap:3px;background:var(--slatebg);padding:3px;border-radius:11px}
+.spnav button{font:inherit;font-size:13px;font-weight:500;padding:6px 14px;border:none;
+  background:none;color:var(--ink2);border-radius:8px;cursor:pointer;transition:.15s}
+.spnav button.on{background:var(--panel);color:var(--ink);box-shadow:0 1px 2px rgba(0,0,0,.06)}
+.spnav button:not(.on):hover{color:var(--ink)}
+
+.sp{box-sizing:border-box;width:min(1480px,calc(100vw - 44px));
+  margin-left:calc((100% - min(1480px,calc(100vw - 44px))) / 2);padding-bottom:80px}
+
+/* ---- setup (onboarding) ---- */
+.sp-setup{max-width:640px;margin:30px auto}
+.sp-setup h2{font-size:18px;margin-bottom:6px}
+.sp-setup p.sub{color:var(--ink3);font-size:13px;margin:0 0 22px}
+.sp-step{background:var(--panel);border:1px solid var(--line);border-radius:14px;
+  padding:18px 20px;margin-bottom:14px}
+.sp-step .n{display:inline-flex;width:22px;height:22px;border-radius:50%;
+  background:var(--ink);color:#fff;font-size:12px;align-items:center;justify-content:center;
+  margin-right:9px;vertical-align:middle}
+.sp-step h3{display:inline;font-size:14.5px}
+.sp-step .body{margin:12px 0 0 31px}
+.sp-tmpl{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+.sp-tmpl button{font:inherit;font-size:12.5px;padding:7px 13px;border:1px solid var(--line);
+  background:var(--panel);border-radius:9px;cursor:pointer;color:var(--ink2)}
+.sp-tmpl button.on{border-color:var(--ink);color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.sp-done{color:var(--green);font-size:12.5px;margin-left:8px}
+
+/* ---- layout ---- */
+.sp-layout{display:grid;grid-template-columns:262px minmax(0,1fr);gap:26px;margin:22px auto 0;max-width:1560px}
+@media(max-width:900px){.sp-layout{grid-template-columns:1fr;gap:16px}.sp-rail{position:static}}
+.sp-crumb, .sp-setup{max-width:1560px;margin-left:auto;margin-right:auto}
+
+/* left rail: generic tree (floors/rooms, levels/zones, wings...) */
+.sp-rail{align-self:start;position:sticky;top:76px}
+.sp-railhd{font-size:11.5px;text-transform:uppercase;letter-spacing:.5px;color:var(--ink3);
+  margin:2px 4px 9px;display:flex;justify-content:space-between}
+.sp-tree{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:6px}
+.sp-node>.row{display:flex;align-items:center;gap:7px;padding:8px 9px;border-radius:8px;
+  cursor:pointer;font-size:13px}
+.sp-node>.row:hover{background:var(--slatebg)}
+.sp-node>.row.leaf{color:var(--ink2);font-size:12.5px}
+.sp-node>.row.on{background:var(--ink);color:#fff}
+.sp-chev{color:var(--ink3);font-size:9px;width:9px;transition:.15s;flex:none}
+.sp-node.exp>.row>.sp-chev{transform:rotate(90deg)}
+.sp-node .kids{display:none;padding-left:16px}
+.sp-node.exp>.kids{display:block}
+.sp-nodepct{margin-left:auto;font-size:11px;color:var(--ink3);font-variant-numeric:tabular-nums}
+.sp-node>.row.on .sp-nodepct{color:#e9e7e2}
+.sp-treeact{display:flex;gap:6px;opacity:0;transition:.12s}
+.sp-node>.row:hover .sp-treeact{opacity:1}
+.sp-ic{border:none;background:none;cursor:pointer;color:var(--ink3);font-size:12px;padding:0 2px}
+.sp-ic:hover{color:var(--ink)}
+
+/* pills */
+.sp-pills{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:18px}
+.sp-pill{font:inherit;font-size:12.5px;padding:6px 14px;border-radius:20px;border:1px solid var(--line);
+  background:var(--panel);cursor:pointer;color:var(--ink2)}
+.sp-pill.on{background:var(--ink);color:#fff;border-color:var(--ink)}
+.sp-crumb{font-size:12px;color:var(--ink3);margin-bottom:12px}
+
+/* hero */
+.sp-hero{background:var(--panel);border:1px solid var(--line);border-radius:16px;
+  padding:22px 24px;display:grid;grid-template-columns:auto 1fr;gap:26px;align-items:center;
+  margin-bottom:20px}
+@media(max-width:620px){.sp-hero{grid-template-columns:1fr;gap:16px}}
+.sp-ring{--p:0;width:128px;height:128px;border-radius:50%;flex:none;
+  background:conic-gradient(var(--green) calc(var(--p)*1%),var(--line2) 0);
+  display:flex;align-items:center;justify-content:center;transition:--p .5s}
+.sp-ring i{width:100px;height:100px;border-radius:50%;background:var(--panel);font-style:normal;
+  display:flex;flex-direction:column;align-items:center;justify-content:center}
+.sp-ring b{font-size:29px;font-weight:600;letter-spacing:-.5px;font-variant-numeric:tabular-nums}
+.sp-ring span{font-size:11px;color:var(--ink3);margin-top:1px}
+.sp-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+@media(max-width:520px){.sp-stats{grid-template-columns:1fr}}
+.sp-stat .l{font-size:11.5px;color:var(--ink3);margin:0 0 4px}
+.sp-stat .v{font-size:21px;font-weight:600;letter-spacing:-.3px;font-variant-numeric:tabular-nums}
+.sp-stat .v.g{color:var(--green)}.sp-stat .v.a{color:var(--amber)}.sp-stat .v.r{color:var(--red)}
+.sp-stat .h{font-size:11px;color:var(--ink3);margin:2px 0 0}
+
+.sp-secttl{font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:var(--ink3);
+  margin:0 2px 12px;display:flex;justify-content:space-between;align-items:center}
+.sp-secttl .linkbtn{font-size:12px}
+
+/* activity cards */
+.sp-card{background:var(--panel);border:1px solid var(--line);border-radius:14px;
+  margin-bottom:12px;overflow:hidden;transition:border-color .15s,box-shadow .15s}
+.sp-card:hover{border-color:#dad8d2}
+.sp-card.open{box-shadow:0 3px 14px rgba(28,28,27,.05)}
+.sp-chd{display:flex;align-items:center;gap:15px;padding:15px 20px;cursor:pointer}
+.sp-cchev{color:var(--ink3);font-size:11px;width:10px;transition:.2s;flex:none}
+.sp-card.open .sp-cchev{transform:rotate(90deg)}
+.sp-cname{font-weight:600;font-size:14px;min-width:0}
+.sp-cname .s{font-size:11.5px;color:var(--ink3);font-weight:400;margin-top:2px}
+.sp-cbar{margin-left:auto;width:130px;flex:none}
+.sp-cbar .t{height:7px;border-radius:4px;background:var(--line2);overflow:hidden}
+.sp-cbar .f{height:100%;background:var(--green);border-radius:4px;transition:width .45s}
+.sp-cbar .l{display:flex;justify-content:space-between;margin-top:5px;font-size:11px;color:var(--ink3)}
+.sp-cmoney{flex:none;text-align:right;min-width:92px}
+.sp-cmoney b{font-size:13.5px;font-variant-numeric:tabular-nums;display:block}
+.sp-cmoney span{font-size:11px;color:var(--ink3)}
+.sp-cbody{display:none;border-top:1px solid var(--line2);padding:2px 20px 10px}
+.sp-card.open .sp-cbody{display:block}
+
+/* boq item rows -- named areas (not implicit column order) so the two icon
+   buttons always land in their own narrow columns; auto-placement drifted
+   them into the wide name/qty columns once a 4th/5th/6th child was added */
+.sp-brow{display:grid;grid-template-columns:1fr 80px 168px 90px 26px 30px;
+  grid-template-areas:"name qty entry money remove arrow";
+  gap:14px;align-items:center;padding:12px 0;border-bottom:1px solid var(--line2)}
+.sp-brow:last-child{border-bottom:none}
+@media(max-width:720px){.sp-brow{grid-template-columns:1fr 56px 26px 30px;row-gap:8px;
+  grid-template-areas:"name qty remove arrow" "entry entry entry entry" "money money money money"}}
+.sp-bname{grid-area:name;font-size:13px;min-width:0}
+.sp-bname .code{color:var(--ink3);font-size:11px;font-family:ui-monospace,Menlo,monospace;margin-right:6px}
+.sp-bmeta{font-size:11px;color:var(--ink3);margin-top:2px;display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.sp-tag{background:var(--slatebg);border-radius:5px;padding:1px 7px;font-size:10.5px}
+.sp-tag.rev{background:var(--amberbg);color:var(--amber)}
+.sp-bqty{grid-area:qty;font-size:12px;color:var(--ink2);text-align:right;font-variant-numeric:tabular-nums}
+.sp-bqty span{color:var(--ink3);font-size:10.5px;display:block}
+.sp-planned{background:none;border:none;font:inherit;font-size:12px;color:var(--ink);cursor:pointer;padding:0;font-variant-numeric:tabular-nums}
+.sp-planned:hover{color:var(--violet);text-decoration:underline}
+
+/* tap-to-edit quantity entry (primary, real progress control) + a thin
+   slider underneath as a secondary rough-drag shortcut, kept in sync */
+.sp-entry{grid-area:entry;display:flex;flex-direction:column;gap:4px}
+.sp-entrymain{display:flex;align-items:baseline;gap:6px;position:relative}
+.sp-qty{width:64px;font:inherit;font-size:18px;font-weight:600;color:var(--ink);
+  border:1px solid transparent;border-radius:7px;background:transparent;padding:2px 4px;
+  text-align:right;font-variant-numeric:tabular-nums;-moz-appearance:textfield}
+.sp-qty::-webkit-outer-spin-button,.sp-qty::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+.sp-qty:hover{border-color:var(--line)}
+.sp-qty:focus{outline:none;border-color:var(--ink);background:var(--panel)}
+.sp-entryunit{font-size:11.5px;color:var(--ink3)}
+.sp-entrysaved{font-size:10.5px;color:var(--green);opacity:0;transition:opacity .25s;position:absolute;
+  right:-2px;top:-13px;white-space:nowrap;pointer-events:none}
+.sp-entrysaved.show{opacity:1}
+.sp-entrysub{display:flex;align-items:center;gap:7px}
+.sp-entrysub .sp-bslide{height:3px}
+.sp-entrysub .sp-bslide::-webkit-slider-thumb{width:11px;height:11px}
+.sp-entrysub .sp-bslide::-moz-range-thumb{width:11px;height:11px}
+.sp-entrysub .sp-bpct{width:32px;font-size:10.5px;font-weight:500;color:var(--ink3)}
+.sp-bslide{flex:1;-webkit-appearance:none;appearance:none;height:5px;border-radius:3px;background:var(--line2);outline:none}
+.sp-bslide::-webkit-slider-thumb{-webkit-appearance:none;width:15px;height:15px;border-radius:50%;
+  background:var(--ink);cursor:pointer;border:2px solid var(--panel);box-shadow:0 0 0 1px var(--line)}
+.sp-bslide::-moz-range-thumb{width:15px;height:15px;border-radius:50%;background:var(--ink);cursor:pointer;border:2px solid var(--panel)}
+.sp-bpct{font-size:12px;font-weight:600;width:38px;text-align:right;font-variant-numeric:tabular-nums}
+
+.sp-bmoney{grid-area:money;text-align:right}
+.sp-bmoney b{font-size:12.5px;font-variant-numeric:tabular-nums}
+.sp-setrate{font-size:11px;color:var(--violet);text-decoration:underline;cursor:pointer;background:none;border:none;padding:0}
+.sp-fx{width:26px;height:26px;border-radius:7px;border:1px solid var(--line);background:var(--panel);
+  cursor:pointer;color:var(--ink2);font-size:13px;line-height:1;justify-self:center}
+.sp-fx:hover{border-color:#cfcdc6}
+.sp-fx.alert{color:var(--red);border-color:#eec9c7;background:#fffbfb}
+.sp-fx[data-removeitem]{grid-area:remove}
+.sp-fx[data-removeitem]:hover{color:var(--red);border-color:#eec9c7}
+.sp-fx[data-fx]{grid-area:arrow}
+.sp-labour{font-size:12px;color:var(--ink3);padding:12px 2px}
+
+/* Overall tab's by-service summary row — deliberately its OWN classes, never
+   shared with .sp-brow/.sp-bqty (the item-row grid). Those carry grid-area
+   assignments for a 6-column item row; reusing them here for a different
+   4-column layout made every stat collapse onto the same "qty" cell.
+   Now doubles as the clickable service-header row of the three-level
+   Overall accordion (Service -> Activity -> Item, Mockup 1) — the row
+   itself is unchanged, it just sits inside a .sp-card and gets a chevron. */
+.sp-ovrow{display:grid;grid-template-columns:18px 1fr 90px 120px 110px;gap:14px;align-items:center;
+  padding:15px 20px;cursor:pointer}
+@media(max-width:640px){.sp-ovrow{grid-template-columns:18px 1fr 1fr;row-gap:6px}}
+.sp-ovchev{font-size:11px;color:var(--ink3);transition:.2s}
+.sp-card.open>.sp-ovrow .sp-ovchev{transform:rotate(90deg)}
+.sp-ovname{font-size:14px;font-weight:600;min-width:0}
+.sp-ovname .s{font-size:11.5px;color:var(--ink3);font-weight:400;margin-top:2px}
+.sp-ovstat{font-size:13px;color:var(--ink2);text-align:right;font-variant-numeric:tabular-nums}
+.sp-ovstat span{color:var(--ink3);font-size:10.5px;display:block}
+.sp-ovstat.pct{font-weight:700;color:var(--ink)}
+.sp-ovstat.done{font-weight:600;color:var(--green)}
+.sp-ovstat.rem{font-weight:600;color:var(--amber)}
+.sp-unmapped{font-size:12px;color:var(--ink3);margin:8px 2px 0}
+.sp-unmapped b{color:var(--amber)}
+
+/* level 2: activities, in a lightly-shaded sub-panel under the open service */
+.sp-ovacts{background:var(--slatebg);border-radius:10px;padding:2px 14px;margin:0 20px 14px}
+.sp-ovact{border-bottom:1px solid var(--line2)}
+.sp-ovact:last-child{border-bottom:none}
+.sp-ovact.open{border-bottom-color:transparent}
+.sp-ovactrow{display:flex;align-items:center;gap:10px;padding:11px 2px;cursor:pointer}
+.sp-ovachev{font-size:10px;color:var(--ink3);flex:none;transition:.2s}
+.sp-ovact.open .sp-ovactrow .sp-ovachev{transform:rotate(90deg)}
+.sp-ovactname{font-weight:600;font-size:13.5px;min-width:0}
+.sp-ovactsub{font-size:11.5px;color:var(--ink2);font-weight:500;margin-top:2px}
+.sp-ovactmoney{margin-left:auto;text-align:right;flex:none;min-width:86px}
+.sp-ovactmoney b{font-size:12.5px;display:block;font-variant-numeric:tabular-nums}
+.sp-ovactmoney span{font-size:10.5px;color:var(--ink3)}
+.sp-ovactmoney.done b{color:var(--green)}
+.sp-ovactmoney.rem b{color:var(--amber)}
+
+/* level 3: items — same visual language as the activity row, indented once more */
+.sp-ovitems{display:none;padding:0 0 8px 22px;border-bottom:1px solid var(--line2)}
+.sp-ovact.open .sp-ovitems{display:block}
+.sp-ovact:last-child .sp-ovitems{border-bottom:none}
+.sp-ovitemrow{display:flex;align-items:center;gap:10px;padding:9px 2px;border-bottom:1px solid var(--line2)}
+.sp-ovitemrow:last-child{border-bottom:none}
+.sp-ovitemname{font-weight:600;font-size:13.5px;min-width:0}
+.sp-ovitemsub{font-size:11.5px;color:var(--ink2);font-weight:500;margin-top:2px}
+.sp-ovitemmoney{margin-left:auto;text-align:right;flex:none;min-width:86px}
+.sp-ovitemmoney b{font-size:12.5px;display:block;font-variant-numeric:tabular-nums}
+.sp-ovitemmoney span{font-size:10.5px;color:var(--ink3)}
+.sp-ovitemmoney.done b{color:var(--green)}
+.sp-ovitemmoney.rem b{color:var(--amber)}
+
+/* the real qty numbers inside an activity/item subtitle ("N of M UNIT") --
+   bolded and darkened so the actual quantity stands out from the connecting
+   words ("of", "done", "remaining"), same premium weight as the ₹ columns
+   already carry via .sp-ovactmoney/.sp-ovitemmoney b. */
+.sp-qtynum{color:var(--ink);font-weight:700;font-variant-numeric:tabular-nums}
+
+/* hero: 4-stat variant with the new "Rooms — whole site" figure, divided
+   from the existing three stats (done/remaining/waste) */
+.sp-stats.four{grid-template-columns:repeat(4,1fr)}
+@media(max-width:760px){.sp-stats.four{grid-template-columns:repeat(2,1fr)}}
+.sp-statdiv{border-left:1px solid var(--line);padding-left:14px}
+@media(max-width:760px){.sp-statdiv{border-left:none;padding-left:0}}
+
+/* mapping modal + drawer reuse the existing .sheet scrim from style.css */
+.sp-maplist{max-height:52vh;overflow:auto;margin:6px 0}
+.sp-maprow{display:flex;align-items:center;gap:10px;padding:9px 4px;border-bottom:1px solid var(--line2);font-size:13px}
+.sp-maprow input{width:16px;height:16px;flex:none}
+.sp-maprow .c{color:var(--ink3);font-size:11px;font-family:ui-monospace,Menlo,monospace}
+.sp-drow{display:flex;justify-content:space-between;padding:11px 0;border-bottom:1px solid var(--line2);font-size:13px}
+.sp-drow.sub{padding:0 0 9px;border-bottom:1px solid var(--line2);font-size:11px;color:var(--ink3)}
+.sp-drow span{color:var(--ink2)}.sp-drow b{font-variant-numeric:tabular-nums}
+/* "received to date" in the linked-stock section -- real, register-derived,
+   same violet "this is a real linked number" language as .leadtag/.sp-totrecv */
+.sp-drow.sub .sp-recv{color:var(--violet);font-weight:700;font-size:12.5px}
+.sp-dlink{margin:14px 0;padding:12px 14px;border-radius:10px;font-size:12.5px}
+.sp-dlink.ok{background:var(--greenbg);color:var(--green)}
+.sp-dlink.rev{background:var(--amberbg);color:var(--amber)}
+.sp-dbar{height:9px;border-radius:5px;background:var(--line2);overflow:hidden;margin:16px 0 6px}
+.sp-dbar i{display:block;height:100%;background:var(--green)}
+
+/* item drawer -- "Rooms — this item" panel (Mockup 2). Sits between
+   Remaining work and Install rate. */
+.sp-roomsblk{margin:14px 0;padding:14px 16px;background:#f6f4f0;border-radius:10px}
+.sp-roomsblk .lbl{font-size:11.5px;color:var(--ink3);margin:0 0 9px;
+  text-transform:uppercase;letter-spacing:.4px}
+.sp-roomsbar{display:flex;height:9px;border-radius:5px;overflow:hidden;margin-bottom:8px}
+.sp-roomsbar span{height:100%}
+.sp-roomsbar .done{background:var(--green)}
+.sp-roomsbar .prog{background:var(--amber)}
+.sp-roomsbar .pend{background:var(--line2)}
+.sp-roomscount{font-size:12.5px;margin:0 0 10px;color:var(--ink)}
+.sp-roomscount b{font-weight:600}
+.sp-roomscount b.done{color:var(--green)}
+.sp-roomscount b.prog{color:var(--amber)}
+.sp-roomscount b.pend{color:var(--ink)}
+.sp-roomsneed{display:flex;justify-content:space-between;font-size:13px;margin:0}
+.sp-roomsneed span{color:var(--ink2)}
+.sp-roomsneed b{font-variant-numeric:tabular-nums}
+.sp-dfore{margin-top:16px;padding:14px 16px;border-radius:10px;background:var(--slatebg);font-size:12.5px;color:var(--ink2)}
+.sp-dfore b{color:var(--ink)}
+.sp-demo{font-size:11px;color:var(--ink3);text-align:center;padding:12px}
+.sp-empty{padding:40px;text-align:center;color:var(--ink3);font-size:13px}
+
+/* link chip on item rows + clean wide link modal (added) */
+.sp-linkchip{border:none;background:none;font:inherit;font-size:10.5px;color:var(--violet);cursor:pointer;padding:1px 6px;border-radius:5px}
+.sp-linkchip:hover{background:var(--violetbg)}
+.sp-linkchip.on{color:var(--green)}
+.sp-linkgrid{display:flex;flex-direction:column;gap:2px}
+.sp-linkcard{display:grid;grid-template-columns:minmax(0,1fr) minmax(280px,1.1fr);gap:14px;align-items:center;padding:11px 4px;border-bottom:1px solid var(--line2)}
+@media(max-width:640px){.sp-linkcard{grid-template-columns:1fr;gap:6px}}
+.sp-linkcard .lft{display:flex;align-items:center;gap:9px;min-width:0}
+.sp-linkcard .lft .c{color:var(--ink3);font-size:11px;font-family:ui-monospace,Menlo,monospace;flex:none}
+.sp-linkcard .lft .d{font-size:12.5px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sp-linkcard .lft .sp-tag{flex:none;margin-left:auto}
+.sp-linkcard .rgt{display:flex;flex-direction:column;gap:5px}
+.sp-linkcard .rgt .ctl{width:100%}
+.sp-suggpick{align-self:flex-start;border:1px dashed var(--line);background:var(--panel);color:var(--violet);font:inherit;font-size:11px;padding:3px 9px;border-radius:7px;cursor:pointer}
+.sp-suggpick:hover{background:var(--violetbg);border-color:var(--violet)}
+
+/* multi-material chips on a link-stock row: each linked material is a small
+   removable chip; one input + a small + button appends another — the row
+   just grows, no separate "multi-add mode" to switch into. */
+.sp-chips{display:flex;flex-wrap:wrap;gap:6px;min-height:22px}
+.sp-chip{display:inline-flex;align-items:center;gap:4px;background:var(--violetbg);color:var(--violet);
+  border-radius:20px;padding:3px 5px 3px 10px;font-size:11.5px;max-width:100%}
+.sp-chip .t{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:220px}
+.sp-chip button{border:none;background:none;color:var(--violet);cursor:pointer;font-size:13px;line-height:1;
+  padding:2px 4px;border-radius:50%;flex:none}
+.sp-chip button:hover{background:rgba(69,58,154,.16)}
+.sp-chip.warn{background:var(--amberbg);color:var(--amber)}
+.sp-chip.warn button{color:var(--amber)}
+.sp-chip.warn button:hover{background:rgba(125,76,6,.14)}
+.sp-chipfactor{display:inline-flex;align-items:center;gap:4px;background:var(--panel);
+  border-radius:12px;padding:1px 6px 1px 2px}
+.sp-chipfactor .sp-factorinput{width:52px;padding:2px 5px;font-size:11px;border-radius:8px}
+.sp-chipfactor .u{font-size:10px;color:var(--ink3);white-space:nowrap}
+.sp-chipempty{font-size:11.5px;color:var(--ink3)}
+.sp-addrow{display:flex;gap:6px;align-items:center}
+
+/* Rooms modal's new per-room-quantity layer -- the same modal as plain
+   applicability, with an optional quantity + a summary of existing groups. */
+.sp-qtygroups{background:#f6f4f0;border-radius:10px;padding:12px 14px;margin-bottom:14px}
+.sp-qtygroups .lbl{font-size:11px;text-transform:uppercase;letter-spacing:.4px;
+  color:var(--ink3);margin:0 0 8px}
+.sp-qtygroups .row{display:flex;align-items:center;justify-content:space-between;font-size:13px;
+  padding:4px 0;border-bottom:1px solid var(--line2)}
+.sp-qtygroups .row:last-of-type{border-bottom:none}
+.sp-qtygroups .row b{margin-left:auto;margin-right:10px}
+.sp-qtygroup-rm{border:none;background:none;color:var(--ink3);font-size:11.5px;
+  text-decoration:underline;cursor:pointer;padding:2px 0;flex:none}
+.sp-qtygroup-rm:hover{color:var(--red)}
+.sp-qtygroups .hint{font-size:11.5px;color:var(--ink3);margin:8px 0 0}
+.sp-qtyrow{display:flex;align-items:center;gap:10px;margin-bottom:4px}
+.sp-qtyrow label{font-size:13px;color:var(--ink2);flex:none}
+.sp-qtyrow input{flex:1;max-width:220px}
+.sp-qtyrow .u{font-size:12px;color:var(--ink3)}
+.sp-addrow .sp-linkinput{flex:1}
+.sp-addchip{width:28px;height:28px;flex:none;border-radius:7px;border:1px solid var(--line);
+  background:var(--panel);color:var(--ink);font-size:16px;line-height:1;cursor:pointer}
+.sp-addchip:hover{border-color:var(--violet);color:var(--violet)}

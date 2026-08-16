@@ -9,17 +9,32 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import engine, health, schema, subcat, toolcat
+from . import engine, health, leadtime, schema, subcat, toolcat
 
 ROOT = Path(__file__).resolve().parent.parent
 UPLOADS = ROOT / "data" / "uploads"
 RUNS = ROOT / "data" / "runs"
+# Real per-material lead time, baked in from Mahesh's PO+GRN registers as a
+# plain JSON file that ships alongside the code - not an upload, not built at
+# runtime. It is a property of supplier dispatch times, not of any one site,
+# so one file covers every project (confirmed with Mahesh: no site filter).
+# To refresh it later: rerun leadtime.build_aggregates() + to_json_dict() on
+# a newer PO/GRN export and replace this file - still no upload UI needed.
+LEADTIME_LOOKUP_PATH = Path(__file__).resolve().parent / "data" / "leadtime_lookup.json"
 FRONTEND = ROOT / "frontend"
 for p in (UPLOADS, RUNS):
     p.mkdir(parents=True, exist_ok=True)
+
+
+def _load_leadtime_aggregates():
+    """The baked-in PO->GRN aggregates, or None if the data file is absent /
+    unreadable. Never raises - a missing/corrupt file just means every
+    material falls back to the global lead_time, exactly like before this
+    feature existed."""
+    return leadtime.load_aggregates_json(LEADTIME_LOOKUP_PATH)
 
 # Tabs the register parser must never treat as MEP material movement.
 # Item masters and summary/index tabs carry no dated in/out, so they stay out.
@@ -298,9 +313,23 @@ def _process_file(raw, run_id, project, filename, lead_time, asof, source_link):
         moved.date.max() if len(moved) else daily.date.max())
 
     issues, stats = health.check(mv, daily, asof_ts)
+
+    # Real per-material lead time (from actual PO->GRN history), when a
+    # lookup has been built. A material with no usable history in it simply
+    # is not in the dict, and engine.forecast() falls back to the global
+    # `lead_time` for that one material - never invented, never blocked on.
+    lt_lookup, lt_report = None, None
+    agg = _load_leadtime_aggregates()
+    if agg is not None:
+        materials = sorted(daily.material.dropna().unique().tolist())
+        lt_lookup = leadtime.match_materials(materials, agg)
+        lt_report = {"materials_in_run": len(materials),
+                     "materials_with_real_lead_time": len(lt_lookup)}
+
     f = engine.forecast(daily[daily.date <= asof_ts],
                         asof=asof_ts, lead_time=lead_time,
-                        today=pd.Timestamp.now().normalize())
+                        today=pd.Timestamp.now().normalize(),
+                        lead_time_by_material=lt_lookup)
     f = subcat.add_subcategory(f)
     if not stats["forecast_ready"]:
         f = health.suppress(f)
@@ -349,7 +378,8 @@ def _process_file(raw, run_id, project, filename, lead_time, asof, source_link):
             "created": dt.datetime.now().isoformat(timespec="seconds"),
             "stats": stats, "issues": issues,
             "has_ppe": bool(ppe),
-            "ppe_summary": ppe["summary"] if ppe else None}
+            "ppe_summary": ppe["summary"] if ppe else None,
+            "leadtime": lt_report}
     if source_link:
         meta["source_link"] = source_link
     (d / "meta.json").write_text(json.dumps(meta, indent=2))
@@ -547,7 +577,28 @@ def material_history(run_id: str, name: str):
         raise HTTPException(404, "run not found")
     daily = pd.read_parquet(d / "daily.parquet")
     g = daily[daily.material == name.strip().upper()].sort_values("date")
-    return jsonable(g[["date", "qty_in", "qty_out", "balance"]])
+    # "opening" is the register's own Opening Stock for this material --
+    # constant across every date row (build_daily broadcasts it, see
+    # engine.py). Included so "total received" can be opening + dated IN,
+    # not dated IN alone: a material whose entire supply arrived as an
+    # opening balance (no subsequent purchases) was showing "0 received"
+    # despite clearly having stock, because dated-IN-only misses that.
+    cols = ["date", "qty_in", "qty_out", "balance"]
+    if "opening" in daily.columns:
+        cols.append("opening")
+    return jsonable(g[cols])
+
+
+@app.get("/api/leadtime/status")
+def leadtime_status():
+    """Whether the baked-in real lead-time data is active, and its coverage -
+    so the UI can show 'N materials covered from real PO/GRN history' or
+    'not available, using the global lead time' rather than staying silent.
+    Read-only: there is no upload here, the file ships with the code."""
+    agg = _load_leadtime_aggregates()
+    if agg is None:
+        return {"available": False}
+    return {"available": True, "report": agg["report"]}
 
 
 @app.get("/api/export/{run_id}")
@@ -558,6 +609,40 @@ def export_csv(run_id: str):
     out = d / "forecast.csv"
     pd.read_parquet(d / "forecast.parquet").to_csv(out, index=False)
     return FileResponse(out, filename=f"forecast_{run_id}.csv")
+
+
+# Site Progress (third tab) lives in its own router; forecast routes above are
+# untouched. Included BEFORE the static mount so /api/siteprogress/* wins.
+from . import siteprogress  # noqa: E402
+app.include_router(siteprogress.router)
+
+# Cache-busting, fully automatic: every local <link>/<script> reference in
+# index.html gets "?v=<the file's own last-modified time>" stamped on by the
+# SERVER on every request - never hand-typed, never forgotten. Replace
+# app.js on disk and its mtime changes, so the very next page load gets a
+# new ?v= and the browser is forced to fetch the new file instead of
+# silently reusing a cached copy.
+_ASSET_RE = re.compile(
+    r'(href|src)="((?:style|siteprogress)\.css|(?:app|siteprogress)\.js)'
+    r'(?:\?v=[^"]*)?"')
+
+
+def _stamp_assets(html: str) -> str:
+    def _sub(m):
+        attr, fname = m.group(1), m.group(2)
+        try:
+            v = int((FRONTEND / fname).stat().st_mtime)
+        except OSError:
+            v = 0
+        return f'{attr}="{fname}?v={v}"'
+    return _ASSET_RE.sub(_sub, html)
+
+
+@app.get("/", response_class=HTMLResponse)
+@app.get("/index.html", response_class=HTMLResponse)
+def index():
+    html = (FRONTEND / "index.html").read_text(encoding="utf-8")
+    return HTMLResponse(_stamp_assets(html))
 
 
 app.mount("/", StaticFiles(directory=FRONTEND, html=True), name="frontend")

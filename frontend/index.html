@@ -6,6 +6,7 @@
 <title>Material Intelligence</title>
 <link rel="icon" href="data:,">
 <link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="siteprogress.css">
 </head>
 <body>
 
@@ -21,11 +22,11 @@
   <div class="topact">
     <button id="home" class="btn" hidden onclick="goHome()">Home</button>
     <select id="proj" class="ctl" title="Switch project" hidden></select>
-    <label class="lead">Lead time
+    <label class="lead" id="leadwrap" hidden>Lead time
       <input id="lead" class="ctl" type="number" value="7" min="1" max="90"> days
     </label>
-    <button id="pick" class="btn primary">Upload</button>
-    <button id="sync" class="btn">Sync sheet</button>
+    <button id="pick" class="btn primary" hidden>Upload</button>
+    <button id="sync" class="btn" hidden>Sync sheet</button>
     <a id="dl" class="btn" hidden>Export</a>
     <button id="del" class="btn danger" hidden>Delete</button>
     <input id="file" type="file" accept=".xlsx,.xlsm,.xls" hidden>
@@ -35,28 +36,68 @@
 <main>
 
 <section id="drop" class="drop">
-  <p class="dh">Drop a stock register or ProjectBase export here</p>
-  <p class="ds">One Excel file. Column names are detected automatically, so
-     registers from different sites all work. Safety, PPE, tools and item
-     master tabs are skipped.</p>
-  <div class="dropform">
-    <input id="pname" class="ctl" type="text" placeholder="Project name (optional)">
-    <button class="btn primary" onclick="document.getElementById('file').click()">Choose file</button>
+
+  <div class="home-head">
+    <h2>Bring in your site register</h2>
+    <p>One Excel stock register, or a live Google Sheet. Column names are
+       detected automatically — different site formats all work. Safety,
+       PPE and Tools feed the Inventory tab; item master sheets are skipped.</p>
   </div>
-  <div class="dropor">or connect a live Google Sheet</div>
-  <div class="dropform">
-    <input id="sheetname" class="ctl" type="text" placeholder="Sheet name (optional)">
-    <input id="sheetlink" class="ctl wide" type="text"
-           placeholder="Paste the published Google Sheet link (output=xlsx)">
-    <button class="btn" id="syncgo">Sync now</button>
+
+  <div class="homeseg">
+    <div class="homeseg-in" role="tablist" aria-label="Bring in data">
+      <button type="button" id="segUpload" class="on" role="tab" aria-selected="true">Upload file</button>
+      <button type="button" id="segSheet" role="tab" aria-selected="false">Connect Google Sheet</button>
+    </div>
   </div>
-  <p class="dshint">In Google Sheets: File → Share → Publish to web → whole
-     document → Microsoft Excel (.xlsx). Paste that link here. Re-sync anytime
-     to pull the latest.</p>
+
+  <div id="paneUpload" class="homecard">
+    <div class="homecard-icon">
+      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path d="M7 18a4 4 0 0 1-.6-7.96A5 5 0 0 1 16.6 8.06 4.5 4.5 0 0 1 16 17H7Z" stroke="currentColor" stroke-width="1.6"/>
+        <path d="M12 11v7M9.5 13.5 12 11l2.5 2.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+    <p class="dh">Drop your stock register here</p>
+    <p class="ds">.xlsx, .xlsm, .xls — Safety, PPE and Tools go to the
+       Inventory tab; item master sheets are skipped automatically.</p>
+    <div class="dropform">
+      <input id="pname" class="ctl" type="text" placeholder="Project name (optional)">
+      <button class="btn primary" id="pickHome">Choose file</button>
+    </div>
+  </div>
+
+  <div id="paneSheet" class="homecard" hidden>
+    <p class="dshint">In Google Sheets: File → Share → Publish to web →
+       whole document → Microsoft Excel (.xlsx). Paste that link below —
+       re-sync anytime to pull the latest.</p>
+    <div class="dropform col">
+      <input id="sheetname" class="ctl" type="text" placeholder="Sheet name (optional)">
+      <input id="sheetlink" class="ctl wide" type="text"
+             placeholder="Paste the published Google Sheet link (output=xlsx)">
+      <button class="btn primary" id="syncgo">Sync now</button>
+    </div>
+  </div>
+
+  <div id="recent" class="recent" hidden>
+    <div class="recent-title">Recent projects</div>
+    <div id="recentlist"></div>
+  </div>
+
 </section>
 
 <section id="busy" class="busy" hidden>
-  <div class="spin"></div><p id="busytxt">Reading the file…</p>
+  <div class="busy-ring" id="busy-ring">
+    <svg width="132" height="132" viewBox="0 0 132 132">
+      <circle cx="66" cy="66" r="58" fill="none" stroke="var(--line2)" stroke-width="9"></circle>
+      <circle id="busy-arc" cx="66" cy="66" r="58" fill="none" stroke="var(--ink)" stroke-width="9"
+              stroke-linecap="round" stroke-dasharray="364.4" stroke-dashoffset="364.4"></circle>
+    </svg>
+    <div class="busy-ringtext"><b id="busy-pct">0%</b><span>loading</span></div>
+  </div>
+  <p id="busytxt" class="busy-stage">Reading the file…</p>
+  <p id="busy-eta" class="busy-eta"></p>
+  <div id="busy-steps" class="busy-steps"></div>
 </section>
 
 <section id="report" hidden>
@@ -140,7 +181,7 @@
       <h2>Manage uploads</h2>
       <button class="btn" onclick="closeModal()">Close</button>
     </div>
-    <p class="msub">Delete a single upload, or a whole project and all its uploads. This cannot be undone.</p>
+    <p class="msub">Only the latest upload per project shows by default. Project deletion lives in the danger zone below. Nothing here can be undone.</p>
     <div id="mlist" class="mlist"></div>
     <p id="merr" class="merr" hidden></p>
   </div>
@@ -158,5 +199,6 @@
 </div>
 
 <script src="app.js"></script>
+<script src="siteprogress.js"></script>
 </body>
 </html>

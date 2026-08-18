@@ -1,1 +1,1 @@
-{"Electrical": ["Wall Piping"], "FAPA": ["elv"], "Fire": ["Ceiling Piping"], "Plumbing": []}
+{"Electrical": ["Wall Piping"], "FAPA": ["FA Cabling", "PA Cabling"], "Fire": ["Ceiling Piping"], "Plumbing": ["Zari Work", "Core Cutting", "Piping Laying Hot & Cold Water", "Drain Piping Laying -Floor Trap, Basin, Shower, WC", "Pressure Testing - Water Line", "Leakage Testing - Drain Line"], "HVAC": ["CHW Piping Work", "PVC Fresh Air Piping", "PVC Exhaust Air Piping", "Hydro Testing ( Pressure Test)", "Insulation Work - Joint Area CHW"]}

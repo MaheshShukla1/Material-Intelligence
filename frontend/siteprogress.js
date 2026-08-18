@@ -286,10 +286,25 @@
     if (S.service === "__overall__") return renderOverall();
     if (!S.service) { sp.innerHTML = `<div class="sp-empty">No services parsed from the BOQ.</div>`; return; }
     const q = roomQ();
-    try { S.svc = await jget(api("/" + S.slug + "/service/" + encodeURIComponent(S.service) + q)); }
-    catch (e) { sp.innerHTML = `<div class="sp-empty">${esc(briefErr(e))}</div>`; return; }
-    try { S.pnl = await jget(pnlUrl()); } catch (e) { S.pnl = null; }
-    try { S.real = await jget(api("/" + S.slug + "/realistic/" + encodeURIComponent(S.service))); } catch (e) { S.real = null; }
+    // These three reads are independent (no one depends on another's
+    // result), but used to run one-after-another (await, await, await) --
+    // three round trips end to end instead of one. Firing them together
+    // cuts wall-clock time to roughly the slowest of the three instead of
+    // their sum. Each still fails independently exactly as before (S.pnl/
+    // S.real quietly fall back to null on error; the main service fetch
+    // still throws and shows the error state) -- only the timing changed.
+    const [svcSettled, pnlSettled, realSettled] = await Promise.allSettled([
+      jget(api("/" + S.slug + "/service/" + encodeURIComponent(S.service) + q)),
+      jget(pnlUrl()),
+      jget(api("/" + S.slug + "/realistic/" + encodeURIComponent(S.service))),
+    ]);
+    if (svcSettled.status === "rejected") {
+      sp.innerHTML = `<div class="sp-empty">${esc(briefErr(svcSettled.reason))}</div>`;
+      return;
+    }
+    S.svc = svcSettled.value;
+    S.pnl = pnlSettled.status === "fulfilled" ? pnlSettled.value : null;
+    S.real = realSettled.status === "fulfilled" ? realSettled.value : null;
     renderMain();
   }
 

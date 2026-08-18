@@ -21,6 +21,7 @@ The engine, its routes and its files are never written here.
 import json
 import shutil
 import datetime as dt
+import functools
 from pathlib import Path
 
 import pandas as pd
@@ -161,6 +162,32 @@ def _latest_run_for(slug):
         if meta.get("project_slug") == slug and meta.get("created", "") >= best_created:
             best, best_created = rd, meta.get("created", "")
     return best
+
+
+@functools.lru_cache(maxsize=64)
+def _read_forecast_parquet_cached(path_str, mtime_ns):
+    return pd.read_parquet(path_str)
+
+
+def _read_forecast_parquet(run_dir):
+    """Cached read of one run's forecast.parquet. Safe to cache unconditionally
+    because runs are immutable once written (README: "Runs are immutable ...
+    Nothing is overwritten") -- the (path, mtime) cache key means this can
+    never serve stale data even if that assumption were ever violated: a
+    rewritten file gets a new mtime, which is a new cache key, forcing a
+    fresh read rather than returning stale bytes.
+
+    Before this, loading one Site Progress service tab meant re-reading this
+    exact same file from disk 2-3 separate times within a single click (once
+    each in _forecast_pool, _actual_consumed, and — after the Bug 2 fix —
+    _full_run_rows) -- the main structural cause behind the reported
+    service-switch slowness. This does not cache the more expensive
+    linkage.match() token matching inside _actual_consumed; that's a real
+    further optimization but needs its own cache-invalidation story (it
+    depends on the BOQ's items, which change more often than a run does)
+    and shouldn't be done blind."""
+    p = Path(run_dir) / "forecast.parquet"
+    return _read_forecast_parquet_cached(str(p), p.stat().st_mtime_ns)
 
 
 # --------------------------------------------------------------- compute
@@ -1092,7 +1119,7 @@ def forecast_link(slug: str, service: str):
                 "reason": "no forecast run for this project yet — upload the "
                           "stock register on the Forecast tab first",
                 "links": {}}
-    fdf = pd.read_parquet(run / "forecast.parquet")
+    fdf = _read_forecast_parquet(run)
     # forecast folds Fire+HVAC into "Fire & HVAC"; match against that pool.
     # No fallback to the unfiltered pool when this service's own rows are
     # empty -- same rule as _forecast_pool()/_actual_consumed(): a suggested
@@ -1147,6 +1174,30 @@ def _norm_link_entries(entries):
     return out
 
 
+def _full_run_rows(slug):
+    """Every material in the latest run's forecast, regardless of service --
+    used ONLY to resolve a material name that is already a CONFIRMED link
+    (links.json), never for a picker's candidate list. A saved link is an
+    exact reference the engineer already made (e.g. via quick-item's own
+    all_services=True fallback, see add_quick_item()) -- not a guess -- so
+    widening the lookup here for it doesn't reintroduce the "wrong service
+    candidate" risk _forecast_pool()'s docstring warns about; it only fixes
+    a real gap where add_quick_item() could create a cross-service link that
+    nothing downstream (the drawer's realistic forecast, the Link-stock
+    modal) could actually resolve, showing a genuine link as "not linked".
+    Cached per-request by the caller if it's needed more than once — this
+    function itself always reads fresh, since a run never changes once
+    written (see README: "Runs are immutable")."""
+    latest = _latest_run_for(slug)
+    if latest is None:
+        return {}
+    try:
+        fdf = _read_forecast_parquet(latest)
+    except Exception:
+        return {}
+    return {linkage._norm(r["material"]): _scrub(r.to_dict()) for _, r in fdf.iterrows()}
+
+
 def _forecast_pool(slug, service):
     """The latest run's forecast rows for THIS service (READ-ONLY), plus the
     list of stock material names. Returns (rows_by_normkey, names, run_name,
@@ -1168,7 +1219,7 @@ def _forecast_pool(slug, service):
     if run is None:
         return {}, [], None, True
     try:
-        fdf = pd.read_parquet(run / "forecast.parquet")
+        fdf = _read_forecast_parquet(run)
     except Exception:
         return {}, [], None, True
     if "service" in fdf.columns:
@@ -1210,7 +1261,7 @@ def quick_item_candidates(slug: str, service: str, all_services: bool = False):
 
     if all_services:
         try:
-            fdf = pd.read_parquet(run / "forecast.parquet")
+            fdf = _read_forecast_parquet(run)
         except Exception:
             return {"available": False,
                     "reason": "couldn't read the latest forecast run",
@@ -1284,23 +1335,32 @@ def add_quick_item(slug: str, payload: dict, room: str = None):
         # option (e.g. PVC piping the register keeps under Electrical but
         # is genuinely used for an HVAC activity). Check the FULL run as a
         # fallback, only ever adding a real row that actually exists there
-        # -- never inventing one.
-        try:
-            fdf = pd.read_parquet(_latest_run_for(slug) / "forecast.parquet")
-            full_rows = {linkage._norm(r["material"]): _scrub(r.to_dict())
-                        for _, r in fdf.iterrows()}
-            row = full_rows.get(linkage._norm(material))
-        except Exception:
-            row = None
+        # -- never inventing one. (Same lookup _full_run_rows() gives the
+        # drawer/link-modal, so a quick item linked this way is resolvable
+        # everywhere it's shown, not just here at creation time.)
+        row = _full_run_rows(slug).get(linkage._norm(material))
     if row is None:
         raise HTTPException(404, f"'{material}' is not in the stock register")
     unit = row.get("unit") or "Nos"
 
     store = _read_json(d / "quick_items.json", {}) or {}
     svc_store = store.setdefault(svc, {"_seq": 0, "items": []})
-    existing = next((it for it in svc_store["items"] if it["material"] == material), None)
+    m = _load_mapping(d)
+    # Reuse an existing quick-item line only when it's already mapped to
+    # THIS activity -- that's a harmless re-click (re-opening the picker and
+    # picking the same material again for the same activity). Picking "the
+    # same" material for a DIFFERENT activity now mints its own independent
+    # item_code instead of reusing the first activity's. Reusing it used to
+    # make the second activity's planned quantity silently mirror the
+    # first's, because planned.json is keyed by item_code alone (see
+    # save_planned()'s docstring: planned is deliberately project-wide PER
+    # ITEM -- that stays true here, this fix just stops treating two
+    # different activities' picks of the same material as one item).
+    existing = next((it for it in svc_store["items"]
+                     if it["material"] == material
+                     and it["item_code"] in m.get(svc, act)), None)
     if existing:
-        code = existing["item_code"]           # re-picking the same material reuses its line
+        code = existing["item_code"]           # re-picking for the SAME activity reuses its line
     else:
         svc_store["_seq"] += 1
         code = f"QI{svc_store['_seq']}"
@@ -1308,7 +1368,6 @@ def add_quick_item(slug: str, payload: dict, room: str = None):
                                    "unit": unit, "material": material})
     (d / "quick_items.json").write_text(json.dumps(store, ensure_ascii=False))
 
-    m = _load_mapping(d)
     if code not in m.get(svc, act):             # don't let a re-pick toggle it back OUT
         m.toggle(svc, act, code)
     (d / "mapping.json").write_text(json.dumps(m.to_dict(), ensure_ascii=False))
@@ -1339,13 +1398,22 @@ def get_links(slug: str, service: str):
     links = _load_links(d).get(service, {})
     rows, names, run, _filtered = _forecast_pool(slug, service)
     sugg = linkage.match(items, names) if names else {}
+    full_rows = None   # built at most once, only if a link needs it
     out_items = []
     for _, it in items.iterrows():
         code = str(it.item_code)
         s = sugg.get(code, {})
         linked = []
         for entry in _norm_link_entries(links.get(code, [])):
+            # a saved link may point at a material this service's own
+            # scoped pool doesn't carry (see add_quick_item()'s
+            # all_services fallback) — resolve those from the full run
+            # instead of showing a real link as blank/unmatched.
             row = rows.get(linkage._norm(entry["material"]))
+            if row is None:
+                if full_rows is None:
+                    full_rows = _full_run_rows(slug)
+                row = full_rows.get(linkage._norm(entry["material"]))
             linked.append({"material": entry["material"], "factor": entry["factor"],
                            "unit": (row or {}).get("unit"),
                            "units_match": bool(row) and str(row.get("unit") or "").strip().upper() == str(it.unit or "").strip().upper()})
@@ -1404,6 +1472,7 @@ def realistic(slug: str, service: str):
 
     used_by_code = {str(r.item_code): r for r in used.itertuples()}
     descs = {str(r.item_code): r.description for r in items.itertuples()}
+    full_rows = None   # built at most once, only if a link needs it
     out, n_short = [], 0
     for code, raw_mats in links.items():
         u = used_by_code.get(code)
@@ -1418,7 +1487,16 @@ def realistic(slug: str, service: str):
         # or whether it genuinely doesn't know the conversion yet.
         stock_rows = []
         for entry in _norm_link_entries(raw_mats):
+            # same cross-service gap as get_links() above: a confirmed link
+            # (e.g. from add_quick_item()'s all_services fallback) can point
+            # at a material outside this service's own scoped pool. Without
+            # this fallback the item renders as verdict NOT_LINKED even
+            # though a real link exists — that was the actual reported bug.
             row = rows.get(linkage._norm(entry["material"]))
+            if row is None:
+                if full_rows is None:
+                    full_rows = _full_run_rows(slug)
+                row = full_rows.get(linkage._norm(entry["material"]))
             if row:
                 stock_rows.append({**row, "factor": entry["factor"]})
         # room_buckets() feeds sentence()'s wording only (see realtime.py's
@@ -1459,7 +1537,7 @@ def _actual_consumed(slug, service, items):
     if run is None:
         return None
     try:
-        fdf = pd.read_parquet(run / "forecast.parquet")
+        fdf = _read_forecast_parquet(run)
     except Exception:
         return None
     qty_col = next((c for c in ("total_consumed", "consumed", "total_out",

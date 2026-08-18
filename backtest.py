@@ -1,6 +1,6 @@
 """Honest backtest: cut history at a date, forecast forward, compare to what
 really happened after that date. Same harness runs old and new engines so the
-only thing that changes is the rate logic."""
+only thing that changes is the rate logic. some changes have to be made for persistence"""
 import sys, importlib
 import numpy as np, pandas as pd
 sys.path.insert(0, '.')

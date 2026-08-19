@@ -221,6 +221,29 @@ def _item_room_qty(d):
     return _read_json(d / "item_room_qty.json", {}) or {}
 
 
+def _activity_prog(d):
+    """{service: {activity: {"*":frac, room_id:frac}}} -- same shape as
+    item_progress.json, but keyed by ACTIVITY NAME instead of item_code, for
+    activities with no BOQ material at all (Zari work, core-cutting,
+    chasing, testing -- see activity.is_labour_keyword()). Deliberately a
+    separate file from item_progress.json rather than folding activity
+    names into the same store: an item_code and an activity name could
+    theoretically collide, and keeping the two fully separate means an
+    activity's labour-only % can never be misread as some item's progress
+    or vice versa."""
+    return _read_json(d / "activity_progress.json", {}) or {}
+
+
+def _labour_only(d):
+    """{service: [activity_name, ...]} -- which activities are currently
+    toggled to labour-only (%-only, no BOQ items) tracking. Only the
+    TOGGLE lives here; the recorded % itself lives in _activity_prog() and
+    is never deleted when an activity is toggled back to item-tracked, the
+    same way an item's recorded progress survives its activity mapping
+    being removed (see pnl.rollup_pnl's own docstring on this)."""
+    return _read_json(d / "labour_only.json", {}) or {}
+
+
 def _service_view_core(d, service, items, used, prog, rooms_cfg, room_qty_groups,
                        all_rooms, room=None):
     """The body of _service_view() from the point `used` (itemprog.compute's
@@ -281,15 +304,33 @@ def _service_view_core(d, service, items, used, prog, rooms_cfg, room_qty_groups
         })
 
     # activity % and overall % are the MEAN of member items' % (item-driven)
+    # for a normal activity -- but a LABOUR-ONLY activity (no BOQ material at
+    # all, e.g. Zari work, core-cutting, chasing, testing -- see
+    # activity.is_labour_keyword()) has no items to average, so its % comes
+    # straight from its own directly-recorded value instead. Never both at
+    # once for the same activity: while `labour` is on for it, its item-based
+    # `codes` are ignored here even if some happen to still be mapped (the
+    # frontend hides the "add items" controls while labour-only is on, and
+    # only offers the toggle in the first place when there are none).
     pctmap = {str(r.item_code): (r.progress_pct if r.progress_pct == r.progress_pct else 0.0)
               for r in ip.itertuples()}
-    act_pct = {}
+    labour = set(_labour_only(d).get(service) or [])
+    aprog = _activity_prog(d).get(service, {})
+    act_pct, labour_pct = {}, {}
     for a in acts:
-        codes = [str(x) for x in m.get(service, a)]
-        vals = [pctmap.get(c, 0.0) for c in codes if c in pctmap]
-        act_pct[a] = round(sum(vals) / len(vals), 1) if vals else None
-    tracked = [pctmap[c] for c in pctmap if inv.get(c)]
+        if a in labour:
+            node = aprog.get(a, {})
+            val = node.get(room) if room and room in node else node.get("*")
+            pct = round(float(val) * 100, 1) if val is not None else 0.0
+            act_pct[a] = pct
+            labour_pct[a] = pct
+        else:
+            codes = [str(x) for x in m.get(service, a)]
+            vals = [pctmap.get(c, 0.0) for c in codes if c in pctmap]
+            act_pct[a] = round(sum(vals) / len(vals), 1) if vals else None
+    tracked = [pctmap[c] for c in pctmap if inv.get(c)] + list(labour_pct.values())
     overall = round(sum(tracked) / len(tracked), 1) if tracked else 0.0
+    labour_suggested = {a: activity.is_labour_keyword(a) for a in acts}
 
     return {
         "service": service, "room": room,
@@ -304,6 +345,9 @@ def _service_view_core(d, service, items, used, prog, rooms_cfg, room_qty_groups
         "item_rooms": rooms_cfg,
         "item_room_qty": room_qty_groups,
         "unmapped": m.unmapped(service, items.item_code.dropna().astype(str).tolist()),
+        "labour_only": {a: (a in labour) for a in acts},
+        "labour_pct": labour_pct,
+        "labour_suggested": labour_suggested,
     }
 
 
@@ -458,6 +502,7 @@ def overall(slug: str):
         for it in view["items"]:
             if it.get("qty") and it.get("mapped"):
                 all_pcts.append(it.get("pct") or 0.0)
+        all_pcts.extend(view["labour_pct"].values())
         per[svc] = {"pct": view["overall_pct"], "done_value": round(done, 2),
                     "remaining_value": round(rem, 2), "planned_value": round(planned, 2),
                     "items": len(view["items"]), "waste_value": round(w["wasted"], 2),
@@ -511,6 +556,71 @@ def set_item_progress(slug: str, payload: dict):
     itemprog.set_progress(store, svc, code, payload.get("frac", 0), room=payload.get("room"))
     (d / "item_progress.json").write_text(json.dumps(store, ensure_ascii=False))
     return _service_view(d, svc, room=payload.get("room"))
+
+
+@router.post("/{slug}/progress/activity")
+def set_activity_progress(slug: str, payload: dict):
+    """Labour-only activity progress -- no BOQ item involved at all (Zari
+    work, core-cutting, chasing, testing...). Body: {"service","activity",
+    "frac"(0..1),"room"?}. Only meaningful once that activity has been
+    toggled on via /activity-labour; setting a value before that is
+    harmless (it's just recorded, unused until the toggle is on) rather than
+    rejected, matching this codebase's general "never invent, but never
+    block a value being recorded either" stance elsewhere.
+
+    itemprog.set_progress() is completely generic on its `code` argument
+    (just a dict key -- no item/BOQ lookups inside it), so it's reused as-is
+    here keyed by activity name instead of item_code, rather than
+    duplicating its clamp-to-[0,1] and room-override-reset logic."""
+    d = _need(slug)
+    svc = payload.get("service")
+    act = payload.get("activity")
+    if not svc or not act:
+        raise HTTPException(400, "service and activity are required")
+    store = _activity_prog(d)
+    itemprog.set_progress(store, svc, act, payload.get("frac", 0), room=payload.get("room"))
+    (d / "activity_progress.json").write_text(json.dumps(store, ensure_ascii=False))
+    return _service_view(d, svc, room=payload.get("room"))
+
+
+@router.post("/{slug}/activity-labour")
+def set_activity_labour(slug: str, payload: dict, room: str = None):
+    """Toggle labour-only (%-only, no BOQ material) tracking for one
+    activity. Body: {"service","activity","on":bool}.
+
+    Turning ON is refused if the activity currently has 1+ BOQ items
+    mapped to it -- an activity is either item-tracked or labour-tracked,
+    never both at once (see _service_view_core's own note on this), and a
+    stale UI offering the toggle for an activity that already has real
+    item data would otherwise silently start ignoring that data's
+    percentage rather than erroring. The frontend only shows the toggle's
+    entry point when there are zero mapped items in the first place, so
+    this is a safety net, not the primary guard.
+
+    Turning OFF never deletes the recorded % in activity_progress.json --
+    it just stops counting it, exactly like an item's recorded progress
+    surviving its activity mapping being removed (pnl.rollup_pnl's own
+    docstring covers the same "recorded work is never silently erased"
+    principle for items)."""
+    d = _need(slug)
+    svc = payload.get("service")
+    act = payload.get("activity")
+    if not svc or not act:
+        raise HTTPException(400, "service and activity are required")
+    store = _labour_only(d)
+    cur = set(store.get(svc, []))
+    if payload.get("on"):
+        m = _load_mapping(d)
+        mapped = m.get(svc, act)
+        if mapped:
+            raise HTTPException(400, f"'{act}' already has {len(mapped)} BOQ item(s) mapped "
+                                    "-- unmap them first to track this activity by % instead")
+        cur.add(act)
+    else:
+        cur.discard(act)
+    store[svc] = sorted(cur)
+    (d / "labour_only.json").write_text(json.dumps(store, ensure_ascii=False))
+    return _service_view(d, svc, room=room)
 
 
 @router.post("/{slug}/item-rooms")

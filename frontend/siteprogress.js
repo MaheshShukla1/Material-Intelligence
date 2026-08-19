@@ -600,25 +600,36 @@
       return;
     }
     $("sp-acts").innerHTML = acts.map((a) => {
-      const items = itemsFor(a), p = S.svc.act_pct[a], money = actMoney(a), labour = (S.svc.mapping[a] || []).length === 0;
+      const items = itemsFor(a), p = S.svc.act_pct[a], money = actMoney(a);
+      const noItems = (S.svc.mapping[a] || []).length === 0;
+      const isLabour = !!(S.svc.labour_only && S.svc.labour_only[a]);
+      const labourSuggested = !!(S.svc.labour_suggested && S.svc.labour_suggested[a]);
+      const subtitle = isLabour ? "no material — tracked by % complete only"
+        : noItems ? "no items yet — add BOQ items" : items.length + " BOQ items";
       return `<div class="sp-card" data-a="${esc(a)}">
         <div class="sp-chd">
           <span class="sp-cchev">▶</span>
-          <div class="sp-cname">${esc(a)}<div class="s">${labour ? "no items yet — add BOQ items" : items.length + " BOQ items"}</div></div>
+          <div class="sp-cname">${esc(a)}${isLabour ? ` <button class="sp-labourbadge" data-labouroff="${esc(a)}" title="Revert to tracking BOQ items">labour only</button>` : ""}<div class="s">${subtitle}</div></div>
           <div class="sp-cbar"><div class="t"><div class="f" data-fill="${esc(a)}" style="width:${p || 0}%"></div></div>
             <div class="l"><span>progress</span><span data-apct="${esc(a)}">${p == null ? "—" : Math.round(p) + "%"}</span></div></div>
           <div class="sp-cmoney"><b data-adone="${esc(a)}">${money == null ? "—" : inr(money)}</b><span>done</span></div>
           <span class="sp-treeact" style="opacity:1;flex:none"><button class="sp-ic" data-actedit="${esc(a)}" title="Rename">✎</button><button class="sp-ic" data-actdel="${esc(a)}" title="Delete">×</button></span>
         </div>
         <div class="sp-cbody">
+          ${isLabour ? `
+          <div class="sp-labourrow">
+            <input type="range" class="sp-labourrange" data-labourslide="${esc(a)}" min="0" max="100" value="${Math.round(p || 0)}" aria-label="${esc(a)} progress">
+            <span class="sp-labourpct" data-labourpctval="${esc(a)}">${Math.round(p || 0)}%</span>
+          </div>` : `
           ${items.map((it) => rowHTML(it, a)).join("")}
           <div style="padding-top:12px"><button class="btn" data-map="${esc(a)}">+ Add BOQ items</button>
-            <button class="btn" data-quickadd="${esc(a)}" style="margin-left:8px">+ Add item</button></div>
+            <button class="btn" data-quickadd="${esc(a)}" style="margin-left:8px">+ Add item</button>
+            ${noItems && labourSuggested ? `<button class="btn sp-labourlink" data-labouron="${esc(a)}" style="margin-left:8px">or track as labour-only</button>` : ""}</div>`}
         </div>
       </div>`;
     }).join("");
     $("sp-acts").querySelectorAll(".sp-chd").forEach((h) => h.addEventListener("click", (e) => {
-      if (e.target.closest(".sp-treeact")) return;
+      if (e.target.closest(".sp-treeact") || e.target.closest(".sp-labourbadge")) return;
       const card = h.parentElement;
       const wasOpen = card.classList.contains("open");
       // accordion: opening one closes the others, matching the single .open
@@ -637,6 +648,9 @@
     if (toOpen) { toOpen.classList.add("open"); S.openActivity = toOpen.dataset.a; }
     $("sp-acts").querySelectorAll(".sp-bslide").forEach(bindSlider);
     $("sp-acts").querySelectorAll(".sp-qty").forEach(bindEntry);
+    $("sp-acts").querySelectorAll(".sp-labourrange").forEach(bindLabourSlider);
+    $("sp-acts").querySelectorAll("[data-labouron]").forEach((b) => b.addEventListener("click", () => setLabourOnly(b.dataset.labouron, true)));
+    $("sp-acts").querySelectorAll("[data-labouroff]").forEach((b) => b.addEventListener("click", (e) => { e.stopPropagation(); setLabourOnly(b.dataset.labouroff, false); }));
     $("sp-acts").querySelectorAll("[data-map]").forEach((b) => b.addEventListener("click", () => openMapModal(b.dataset.map)));
     $("sp-acts").querySelectorAll("[data-quickadd]").forEach((b) => b.addEventListener("click", () => openQuickAddModal(b.dataset.quickadd)));
     $("sp-acts").querySelectorAll("[data-actedit]").forEach((b) => b.addEventListener("click", (e) => { e.stopPropagation(); renameActivity(b.dataset.actedit); }));
@@ -931,6 +945,38 @@
       const qi = sel(`[data-qty="${cssA(code)}"]`); if (qi) qi.value = qty;
     });
     s.addEventListener("change", () => { const it = S._byCode[code]; if (it) saveFrac(code, it.pct); });
+  }
+  // labour-only activity progress -- same input/change split as bindSlider
+  // above (instant local feedback while dragging, one save on release), but
+  // updates the ACTIVITY's own bar/%/badge instead of an item's, since a
+  // labour-only activity has no item row of its own to update.
+  function applyLocalLabourPct(activity, pct) {
+    const f = sel(`[data-fill="${cssA(activity)}"]`); if (f) f.style.width = pct + "%";
+    const pc = sel(`[data-apct="${cssA(activity)}"]`); if (pc) pc.textContent = Math.round(pct) + "%";
+    const lp = sel(`[data-labourpctval="${cssA(activity)}"]`); if (lp) lp.textContent = Math.round(pct) + "%";
+  }
+  async function saveLabourFrac(activity, pct) {
+    try {
+      await jpost(api("/" + S.slug + "/progress/activity"),
+        { service: S.service, activity, frac: pct / 100, room: S.room || undefined });
+      await loadService();
+    } catch (e) { toast("Save failed: " + briefErr(e)); }
+  }
+  function bindLabourSlider(s) {
+    const activity = s.dataset.labourslide;
+    s.addEventListener("input", () => applyLocalLabourPct(activity, +s.value));
+    s.addEventListener("change", () => saveLabourFrac(activity, +s.value));
+  }
+  // toggle an activity between item-tracked and labour-only (%-only, no BOQ
+  // material -- Zari work, core-cutting, chasing, testing...). Turning OFF
+  // never deletes the recorded % server-side, only stops counting it -- see
+  // set_activity_labour()'s own docstring in siteprogress.py.
+  async function setLabourOnly(activity, on) {
+    try {
+      await jpost(api("/" + S.slug + "/activity-labour"),
+        { service: S.service, activity, on, room: S.room || undefined });
+      await loadService();
+    } catch (e) { toast("Couldn't update: " + briefErr(e)); }
   }
   function localRoll() {
     (S.svc.activities || []).forEach((a) => { const items = itemsFor(a); if (!items.length) return;

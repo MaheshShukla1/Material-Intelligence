@@ -174,6 +174,25 @@ def _item_keywords(rule_targets):
     return [_norm(k) for k in rule_targets]
 
 
+# Every keyword group _ACT_RULES already maps to "no material" (target == []
+# -- pure labour: Zari, chasing, grooving, chipping, core-cutting/cutting,
+# testing/pressure/leak/hydro/flush). Flattened once at import time so
+# is_labour_keyword() below is a single membership scan, not a re-walk of
+# _ACT_RULES on every call.
+_LABOUR_ONLY_KEYWORDS = [kw for keys, targets in _ACT_RULES if not targets for kw in keys]
+
+
+def is_labour_keyword(activity_name):
+    """True if this activity's own name matches one of the keyword groups
+    _ACT_RULES already treats as labour-only (no material to suggest). Used
+    ONLY to SUGGEST the "track as % instead of items" option on a brand-new,
+    still-empty activity card -- like suggest() below, it's a starting guess
+    the engineer confirms or ignores, never an automatic classification that
+    overrides whatever the engineer has actually chosen for that activity."""
+    an = _norm(activity_name)
+    return any(kw in an for kw in _LABOUR_ONLY_KEYWORDS)
+
+
 def suggest(activities, boq_items, service=None):
     """Return {activity: [item_code, ...]} first-guess ticks.
 

@@ -315,6 +315,16 @@ tbody tr:hover{background:#faf9f6}
   main{padding:0 16px 56px}
   .kpis{grid-template-columns:repeat(auto-fit,minmax(140px,1fr))}
   .card.wide{padding:18px}
+  /* Forecast tab's main table had no mobile handling at all -- its
+     percentage-width colgroup just shrinks with the viewport, crushing
+     five columns of real data (material name, action, stock, date, trust)
+     illegible on a phone. Scroll instead of crush: the wrapper scrolls
+     horizontally, the table itself refuses to shrink below a width where
+     its columns stay readable. Both are inert at desktop width -- no
+     min-width is exceeded there, so no scrollbar appears and nothing
+     changes above 760px. */
+  .tablewrap{overflow-x:auto}
+  .tablewrap table{min-width:640px}
 }
 @media(max-width:640px){
   .home-head h2{font-size:21px}

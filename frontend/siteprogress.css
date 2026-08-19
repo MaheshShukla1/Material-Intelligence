@@ -57,6 +57,24 @@
 .sp-ic{border:none;background:none;cursor:pointer;color:var(--ink3);font-size:12px;padding:0 2px}
 .sp-ic:hover{color:var(--ink)}
 
+/* Touch devices have no reliable hover state, so a hover-only reveal (the
+   room/floor tree's Rename/Add/Delete icons above) is effectively invisible
+   and unreachable on a phone or tablet -- not just small, genuinely
+   un-tappable. (hover:none)/(pointer:coarse) targets touch CAPABILITY, not
+   viewport width, so a mouse-driven desktop never matches this no matter
+   how narrow the window is resized -- nothing below changes how the app
+   looks today on desktop. Also widens every small icon button's tap area
+   towards the ~44px minimum touch target (Apple HIG / Material) without
+   changing their visual size in the desktop layout at all. .sp-ic here
+   gets an explicit box (it has none today -- just glyph + 2px padding);
+   .sp-treeact's own icons stay close together (only 6px apart) so their
+   boxes go to 34px rather than the full 44px, to avoid two adjacent icons'
+   tap areas overlapping and catching the wrong one. */
+@media (hover:none),(pointer:coarse){
+  .sp-treeact{opacity:1}
+  .sp-ic{min-width:34px;min-height:34px;display:inline-flex;align-items:center;justify-content:center}
+}
+
 /* pills */
 .sp-pills{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:18px}
 .sp-pill{font:inherit;font-size:12.5px;padding:6px 14px;border-radius:20px;border:1px solid var(--line);
@@ -114,8 +132,27 @@
   grid-template-areas:"name qty entry money remove arrow";
   gap:14px;align-items:center;padding:12px 0;border-bottom:1px solid var(--line2)}
 .sp-brow:last-child{border-bottom:none}
+
+/* touch: same 6-column shape, just the remove/arrow tracks widened to fit
+   the bumped .sp-fx size below (38px) without clipping -- fires for any
+   touch device that ISN'T also narrow (e.g. an iPad in landscape, still on
+   this desktop-shape grid). Comes BEFORE the 720px rule on purpose: on a
+   narrow+touch phone (the common case) the 720px rule's own column count
+   must still win, not this one. */
+@media (hover:none),(pointer:coarse){
+  .sp-brow{grid-template-columns:1fr 80px 168px 90px 40px 40px}
+}
+
 @media(max-width:720px){.sp-brow{grid-template-columns:1fr 56px 26px 30px;row-gap:8px;
   grid-template-areas:"name qty remove arrow" "entry entry entry entry" "money money money money"}}
+
+/* touch AND narrow (the common phone case): same stacked shape as the
+   720px rule above, remove/arrow tracks widened the same way. Comes AFTER
+   the 720px rule so it wins the cascade for grid-template-columns; the
+   720px rule's own grid-template-areas is untouched here and still applies. */
+@media (max-width:720px) and (hover:none),(max-width:720px) and (pointer:coarse){
+  .sp-brow{grid-template-columns:1fr 56px 40px 40px}
+}
 .sp-bname{grid-area:name;font-size:13px;min-width:0}
 .sp-bname .code{color:var(--ink3);font-size:11px;font-family:ui-monospace,Menlo,monospace;margin-right:6px}
 .sp-bmeta{font-size:11px;color:var(--ink3);margin-top:2px;display:flex;gap:6px;flex-wrap:wrap;align-items:center}
@@ -162,6 +199,9 @@
 .sp-fx[data-removeitem]:hover{color:var(--red);border-color:#eec9c7}
 .sp-fx[data-fx]{grid-area:arrow}
 .sp-labour{font-size:12px;color:var(--ink3);padding:12px 2px}
+@media (hover:none),(pointer:coarse){
+  .sp-fx{width:38px;height:38px}
+}
 
 /* Overall tab's by-service summary row — deliberately its OWN classes, never
    shared with .sp-brow/.sp-bqty (the item-row grid). Those carry grid-area
@@ -283,6 +323,10 @@
 .sp-linkcard .rgt .ctl{width:100%}
 .sp-suggpick{align-self:flex-start;border:1px dashed var(--line);background:var(--panel);color:var(--violet);font:inherit;font-size:11px;padding:3px 9px;border-radius:7px;cursor:pointer}
 .sp-suggpick:hover{background:var(--violetbg);border-color:var(--violet)}
+@media (hover:none),(pointer:coarse){
+  .sp-linkchip{padding:8px 12px;min-height:34px;display:inline-flex;align-items:center}
+  .sp-suggpick{padding:8px 12px;min-height:34px}
+}
 
 /* multi-material chips on a link-stock row: each linked material is a small
    removable chip; one input + a small + button appends another — the row
@@ -325,3 +369,6 @@
 .sp-addchip{width:28px;height:28px;flex:none;border-radius:7px;border:1px solid var(--line);
   background:var(--panel);color:var(--ink);font-size:16px;line-height:1;cursor:pointer}
 .sp-addchip:hover{border-color:var(--violet);color:var(--violet)}
+@media (hover:none),(pointer:coarse){
+  .sp-addchip{width:38px;height:38px}
+}

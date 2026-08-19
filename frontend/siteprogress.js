@@ -175,7 +175,7 @@
         <div class="sp-step" id="sp-step2">
           <span class="n">2</span><h3>Bill of Quantities</h3><span id="sp-s2" class="sp-done" ${hasBoq ? "" : "hidden"}>✓ ${Object.keys(st.activities || {}).length} services</span>
           <div class="body">
-            <p class="sub" style="margin:0 0 10px">Upload the BOQ workbook. Every service sheet is parsed; the planned quantity per room is the baseline.</p>
+            <p class="sub" style="margin:0 0 10px">Upload the BOQ workbook. Every service sheet is parsed; the planned quantity per ${curLeafLower()} is the baseline.</p>
             <input type="file" id="sp-boq-file" accept=".xlsx,.xlsm,.xls" style="display:none">
             <button class="btn" onclick="document.getElementById('sp-boq-file').click()">Choose BOQ file</button>
             <span id="sp-boq-status" class="sp-done" hidden></span>
@@ -315,7 +315,7 @@
         <aside class="sp-rail">
           <div class="sp-railhd"><span>Structure</span><span><button class="linkbtn" id="sp-addfloor">+ Add</button> &nbsp;·&nbsp; <button class="linkbtn" id="sp-rebuildstruct">Rebuild</button></span></div>
           <div class="sp-tree" id="sp-tree"></div>
-          <p class="sub" style="margin:10px 4px">Type: ${esc((st.structure && st.structure.kind) || "custom")} · ${st.rooms} rooms. Hover a row to rename/delete.</p>
+          <p class="sub" style="margin:10px 4px">Type: ${esc((st.structure && st.structure.kind) || "custom")} · ${st.rooms} ${curLeafPluralLower(st.rooms)}. Hover a row to rename/delete.</p>
         </aside>
         <div>
           <div class="sp-pills" id="sp-pills"></div>
@@ -328,7 +328,7 @@
             </div>
           </div>
           <p class="sp-unmapped" id="sp-unmapped" hidden></p>
-          <div class="sp-secttl"><span>Activities · ${esc(S.service)}${S.room ? ` · <b>${esc(S.roomName)}</b> <button class="linkbtn" id="sp-allrooms">← all rooms</button>` : " · all rooms"}</span>
+          <div class="sp-secttl"><span>Activities · ${esc(S.service)}${S.room ? ` · <b>${esc(S.roomName)}</b> <button class="linkbtn" id="sp-allrooms">← all ${curLeafPluralLower(2)}</button>` : ` · all ${curLeafPluralLower(2)}`}</span>
             <span><button class="linkbtn" id="sp-newact">+ New activity</button> &nbsp;·&nbsp; <button class="linkbtn" id="sp-rates">Set rates</button> &nbsp;·&nbsp; <button class="linkbtn" id="sp-linkbtn">Link stock</button> &nbsp;·&nbsp; <button class="linkbtn" id="sp-reboq">Re-upload BOQ</button> &nbsp;·&nbsp; <button class="linkbtn" id="sp-refresh">Refresh</button>
             <input type="file" id="sp-reboq-file" accept=".xlsx,.xlsm,.xls" hidden></span></div>
           <div id="sp-acts"></div>
@@ -379,6 +379,20 @@
   function leafLabel(kind) {
     return kind === "mall" ? "Zone" : "Room";
   }
+  // curLeaf() and friends read CURRENT state every time they're called --
+  // deliberately not cached into S.leaf at load time. A cached value can go
+  // stale (forget to refresh it after a project switch, a template change,
+  // etc.) the moment a NEW call site is added later and nobody remembers to
+  // wire the cache-refresh too -- reading S.state.structure.kind fresh here
+  // makes that whole class of bug structurally impossible, not just
+  // unlikely. Every leaf-referring string in this file goes through one of
+  // these four -- singular/plural x Capitalized/lowercase -- so a mall
+  // project can never show a stray "room" again, and any FUTURE UI text
+  // that needs the leaf name has exactly one obvious place to pull it from.
+  function curLeaf() { return leafLabel((S.state && S.state.structure && S.state.structure.kind) || "hotel"); }
+  function curLeafLower() { return curLeaf().toLowerCase(); }
+  function curLeafPlural(n) { return curLeaf() + (n === 1 ? "" : "s"); }
+  function curLeafPluralLower(n) { return curLeafLower() + (n === 1 ? "" : "s"); }
   function renderTree() {
     const host = $("sp-tree"); host.innerHTML = nodeHTML(S.state.structure, 0);
     host.querySelectorAll("[data-toggle]").forEach((el) => el.addEventListener("click", (e) => {
@@ -427,7 +441,15 @@
     catch (e) { toast("Save failed: " + briefErr(e)); }
   }
   function addNode(parentId, type) {
-    const name = prompt(`New ${type} name:`, type.charAt(0).toUpperCase() + type.slice(1)); if (!name) return;
+    // `type` is the internal structure.py type -- for a leaf it's always
+    // the generic "room" regardless of project kind (mall's zones ARE
+    // type="room" underneath, see structure.py's mall() template), so the
+    // prompt must translate that specific case through curLeaf() rather
+    // than title-casing the raw internal type straight into user-facing
+    // text. Every other type (floor/wing/level) already reads correctly
+    // title-cased as-is.
+    const label = type === "room" ? curLeaf() : (type.charAt(0).toUpperCase() + type.slice(1));
+    const name = prompt(`New ${label} name:`, label); if (!name) return;
     const p = findNode(parentId); if (!p) return;
     (p.children = p.children || []).push({ id: nextId(type), type, name: name.trim(), children: [] });
     saveTree();
@@ -442,8 +464,8 @@
     if (!confirm("Rebuild the structure? This lets you pick a different shape "
       + "(hotel / mall / hospital / custom) or re-import from a tracker. "
       + "BOQ, activities, mapping, rates and stock links are kept — but ALL "
-      + "recorded progress (every item, every service, every room) is "
-      + "cleared, since it was measured against the room structure you're "
+      + `recorded progress (every item, every service, every ${curLeafLower()}) is `
+      + `cleared, since it was measured against the ${curLeafLower()} structure you're `
       + "replacing and would be meaningless against the new one.")) return;
     try { await jpost(api("/" + S.slug + "/structure/reset"), {}); }
     catch (e) { return toast("Reset failed: " + briefErr(e)); }
@@ -495,7 +517,7 @@
             <div class="sp-stat"><p class="l">Work done</p><div class="v g">${inr(o.done_value)}</div><p class="h">of ${inr(o.planned_value)} planned</p></div>
             <div class="sp-stat"><p class="l">Remaining</p><div class="v a">${inr(o.remaining_value)}</div><p class="h">to finish planned work</p></div>
             <div class="sp-stat"><p class="l">Material waste</p><div class="v r">${inr(o.waste_value)}</div><p class="h">${o.waste_caveat ? esc(o.waste_caveat) : (o.waste_value ? "over-consumed vs work done" : "link stock to measure")}</p></div>
-            <div class="sp-stat sp-statdiv"><p class="l">Rooms — whole site</p><div class="v">${rs.done} <span style="font-size:13px;font-weight:400;color:var(--ink3)">done</span> · ${rs.in_progress} <span style="font-size:13px;font-weight:400;color:var(--ink3)">in progress</span></div><p class="h">of ${rs.total} rooms</p></div>
+            <div class="sp-stat sp-statdiv"><p class="l">${curLeafPlural(2)} — whole site</p><div class="v">${rs.done} <span style="font-size:13px;font-weight:400;color:var(--ink3)">done</span> · ${rs.in_progress} <span style="font-size:13px;font-weight:400;color:var(--ink3)">in progress</span></div><p class="h">of ${rs.total} ${curLeafPluralLower(rs.total)}</p></div>
           </div>
         </div>
         <div class="sp-secttl"><span>By service — tap to see activities, tap an activity to see items</span></div>
@@ -684,7 +706,7 @@
     const cons = cpd > 0 ? `<span class="sp-tag" title="consumption per day from the register">≈${Math.round(cpd)}/day</span>` : "";
     const linked = links.length > 0;
     const qtyVal = Math.round((it.used || 0) * 100) / 100;
-    const roomBadge = S.room ? `<span class="sp-tag" style="color:var(--violet)" title="This row shows only ${esc(S.roomName || "this room")}'s own progress, not the whole project's">${esc(S.roomName || "this room")} only</span>` : "";
+    const roomBadge = S.room ? `<span class="sp-tag" style="color:var(--violet)" title="This row shows only ${esc(S.roomName || "this " + curLeafLower())}'s own progress, not the whole project's">${esc(S.roomName || "this " + curLeafLower())} only</span>` : "";
     return `<div class="sp-brow" data-code="${esc(it.code)}">
       <div class="sp-bname"><span class="code">${esc(it.code)}</span>${esc(short(it.desc))}
         <div class="sp-bmeta"><span class="sp-tag">${esc(it.sub)}</span>${cons}${roomBadge}
@@ -715,7 +737,7 @@
     const out = [];
     (function walk(node, path) {
       if (!node) return;
-      if (node.type === "room") { out.push({ id: node.id, name: node.name, path: path.join(" › ") || "Rooms" }); return; }
+      if (node.type === "room") { out.push({ id: node.id, name: node.name, path: path.join(" › ") || curLeafPlural(2) }); return; }
       (node.children || []).forEach((c) => walk(c, node.type === "project" ? path : path.concat(node.name)));
     })(S.state.structure, []);
     return out;
@@ -727,16 +749,16 @@
     if (groups && groups.length) {
       const covered = groups.reduce((s, g) => s + g.rooms.length, 0);
       return groups.length === 1
-        ? `${covered} rooms @ ${qf(groups[0].qty)} ${esc(S._byCode[code] ? S._byCode[code].unit : "")}`.trim()
-        : `${covered} of ${total} rooms · ${groups.length} qty groups`;
+        ? `${covered} ${curLeafPluralLower(covered)} @ ${qf(groups[0].qty)} ${esc(S._byCode[code] ? S._byCode[code].unit : "")}`.trim()
+        : `${covered} of ${total} ${curLeafPluralLower(total)} · ${groups.length} qty groups`;
     }
-    if (!ids || !ids.length) return `all ${total} rooms`;
-    return `${ids.length} of ${total} rooms`;
+    if (!ids || !ids.length) return `all ${total} ${curLeafPluralLower(total)}`;
+    return `${ids.length} of ${total} ${curLeafPluralLower(total)}`;
   }
   function openRoomsModal(code) {
     const it = S._byCode[code];
     const rooms = allRoomsList();
-    if (!rooms.length) return toast("No rooms in the structure yet.");
+    if (!rooms.length) return toast(`No ${curLeafPluralLower(2)} in the structure yet.`);
     const current = (S.svc.item_rooms || {})[code];
     const existingGroups = (S.svc.item_room_qty || {})[code] || [];
     // missing/empty entry means "all rooms" (typical) — that is the default state
@@ -752,6 +774,19 @@
       rooms.forEach((r) => { if (!grouped.has(r.id)) checked.add(r.id); });
     }
 
+    // which rooms are already 100% done for THIS item -- same per-room
+    // fraction resolution compute()/frac_for() use server-side (a room's own
+    // override if it has one, else the item's overall "*" value), just read
+    // from the raw item_progress store the service view now exposes. Purely
+    // a display hint (the small ✓ next to a room's name below) and the
+    // "N done" count on each quantity group -- ticking/saving here never
+    // reads or depends on it.
+    const progNode = (S.svc.item_progress || {})[code] || {};
+    const isDone = (roomId) => {
+      const v = roomId in progNode ? progNode[roomId] : progNode["*"];
+      return (v || 0) >= 1;
+    };
+
     const groups = {};
     rooms.forEach((r) => { (groups[r.path] = groups[r.path] || []).push(r); });
     const groupEntries = Object.entries(groups);
@@ -759,15 +794,18 @@
     const groupsSummary = existingGroups.length
       ? `<div class="sp-qtygroups">
           <p class="lbl">Current quantity groups</p>
-          ${existingGroups.map((g, gi) => `<div class="row"><span>${g.rooms.length} room${g.rooms.length === 1 ? "" : "s"}</span><b>${qf(g.qty)} ${esc(it.unit)}</b><button type="button" class="sp-qtygroup-rm" data-rmgroup="${gi}" title="Remove this group">Remove</button></div>`).join("")}
-          <p class="hint">Ticking rooms below and saving with a quantity moves them into a new group (out of whichever group they're currently in).</p>
+          ${existingGroups.map((g, gi) => {
+            const doneN = g.rooms.filter(isDone).length;
+            return `<div class="row"><span>${g.rooms.length} ${curLeafPluralLower(g.rooms.length)}</span><b>${qf(g.qty)} ${esc(it.unit)}</b>${doneN ? `<span class="sp-donebadge">${doneN} done</span>` : ""}<button type="button" class="sp-qtygroup-rm" data-rmgroup="${gi}" title="Remove this group">Remove</button></div>`;
+          }).join("")}
+          <p class="hint">Ticking ${curLeafPluralLower(2)} below and saving with a quantity moves them into a new group (out of whichever group they're currently in).</p>
         </div>`
       : "";
 
     const body = `${groupsSummary}
       <div class="sp-qtyrow">
-        <label for="sp-roomqty">Quantity for the rooms ticked below</label>
-        <input class="ctl" id="sp-roomqty" type="number" min="0" step="any" placeholder="e.g. 52 (optional — leave blank for plain applicability)">
+        <label for="sp-roomqty">Quantity for the ${curLeafPluralLower(2)} ticked below</label>
+        <input class="ctl" id="sp-roomqty" type="number" min="0" step="any" placeholder="optional — leave blank for plain applicability">
         <span class="u">${esc(it.unit)}</span>
       </div>
       <div style="margin:12px 0"><button class="btn" id="sp-rooms-all">Select all (typical)</button>
@@ -780,12 +818,14 @@
             <button type="button" class="linkbtn" data-gnone="${gi}" style="font-size:11px">clear</button>
           </div>
           <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:5px">
-          ${rs.map((r) => `<label style="display:flex;align-items:center;gap:5px;font-size:12.5px;cursor:pointer"><input type="checkbox" data-room="${esc(r.id)}" ${checked.has(r.id) ? "checked" : ""}>${esc(r.name)}</label>`).join("")}
+          ${rs.map((r) => `<label style="display:flex;align-items:center;gap:5px;font-size:12.5px;cursor:pointer" class="${isDone(r.id) ? "sp-roomdone" : ""}"><input type="checkbox" data-room="${esc(r.id)}" ${checked.has(r.id) ? "checked" : ""}>${esc(r.name)}${isDone(r.id) ? ' <span class="sp-doneck" title="Already marked done">✓</span>' : ""}</label>`).join("")}
           </div>
-        </div>`).join("")}`;
+        </div>`).join("")}
+      <div style="margin-top:6px"><button type="button" class="btn" id="sp-mark-done" style="border-color:var(--green);color:var(--green)">Mark ticked as done</button>
+      <span class="hint" style="display:block;margin-top:6px">Uses the SAME ticks as Save below — tick the ${curLeafPluralLower(2)} that are actually finished, then either mark them done, save a quantity for them, or both.</span></div>`;
 
-    modal(`Rooms → ${esc(code)}`,
-      `${esc(short(it.desc, 70))} — pick which rooms this item applies to. All rooms are ticked by default (typical); untick the exceptions (e.g. Suites where the item mix differs). To record a REAL quantity for a set of rooms (e.g. corner rooms that genuinely need more material), tick just those rooms and enter their quantity above instead.`,
+    modal(`${curLeafPlural(2)} → ${esc(code)}`,
+      `${esc(short(it.desc, 70))} — pick which ${curLeafPluralLower(2)} this item applies to. All ${curLeafPluralLower(2)} are ticked by default (typical); untick the exceptions (e.g. ${curLeafPluralLower(2)} where the item mix differs). To record a REAL quantity for a set of ${curLeafPluralLower(2)} (e.g. ones that genuinely need more material), tick just those ${curLeafPluralLower(2)} and enter their quantity above instead.`,
       body, async () => {
         const boxes = [...document.querySelectorAll("#sp-modal input[data-room]")];
         const ids = boxes.filter((c) => c.checked).map((c) => c.dataset.room);
@@ -793,7 +833,7 @@
         if (qtyVal !== "") {
           const qty = Number(qtyVal);
           if (isNaN(qty)) return toast("Enter a number for quantity, or leave it blank.");
-          if (!ids.length) return toast("Tick at least one room to assign this quantity to.");
+          if (!ids.length) return toast(`Tick at least one ${curLeafLower()} to assign this quantity to.`);
           S.svc = await jpost(api("/" + S.slug + "/item-room-qty" + roomQ()), { service: S.service, item_code: code, rooms: ids, qty });
         } else {
           // every room checked = typical -> send [] so it keeps auto-covering
@@ -803,10 +843,25 @@
         }
         try { S.pnl = await jget(pnlUrl()); } catch (e) {}
         closeModal(); renderMain();
-      }, "Save rooms", "min(600px,94vw)");
+      }, `Save ${curLeafPluralLower(2)}`, "min(600px,94vw)");
 
     $("sp-rooms-all").onclick = () => document.querySelectorAll("#sp-modal input[data-room]").forEach((c) => { c.checked = true; });
     $("sp-rooms-none").onclick = () => document.querySelectorAll("#sp-modal input[data-room]").forEach((c) => { c.checked = false; });
+    // "Mark ticked as done" -- same tick-list as Save, a separate action so
+    // it never depends on (or clobbers) whatever's in the quantity field.
+    // Each ticked room gets its own per-room override server-side, so this
+    // can never wipe another room's progress the way the item's overall %
+    // slider can (see mark_rooms_done()'s own docstring in siteprogress.py).
+    $("sp-mark-done").onclick = async () => {
+      const ids = [...document.querySelectorAll("#sp-modal input[data-room]")].filter((c) => c.checked).map((c) => c.dataset.room);
+      if (!ids.length) return toast(`Tick at least one ${curLeafLower()} to mark done.`);
+      try {
+        S.svc = await jpost(api("/" + S.slug + "/mark-rooms-done" + roomQ()), { service: S.service, item_code: code, rooms: ids });
+        try { S.pnl = await jget(pnlUrl()); } catch (e) {}
+        closeModal(); renderMain();
+        toast(`Marked ${ids.length} ${curLeafPluralLower(ids.length)} done for ${code}.`);
+      } catch (e) { toast("Failed: " + briefErr(e)); }
+    };
     document.querySelectorAll("[data-gall]").forEach((b) => b.addEventListener("click", () => {
       document.querySelector(`.sp-roomgroup[data-g="${cssA(b.dataset.gall)}"]`).querySelectorAll("input[data-room]").forEach((c) => { c.checked = true; });
     }));
@@ -871,7 +926,7 @@
   }
   async function editPlanned(code) {
     const it = S._byCode[code];
-    const v = prompt(`Whole-project planned quantity for ${code} (${it.unit}) — auto = BOQ qty × every room this item covers. Edit to override, or clear the field and press OK to reset to auto:`,
+    const v = prompt(`Whole-project planned quantity for ${code} (${it.unit}) — auto = BOQ qty × every ${curLeafLower()} this item covers. Edit to override, or clear the field and press OK to reset to auto:`,
       it.planned != null ? it.planned : "");
     if (v == null) return;                          // Cancel — no change
     let p;
@@ -1002,7 +1057,7 @@
     // than let a whole-project number sit under a room heading looking like
     // it belongs to that room.
     $("sp-wasteh").textContent = (w && w.available)
-      ? (w.caveat ? w.caveat : (S.room ? "whole project — not split by room" : "over-consumed vs work done"))
+      ? (w.caveat ? w.caveat : (S.room ? `whole project — not split by ${curLeafLower()}` : "over-consumed vs work done"))
       : "link stock to measure";
     // items whose activity was deleted keep their own progress (nothing is
     // erased) but no longer count toward the numbers above, since they have
@@ -1283,10 +1338,10 @@
     const outstanding = prog + pend;
     const w = (n) => (total ? (100 * n / total) : 0);
     const needRow = outstanding > 0
-      ? `<p class="sp-roomsneed"><span>To finish those ${outstanding} room${outstanding === 1 ? "" : "s"}</span><b>≈${qf(it.remaining)} ${esc(it.unit)} more</b></p>`
-      : `<p class="sp-roomsneed"><span>All ${total} room${total === 1 ? "" : "s"} done for this item</span></p>`;
+      ? `<p class="sp-roomsneed"><span>To finish those ${outstanding} ${curLeafPluralLower(outstanding)}</span><b>≈${qf(it.remaining)} ${esc(it.unit)} more</b></p>`
+      : `<p class="sp-roomsneed"><span>All ${total} ${curLeafPluralLower(total)} done for this item</span></p>`;
     return `<div class="sp-roomsblk">
-      <p class="lbl">Rooms — this item</p>
+      <p class="lbl">${curLeafPlural(2)} — this item</p>
       <div class="sp-roomsbar"><span class="done" style="width:${w(done)}%"></span><span class="prog" style="width:${w(prog)}%"></span><span class="pend" style="width:${w(pend)}%"></span></div>
       <p class="sp-roomscount"><b class="done">${done} done</b> · <b class="prog">${prog} in progress</b> · <b class="pend">${pend} not started</b></p>
       ${needRow}
@@ -1337,7 +1392,21 @@
     // always the whole project's room count -- the underlying number (it.planned)
     // already comes room-scoped from the service view when S.room is set;
     // this was previously mislabeled "(108 rooms)" even inside a room drill-down.
-    const plannedLabel = S.room ? `Planned (${esc(S.roomName || "this room")})` : `Planned (${S.state.rooms} rooms)`;
+    // planned label: the ITEM's own actual applicable room count (it.rooms --
+    // computed server-side by the exact same compute() call that produced
+    // it.planned, so the two always agree), not the flat project total.
+    // These two coincide for a normal, unrestricted item, which is why this
+    // went unnoticed -- they diverge the moment an item has a room_qty_groups
+    // exception or a plain item_rooms.json applicability restriction (e.g.
+    // a "108 rooms @ 2.5 MTR" quantity group on a 204-room project): the
+    // label kept showing the project's flat 204 while it.planned was
+    // already correctly the 108-room total, contradicting each other on
+    // the same screen. it.rooms is the exact figure the "Rooms — this item"
+    // panel below already uses (via room_buckets' own `total`), so this now
+    // agrees with that too.
+    const roomCount = it.rooms || 0;
+    const plannedLabel = S.room ? `Planned (${esc(S.roomName || "this " + curLeafLower())})`
+      : `Planned (${roomCount} ${curLeafPluralLower(roomCount)})`;
     const html = `<div class="sheet" id="sp-draw"><div class="sheetin">
       <div class="sheethd"><div><h2>${esc(it.code)} · ${esc(it.sub)}</h2><p>${esc(short(it.desc, 120))}</p></div><button class="btn" id="sp-draw-x">Close</button></div>
       <div class="sp-drow"><span>${plannedLabel}</span><b>${qf(it.planned)} ${esc(it.unit)}</b></div>
@@ -1379,7 +1448,7 @@
   // alone. One choice per flagged service, asked once, right after upload.
   function showQtyModeWizard(services) {
     if (!services || !services.length) return;
-    const leaf = leafLabel((S.state.structure || {}).kind);
+    const leaf = curLeaf();
     const body = services.map((svc, i) => `
       <div style="padding:14px 0;border-bottom:1px solid var(--line2)">
         <b style="font-size:13.5px">${esc(svc)}</b>

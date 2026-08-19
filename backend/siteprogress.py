@@ -343,6 +343,7 @@ def _service_view_core(d, service, items, used, prog, rooms_cfg, room_qty_groups
         "pnl_totals": rp["totals"],
         "pnl_unmapped_value": rp["unmapped_value"],
         "item_rooms": rooms_cfg,
+        "item_progress": prog,
         "item_room_qty": room_qty_groups,
         "unmapped": m.unmapped(service, items.item_code.dropna().astype(str).tolist()),
         "labour_only": {a: (a in labour) for a in acts},
@@ -669,6 +670,43 @@ def set_item_room_qty(slug: str, payload: dict, room: str = None):
     store = _item_room_qty(d)
     itemprog.set_room_qty_group(store, svc, code, payload.get("rooms") or [], payload.get("qty"))
     (d / "item_room_qty.json").write_text(json.dumps(store, ensure_ascii=False))
+    return _service_view(d, svc, room=room)
+
+
+@router.post("/{slug}/mark-rooms-done")
+def mark_rooms_done(slug: str, payload: dict, room: str = None):
+    """Mark a set of rooms 100% done for one item, in a single call -- the
+    companion action to /item-room-qty in the exact same Rooms modal: tick
+    rooms (the same tick-list either way), then either save a quantity for
+    them (existing) or mark them done (this). Body: {"service","item_code",
+    "rooms":[room_id,...]}.
+
+    This exists because the ONLY other way to mark a room done was the
+    item's own single overall %/quantity slider in the "All rooms" view --
+    which sets the '*' fraction and, by itemprog.set_progress()'s own
+    documented behaviour, WIPES every existing per-room override to keep
+    the bar uniform. An engineer who had already marked individual rooms
+    done, then touched that overall slider by mistake, would see their
+    real per-room progress silently flatten to one number -- a real
+    reported accident this route is built to prevent, not just a
+    convenience. Each room here gets its OWN per-room override (frac=1.0)
+    via itemprog.set_progress(..., room=room_id) -- called once per room,
+    never the room=None ("*") global path -- so this can never wipe any
+    other room's state, marked-done or still in progress, the way the
+    overall slider can. Ticking an already-done room is a harmless no-op;
+    an unticked room is simply left untouched."""
+    d = _need(slug)
+    svc = payload.get("service")
+    code = payload.get("item_code")
+    room_ids = [str(r) for r in (payload.get("rooms") or [])]
+    if not svc or code is None:
+        raise HTTPException(400, "service and item_code are required")
+    if not room_ids:
+        raise HTTPException(400, "tick at least one room")
+    store = _item_prog(d)
+    for rid in room_ids:
+        itemprog.set_progress(store, svc, code, 1.0, room=rid)
+    (d / "item_progress.json").write_text(json.dumps(store, ensure_ascii=False))
     return _service_view(d, svc, room=room)
 
 

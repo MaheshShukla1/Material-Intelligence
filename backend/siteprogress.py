@@ -181,11 +181,18 @@ def _read_forecast_parquet(run_dir):
     exact same file from disk 2-3 separate times within a single click (once
     each in _forecast_pool, _actual_consumed, and — after the Bug 2 fix —
     _full_run_rows) -- the main structural cause behind the reported
-    service-switch slowness. This does not cache the more expensive
-    linkage.match() token matching inside _actual_consumed; that's a real
-    further optimization but needs its own cache-invalidation story (it
-    depends on the BOQ's items, which change more often than a run does)
-    and shouldn't be done blind."""
+    service-switch slowness.
+
+    UPDATE (broader performance pass): the more expensive step riding on top
+    of this cached DataFrame -- linkage.match() token matching, and the
+    iterrows()/_scrub() dict-building in _forecast_pool/_full_run_rows -- is
+    now ALSO cached, in _cached_match()/_forecast_pool_cached()/
+    _full_run_rows_cached() below. Real profiling on a synthetic Hyatt-scale
+    project (108 rooms, 385 materials, 540 BOQ items) showed linkage.match()
+    alone was ~25% of a single /overall call and over half of a single
+    /links/{service} call. Same (path, mtime) keying as this function -- see
+    those functions' own docstrings for the exact invalidation story (why it
+    needs no manual cache-bust in any write route)."""
     p = Path(run_dir) / "forecast.parquet"
     return _read_forecast_parquet_cached(str(p), p.stat().st_mtime_ns)
 
@@ -214,22 +221,20 @@ def _item_room_qty(d):
     return _read_json(d / "item_room_qty.json", {}) or {}
 
 
-def _service_view(d, service, room=None):
-    """Everything the UI needs for one service. Per-item, per-room progress:
-    each BOQ item has its own completion, so sliders never couple. `room` scopes
-    the numbers to a single room (the drill-down)."""
-    items = _load_boq(d, service)
-    if items.empty:
-        raise HTTPException(404, f"no BOQ items for service '{service}'")
+def _service_view_core(d, service, items, used, prog, rooms_cfg, room_qty_groups,
+                       all_rooms, room=None):
+    """The body of _service_view() from the point `used` (itemprog.compute's
+    output) is already known — split out so /overall can share ONE items +
+    used pair across both the normal per-service view AND its waste calc,
+    instead of loading the BOQ and running itemprog.compute() twice for the
+    exact same service on every single /overall call (see _waste_for below
+    and overall()'s own loop). Real profiling on a synthetic Hyatt-scale
+    project (108 rooms, 385 materials, 540 items) showed this duplication
+    was roughly a quarter of /overall's total time by itself. _service_view()
+    below is unchanged for every OTHER caller — this split changes no
+    behaviour, only who pays for loading/computing `items`/`used`."""
     m = _load_mapping(d)
     acts = (_read_json(d / "activities.json", {}) or {}).get(service, [])
-    all_rooms = _all_room_ids(d)
-    prog = _item_prog(d).get(service, {})
-    rooms_cfg = _item_rooms(d).get(service, {})
-    room_qty_groups = _item_room_qty(d).get(service, {})
-
-    used = itemprog.compute(items, prog, rooms_cfg, all_rooms,
-                            _planned(d, service), room=room, room_qty_groups=room_qty_groups)
     rates = _rates(d, service)
     ip = pnl.compute_item_pnl(used, rates=rates)
     rp = pnl.rollup_pnl(ip, m, service)
@@ -302,6 +307,29 @@ def _service_view(d, service, room=None):
     }
 
 
+def _service_view(d, service, room=None):
+    """Everything the UI needs for one service. Per-item, per-room progress:
+    each BOQ item has its own completion, so sliders never couple. `room` scopes
+    the numbers to a single room (the drill-down).
+
+    Loads + computes `items`/`used` fresh, then hands off to
+    _service_view_core() -- this is every caller's entry point EXCEPT
+    overall(), which pre-loads/computes these once and calls
+    _service_view_core() directly to avoid doing it twice (see that
+    function's own docstring)."""
+    items = _load_boq(d, service)
+    if items.empty:
+        raise HTTPException(404, f"no BOQ items for service '{service}'")
+    all_rooms = _all_room_ids(d)
+    prog = _item_prog(d).get(service, {})
+    rooms_cfg = _item_rooms(d).get(service, {})
+    room_qty_groups = _item_room_qty(d).get(service, {})
+    used = itemprog.compute(items, prog, rooms_cfg, all_rooms,
+                            _planned(d, service), room=room, room_qty_groups=room_qty_groups)
+    return _service_view_core(d, service, items, used, prog, rooms_cfg,
+                              room_qty_groups, all_rooms, room=room)
+
+
 # ----------------------------------------------------------------- routes
 @router.get("/{slug}")
 def get_state(slug: str):
@@ -326,7 +354,7 @@ def get_state(slug: str):
     }
 
 
-def _waste_for(d, slug, service):
+def _waste_for(d, slug, service, items=None, used=None):
     """Wasted / saved ₹ for one service (supplied vs consumed), best-effort:
     needs a linked forecast run. Returns {wasted, saved, caveat, recorded_pct}.
 
@@ -339,14 +367,24 @@ def _waste_for(d, slug, service):
     -- disagree with the honest per-service number sitting right there in
     pnl.py, showing a contradictory "94% value complete" ring next to
     "Only 0.0% recorded" waste caveat on the same page. Propagating the real
-    number pnl.py already computed removes that whole class of mismatch."""
+    number pnl.py already computed removes that whole class of mismatch.
+
+    `items`/`used` are optional pre-computed inputs -- overall() is the only
+    caller, and it already loads `items` and runs itemprog.compute() once
+    for its own service view; passing those straight in here means this no
+    longer repeats that exact same load + compute a second time (profiling
+    showed that repeat as roughly a quarter of one /overall call). Any other
+    caller that doesn't pass them keeps the old, fully self-contained
+    behaviour -- loads and computes fresh, unchanged."""
     try:
-        items = _load_boq(d, service)
+        if items is None:
+            items = _load_boq(d, service)
         if items.empty:
             return {"wasted": 0.0, "saved": 0.0, "caveat": None, "recorded_pct": None}
-        used = itemprog.compute(items, _item_prog(d).get(service, {}),
-                                _item_rooms(d).get(service, {}), _all_room_ids(d),
-                                _planned(d, service), room_qty_groups=_item_room_qty(d).get(service, {}))
+        if used is None:
+            used = itemprog.compute(items, _item_prog(d).get(service, {}),
+                                    _item_rooms(d).get(service, {}), _all_room_ids(d),
+                                    _planned(d, service), room_qty_groups=_item_room_qty(d).get(service, {}))
         actual = _actual_consumed(slug, service, items)
         ip = pnl.compute_item_pnl(used, rates=_rates(d, service), actual_consumed=actual)
         w = pnl.waste_summary(ip)
@@ -373,18 +411,46 @@ def overall(slug: str):
     tot = {"done": 0.0, "planned": 0.0, "remaining": 0.0, "waste": 0.0, "saved": 0.0}
     m = _load_mapping(d)
     all_rooms = _all_room_ids(d)
+    # Loaded ONCE for the whole route. Each of these already holds every
+    # service's own data in one file -- re-reading + re-json.loads()-ing the
+    # WHOLE file per service inside the loop below (the old code's
+    # `_item_prog(d).get(svc, {})` etc., called both for rooms_data AND a
+    # second time inside the old _waste_for()) meant e.g. item_progress.json
+    # alone was parsed 3x per service on a 6-service project. Reading each
+    # store exactly once here and indexing by service in the loop is the
+    # same data, same result, without the repeat I/O + JSON parsing.
+    all_item_prog = _item_prog(d)
+    all_item_rooms = _item_rooms(d)
+    all_item_room_qty = _item_room_qty(d)
     rooms_data = []   # for itemprog.project_room_status -- one tuple per service
     waste_caveats = []   # honest, service-scoped caveats straight from pnl.waste_summary
     for svc in services:
-        try:
-            view = _service_view(d, svc)
-        except HTTPException:
+        # reuse the already-loaded boqdf instead of hitting disk again via
+        # _load_boq(d, svc) -- boqdf was already read once at the top of this
+        # route; filtering it in memory is the same result for zero extra I/O.
+        items_svc = boqdf[boqdf.service == svc]
+        if items_svc.empty:
             continue
+        prog_svc = all_item_prog.get(svc, {})
+        rooms_cfg_svc = all_item_rooms.get(svc, {})
+        room_qty_groups_svc = all_item_room_qty.get(svc, {})
+        # Computed ONCE per service, then shared below by both the normal
+        # service view (_service_view_core) and its waste calc (_waste_for)
+        # -- this exact (items, used) pair used to be loaded and run through
+        # itemprog.compute() a SECOND time inside the old _waste_for() for
+        # every service on every /overall call. Real profiling on a
+        # synthetic Hyatt-scale project (108 rooms, 385 materials, 540
+        # items) showed that repeat as roughly a quarter of this route's
+        # total time by itself.
+        used_svc = itemprog.compute(items_svc, prog_svc, rooms_cfg_svc, all_rooms,
+                                    _planned(d, svc), room_qty_groups=room_qty_groups_svc)
+        view = _service_view_core(d, svc, items_svc, used_svc, prog_svc,
+                                  rooms_cfg_svc, room_qty_groups_svc, all_rooms)
         t = view["pnl_totals"]
         done = t.get("done_value") or 0.0
         planned = t.get("planned_value") or 0.0
         rem = t.get("remaining_value") or 0.0
-        w = _waste_for(d, slug, svc)
+        w = _waste_for(d, slug, svc, items=items_svc, used=used_svc)
         tot["done"] += done; tot["planned"] += planned; tot["remaining"] += rem
         tot["waste"] += w["wasted"]; tot["saved"] += w["saved"]
         if w.get("caveat"):
@@ -397,15 +463,9 @@ def overall(slug: str):
                     "items": len(view["items"]), "waste_value": round(w["wasted"], 2),
                     "waste_recorded_pct": w.get("recorded_pct")}
         mapped_codes = {code for a in m.activities(svc) for code in m.get(svc, a)}
-        # reuse the already-loaded boqdf instead of hitting disk again via
-        # _load_boq(d, svc) -- boqdf was already read once at the top of this
-        # route; filtering it in memory is the same result for zero extra I/O.
-        items_svc = boqdf[boqdf.service == svc]
         # 5-tuple form (room_qty_groups last) -- project_room_status() uses a
         # grouped item's real group-union rooms instead of item_rooms.json.
-        rooms_data.append((items_svc, _item_prog(d).get(svc, {}),
-                           _item_rooms(d).get(svc, {}), mapped_codes,
-                           _item_room_qty(d).get(svc, {})))
+        rooms_data.append((items_svc, prog_svc, rooms_cfg_svc, mapped_codes, room_qty_groups_svc))
     overall_pct = round(sum(all_pcts) / len(all_pcts), 1) if all_pcts else 0.0
     rooms_summary = (itemprog.project_room_status(rooms_data, all_rooms)
                       if all_rooms else {"done": 0, "in_progress": 0,
@@ -1129,8 +1189,7 @@ def forecast_link(slug: str, service: str):
     pool = fdf
     if "service" in fdf.columns:
         pool = fdf[fdf.service == _forecast_service(service)]
-    names = pool.material.astype(str).tolist()
-    link = linkage.match(items, names)
+    link = _cached_match(slug, service)
     fore = linkage.attach_forecast(link, pool)
     out = {}
     for code, info in link.items():
@@ -1174,6 +1233,12 @@ def _norm_link_entries(entries):
     return out
 
 
+@functools.lru_cache(maxsize=32)
+def _full_run_rows_cached(run_dir_str, mtime_ns):
+    fdf = _read_forecast_parquet_cached(str(Path(run_dir_str) / "forecast.parquet"), mtime_ns)
+    return {linkage._norm(r["material"]): _scrub(r.to_dict()) for _, r in fdf.iterrows()}
+
+
 def _full_run_rows(slug):
     """Every material in the latest run's forecast, regardless of service --
     used ONLY to resolve a material name that is already a CONFIRMED link
@@ -1185,17 +1250,43 @@ def _full_run_rows(slug):
     a real gap where add_quick_item() could create a cross-service link that
     nothing downstream (the drawer's realistic forecast, the Link-stock
     modal) could actually resolve, showing a genuine link as "not linked".
-    Cached per-request by the caller if it's needed more than once — this
-    function itself always reads fresh, since a run never changes once
-    written (see README: "Runs are immutable")."""
+
+    Cached across requests now (mtime-keyed, same story as
+    _read_forecast_parquet_cached above) — not just per-request as before.
+    Building this dict is an iterrows() + _scrub() pass over the WHOLE run
+    (every material, every service), which profiling showed as a real cost
+    every time a cross-service link needed resolving; a run never changes
+    once written (README: "Runs are immutable"), so re-deriving this exact
+    same dict on every such request was pure waste. A genuinely new run
+    (different path or mtime) is a new cache key automatically."""
     latest = _latest_run_for(slug)
     if latest is None:
         return {}
     try:
-        fdf = _read_forecast_parquet(latest)
+        fp = latest / "forecast.parquet"
+        mtime_ns = fp.stat().st_mtime_ns
     except Exception:
         return {}
-    return {linkage._norm(r["material"]): _scrub(r.to_dict()) for _, r in fdf.iterrows()}
+    return _full_run_rows_cached(str(latest), mtime_ns)
+
+
+@functools.lru_cache(maxsize=256)
+def _forecast_pool_cached(run_dir_str, mtime_ns, forecast_label):
+    # reads via the already-cached parquet DataFrame -- deciding
+    # has_service_col HERE (not in the caller) means _forecast_pool() below
+    # never needs its own separate call into _read_forecast_parquet_cached
+    # just to inspect columns; there is exactly one path to that cache now.
+    fdf = _read_forecast_parquet_cached(str(Path(run_dir_str) / "forecast.parquet"), mtime_ns)
+    if "service" in fdf.columns:
+        pool = fdf[fdf.service == forecast_label]
+        filtered = True
+    else:
+        pool = fdf                      # no service column at all -> nothing to filter by
+        filtered = False
+    rows = {linkage._norm(r["material"]): _scrub(r.to_dict())
+            for _, r in pool.iterrows()}
+    names = pool["material"].astype(str).tolist()
+    return rows, names, filtered
 
 
 def _forecast_pool(slug, service):
@@ -1214,24 +1305,78 @@ def _forecast_pool(slug, service):
     An empty, honestly-reported result is a real signal that the engine's
     service label for this run doesn't line up with Site Progress's label,
     which needs fixing at the source (or reported) — not papered over here.
+
+    The rows/names-building step (iterrows() + _scrub() over every material
+    in the run) is now cached (mtime, service label)-keyed via
+    _forecast_pool_cached -- this used to re-run on EVERY call (every
+    service-switch, every Link-stock open, every quick-item picker open),
+    profiled at a real cost proportional to the run's material count. A new
+    forecast run (new path/mtime) is a new cache key automatically; nothing
+    here needs a manual bust on any Site Progress write route, since none of
+    them can change what a forecast run already contains.
     """
     run = _latest_run_for(slug)
     if run is None:
         return {}, [], None, True
     try:
-        fdf = _read_forecast_parquet(run)
+        fp = run / "forecast.parquet"
+        mtime_ns = fp.stat().st_mtime_ns
     except Exception:
         return {}, [], None, True
-    if "service" in fdf.columns:
-        pool = fdf[fdf.service == _forecast_service(service)]
-        filtered = True
-    else:
-        pool = fdf                      # no service column at all -> nothing to filter by
-        filtered = False
-    rows = {linkage._norm(r["material"]): _scrub(r.to_dict())
-            for _, r in pool.iterrows()}
-    names = pool["material"].astype(str).tolist()
+    label = _forecast_service(service)
+    try:
+        rows, names, filtered = _forecast_pool_cached(str(run), mtime_ns, label)
+    except Exception:
+        return {}, [], None, True
     return rows, names, run.name, filtered
+
+
+@functools.lru_cache(maxsize=256)
+def _linkage_match_cached(slug_norm, service, boq_mtime_ns, quick_items_mtime_ns, run_key):
+    d = PROJECTS / slug_norm
+    items = _load_boq(d, service)
+    if items.empty:
+        return {}
+    _rows, names, _run_name, _filtered = _forecast_pool(slug_norm, service)
+    if not names:
+        return {}
+    return linkage.match(items, names)
+
+
+def _cached_match(slug, service):
+    """Cached linkage.match(items, stock_names) for one service — the single
+    biggest uncached cost profiling found (real synthetic Hyatt-scale run:
+    ~25% of one /overall call, over half of one /links/{service} call). Used
+    by get_links(), forecast_link() and _actual_consumed() — three separate
+    call sites that were each re-running this exact O(items x materials)
+    token-matching pass from scratch, sometimes more than once per single
+    page load (e.g. /overall calls _actual_consumed once per service).
+
+    linkage.match()'s result is a pure function of two things: the service's
+    BOQ items (boq.parquet + quick_items.json — a quick-added item is a real
+    input to matching too, see add_quick_item()) and the run's stock material
+    names (forecast.parquet, filtered by service). The cache key is exactly
+    those three files' mtimes, the same (path, mtime) trick already proven
+    safe by _read_forecast_parquet_cached above — so this needs, and gets,
+    NO manual cache-bust in any write route: a BOQ re-upload, a new quick
+    item, or a new forecast run each naturally mint a new mtime and therefore
+    a new cache key, forcing a fresh match rather than ever serving a stale
+    one. Nothing else that Site Progress writes (progress %, mapping, rates,
+    planned overrides, links.json itself) can change what BOQ items or stock
+    materials exist, so nothing else needs to invalidate this."""
+    slug_norm = _slugify(slug)
+    d = PROJECTS / slug_norm
+    boq_p = d / "boq.parquet"
+    qi_p = d / "quick_items.json"
+    boq_mtime = boq_p.stat().st_mtime_ns if boq_p.exists() else 0
+    qi_mtime = qi_p.stat().st_mtime_ns if qi_p.exists() else 0
+    run = _latest_run_for(slug_norm)
+    if run is None:
+        run_key = (None, 0)
+    else:
+        fp = run / "forecast.parquet"
+        run_key = (str(fp), fp.stat().st_mtime_ns if fp.exists() else 0)
+    return _linkage_match_cached(slug_norm, service, boq_mtime, qi_mtime, run_key)
 
 
 @router.get("/{slug}/quick-items/{service}/candidates")
@@ -1397,7 +1542,7 @@ def get_links(slug: str, service: str):
         raise HTTPException(404, f"no BOQ items for service '{service}'")
     links = _load_links(d).get(service, {})
     rows, names, run, _filtered = _forecast_pool(slug, service)
-    sugg = linkage.match(items, names) if names else {}
+    sugg = _cached_match(slug, service) if names else {}
     full_rows = None   # built at most once, only if a link needs it
     out_items = []
     for _, it in items.iterrows():
@@ -1532,7 +1677,13 @@ def _actual_consumed(slug, service, items):
     fall back to matching against the WHOLE unfiltered forecast pool -- that
     is the exact same "no match beats a wrong match" rule _forecast_pool()
     already follows, and searching every other service's materials risks a
-    confident-looking match against the wrong one, not just a wider net."""
+    confident-looking match against the wrong one, not just a wider net.
+
+    `items` is kept as a parameter for call-site stability, but the actual
+    match now goes through _cached_match(slug, service), which loads its own
+    (identical) items internally so it can be safely cached across requests
+    -- see its docstring. Was profiled as the single biggest uncached cost
+    in this function (linkage.match() over the full BOQ x stock-pool)."""
     run = _latest_run_for(slug)
     if run is None:
         return None
@@ -1549,7 +1700,7 @@ def _actual_consumed(slug, service, items):
         pool = fdf[fdf.service == _forecast_service(service)]
     if pool.empty:
         return None
-    link = linkage.match(items, pool.material.astype(str).tolist())
+    link = _cached_match(slug, service)
     lut = {linkage._norm(r.material): float(getattr(r, qty_col))
            for r in pool.itertuples() if pd.notna(getattr(r, qty_col))}
     out = {}

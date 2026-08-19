@@ -24,11 +24,22 @@ from backend import siteprogress as sp   # noqa: E402
 SLUG = "hyatt-hotel"
 
 
+def _clear_all_caches():
+    """Every mtime-keyed lru_cache added in the performance pass, alongside
+    the original parquet cache -- all four must be cleared between tests for
+    the same reason the original one was: SLUG is reused across tests, so a
+    stale cache entry from a previous test's data could otherwise leak in."""
+    sp._read_forecast_parquet_cached.cache_clear()
+    sp._full_run_rows_cached.cache_clear()
+    sp._forecast_pool_cached.cache_clear()
+    sp._linkage_match_cached.cache_clear()
+
+
 @pytest.fixture(autouse=True)
 def clean_project():
     """Fresh, empty project dir + no forecast runs before every test, and
-    the parquet cache cleared so tests never see another test's data."""
-    sp._read_forecast_parquet_cached.cache_clear()
+    every cache cleared so tests never see another test's data."""
+    _clear_all_caches()
     d = sp.PROJECTS / SLUG
     if d.exists():
         shutil.rmtree(d)
@@ -37,7 +48,7 @@ def clean_project():
         shutil.rmtree(sp.RUNS)
     sp.RUNS.mkdir(parents=True)
     yield d
-    sp._read_forecast_parquet_cached.cache_clear()
+    _clear_all_caches()
 
 
 def _write_json(d, name, obj):

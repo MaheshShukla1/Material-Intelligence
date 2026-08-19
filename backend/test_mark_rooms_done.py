@@ -130,6 +130,65 @@ class TestMarkRoomsDone:
             sp.mark_rooms_done(SLUG, {"service": "HVAC", "rooms": rooms[:1]})
 
 
+class TestUndoMarkDone:
+    """done=False -- the direct undo for a room ticked/marked done by
+    mistake (the actual reported accident: tick the wrong room in a batch,
+    or realise the work wasn't really finished). Same per-room mechanism,
+    opposite target value -- so it carries the identical "never wipes
+    another room" guarantee marking done already has."""
+
+    def test_undoes_only_the_ticked_rooms(self, clean_project):
+        d = clean_project
+        rooms = _setup(d)
+        sp.mark_rooms_done(SLUG, {"service": "HVAC", "item_code": "QI1", "rooms": rooms[:3]})
+        sp.mark_rooms_done(SLUG, {"service": "HVAC", "item_code": "QI1", "rooms": [rooms[0]], "done": False})
+        raw = sp._item_prog(d)["HVAC"]["QI1"]
+        assert raw[rooms[0]] == 0.0    # undone
+        assert raw[rooms[1]] == 1.0    # untouched, still done
+        assert raw[rooms[2]] == 1.0    # untouched, still done
+
+    def test_reflected_in_room_buckets(self, clean_project):
+        d = clean_project
+        rooms = _setup(d)
+        sp.mark_rooms_done(SLUG, {"service": "HVAC", "item_code": "QI1", "rooms": rooms[:3]})
+        view = sp.mark_rooms_done(SLUG, {"service": "HVAC", "item_code": "QI1",
+                                         "rooms": [rooms[0], rooms[1]], "done": False})
+        row = next(r for r in view["items"] if r["code"] == "QI1")
+        assert row["room_done"] == 1        # only rooms[2] left done
+        assert row["room_pending"] == 5      # rooms[0], rooms[1] back to not-started + the 3 never touched
+
+    def test_does_not_disturb_a_partial_room(self, clean_project):
+        """Undoing a batch must never touch a room that was never part of
+        that batch, even if it's sitting at some other partial fraction."""
+        d = clean_project
+        rooms = _setup(d)
+        sp.set_item_progress(SLUG, {"service": "HVAC", "item_code": "QI1",
+                                    "frac": 0.6, "room": rooms[3]})
+        sp.mark_rooms_done(SLUG, {"service": "HVAC", "item_code": "QI1", "rooms": rooms[:2]})
+        sp.mark_rooms_done(SLUG, {"service": "HVAC", "item_code": "QI1",
+                                  "rooms": [rooms[0]], "done": False})
+        raw = sp._item_prog(d)["HVAC"]["QI1"]
+        assert raw[rooms[3]] == 0.6   # completely undisturbed by the undo
+
+    def test_undo_on_a_never_marked_room_is_a_harmless_noop(self, clean_project):
+        d = clean_project
+        rooms = _setup(d)
+        out = sp.mark_rooms_done(SLUG, {"service": "HVAC", "item_code": "QI1",
+                                        "rooms": [rooms[0]], "done": False})
+        row = next(r for r in out["items"] if r["code"] == "QI1")
+        assert row["room_done"] == 0
+        assert row["room_pending"] == 6
+
+    def test_mark_then_undo_then_mark_again_round_trips_cleanly(self, clean_project):
+        d = clean_project
+        rooms = _setup(d)
+        sp.mark_rooms_done(SLUG, {"service": "HVAC", "item_code": "QI1", "rooms": [rooms[0]]})
+        sp.mark_rooms_done(SLUG, {"service": "HVAC", "item_code": "QI1", "rooms": [rooms[0]], "done": False})
+        sp.mark_rooms_done(SLUG, {"service": "HVAC", "item_code": "QI1", "rooms": [rooms[0]]})
+        raw = sp._item_prog(d)["HVAC"]["QI1"]
+        assert raw[rooms[0]] == 1.0
+
+
 class TestItemProgressExposedToFrontend:
     """The service view now includes the raw item_progress store (same
     pattern as item_rooms/item_room_qty already being exposed raw) so the

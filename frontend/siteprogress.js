@@ -755,6 +755,34 @@
     if (!ids || !ids.length) return `all ${total} ${curLeafPluralLower(total)}`;
     return `${ids.length} of ${total} ${curLeafPluralLower(total)}`;
   }
+  // "Mark ticked as done" / its undo -- same tick-list either way, a
+  // separate action from Save so it never depends on (or clobbers)
+  // whatever's in the quantity field. Each ticked room gets its own
+  // per-room override server-side (frac=1.0 or 0.0), so neither direction
+  // can ever wipe another room's progress the way the item's overall %
+  // slider can (see mark_rooms_done()'s own docstring in siteprogress.py).
+  // Undo is not a special case -- same function, opposite target value --
+  // so a room ticked/marked done by mistake is a one-click fix, not a
+  // dead end.
+  async function markRoomsDone(code, done) {
+    const ids = [...document.querySelectorAll("#sp-modal input[data-room]")].filter((c) => c.checked).map((c) => c.dataset.room);
+    if (!ids.length) return toast(`Tick at least one ${curLeafLower()} to ${done ? "mark done" : "undo"}.`);
+    try {
+      S.svc = await jpost(api("/" + S.slug + "/mark-rooms-done" + roomQ()), { service: S.service, item_code: code, rooms: ids, done });
+      closeModal();
+      // afterSvc() refreshes S.pnl AND S.real (the drawer's stock-adequacy
+      // numbers) together, then re-renders -- marking rooms done/undone
+      // changes `used`/`remaining` for this item, which the realistic
+      // forecast's "need"/"order" figures are directly built from; a plain
+      // pnl-only refresh here left the drawer showing a stale "order ~X"
+      // number (computed from BEFORE this change) until the next full page
+      // load, silently disagreeing with the "Remaining work" line right
+      // above it in the same drawer -- an actual reported case of this.
+      await afterSvc();
+      toast(done ? `Marked ${ids.length} ${curLeafPluralLower(ids.length)} done for ${code}.`
+                 : `Undid done for ${ids.length} ${curLeafPluralLower(ids.length)} on ${code}.`);
+    } catch (e) { toast("Failed: " + briefErr(e)); }
+  }
   function openRoomsModal(code) {
     const it = S._byCode[code];
     const rooms = allRoomsList();
@@ -822,7 +850,8 @@
           </div>
         </div>`).join("")}
       <div style="margin-top:6px"><button type="button" class="btn" id="sp-mark-done" style="border-color:var(--green);color:var(--green)">Mark ticked as done</button>
-      <span class="hint" style="display:block;margin-top:6px">Uses the SAME ticks as Save below — tick the ${curLeafPluralLower(2)} that are actually finished, then either mark them done, save a quantity for them, or both.</span></div>`;
+      <button type="button" class="btn" id="sp-unmark-done" style="margin-left:8px">Undo done</button>
+      <span class="hint" style="display:block;margin-top:6px">Uses the SAME ticks as Save below — tick the ${curLeafPluralLower(2)} that are actually finished, then either mark them done, save a quantity for them, or both. Ticked the wrong one? Tick it again and hit "Undo done".</span></div>`;
 
     modal(`${curLeafPlural(2)} → ${esc(code)}`,
       `${esc(short(it.desc, 70))} — pick which ${curLeafPluralLower(2)} this item applies to. All ${curLeafPluralLower(2)} are ticked by default (typical); untick the exceptions (e.g. ${curLeafPluralLower(2)} where the item mix differs). To record a REAL quantity for a set of ${curLeafPluralLower(2)} (e.g. ones that genuinely need more material), tick just those ${curLeafPluralLower(2)} and enter their quantity above instead.`,
@@ -841,27 +870,18 @@
           const roomsPayload = ids.length === rooms.length ? [] : ids;
           S.svc = await jpost(api("/" + S.slug + "/item-rooms" + roomQ()), { service: S.service, item_code: code, rooms: roomsPayload });
         }
-        try { S.pnl = await jget(pnlUrl()); } catch (e) {}
-        closeModal(); renderMain();
+        closeModal();
+        // afterSvc() refreshes S.pnl AND S.real together (see markRoomsDone's
+        // own note above) -- a quantity-group save changes this item's
+        // planned/used/remaining, which the drawer's stock-forecast message
+        // is directly built from.
+        await afterSvc();
       }, `Save ${curLeafPluralLower(2)}`, "min(600px,94vw)");
 
     $("sp-rooms-all").onclick = () => document.querySelectorAll("#sp-modal input[data-room]").forEach((c) => { c.checked = true; });
     $("sp-rooms-none").onclick = () => document.querySelectorAll("#sp-modal input[data-room]").forEach((c) => { c.checked = false; });
-    // "Mark ticked as done" -- same tick-list as Save, a separate action so
-    // it never depends on (or clobbers) whatever's in the quantity field.
-    // Each ticked room gets its own per-room override server-side, so this
-    // can never wipe another room's progress the way the item's overall %
-    // slider can (see mark_rooms_done()'s own docstring in siteprogress.py).
-    $("sp-mark-done").onclick = async () => {
-      const ids = [...document.querySelectorAll("#sp-modal input[data-room]")].filter((c) => c.checked).map((c) => c.dataset.room);
-      if (!ids.length) return toast(`Tick at least one ${curLeafLower()} to mark done.`);
-      try {
-        S.svc = await jpost(api("/" + S.slug + "/mark-rooms-done" + roomQ()), { service: S.service, item_code: code, rooms: ids });
-        try { S.pnl = await jget(pnlUrl()); } catch (e) {}
-        closeModal(); renderMain();
-        toast(`Marked ${ids.length} ${curLeafPluralLower(ids.length)} done for ${code}.`);
-      } catch (e) { toast("Failed: " + briefErr(e)); }
-    };
+    $("sp-mark-done").onclick = () => markRoomsDone(code, true);
+    $("sp-unmark-done").onclick = () => markRoomsDone(code, false);
     document.querySelectorAll("[data-gall]").forEach((b) => b.addEventListener("click", () => {
       document.querySelector(`.sp-roomgroup[data-g="${cssA(b.dataset.gall)}"]`).querySelectorAll("input[data-room]").forEach((c) => { c.checked = true; });
     }));
@@ -878,8 +898,8 @@
       if (!g) return;
       if (!confirm(`Remove this group (${g.rooms.length} room${g.rooms.length === 1 ? "" : "s"} @ ${qf(g.qty)} ${it.unit})? Those rooms fall back to the item's normal quantity — progress already recorded for them is not affected.`)) return;
       S.svc = await jpost(api("/" + S.slug + "/item-room-qty" + roomQ()), { service: S.service, item_code: code, rooms: g.rooms, qty: null });
-      try { S.pnl = await jget(pnlUrl()); } catch (e) {}
-      closeModal(); renderMain();
+      closeModal();
+      await afterSvc();
       openRoomsModal(code);   // reopen fresh so the summary reflects the removal immediately
     }));
   }

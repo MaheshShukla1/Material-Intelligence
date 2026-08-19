@@ -675,11 +675,12 @@ def set_item_room_qty(slug: str, payload: dict, room: str = None):
 
 @router.post("/{slug}/mark-rooms-done")
 def mark_rooms_done(slug: str, payload: dict, room: str = None):
-    """Mark a set of rooms 100% done for one item, in a single call -- the
-    companion action to /item-room-qty in the exact same Rooms modal: tick
-    rooms (the same tick-list either way), then either save a quantity for
-    them (existing) or mark them done (this). Body: {"service","item_code",
-    "rooms":[room_id,...]}.
+    """Mark a set of rooms 100% done (or undo that -- see `done` below) for
+    one item, in a single call -- the companion action to /item-room-qty in
+    the exact same Rooms modal: tick rooms (the same tick-list either way),
+    then either save a quantity for them (existing) or mark them done
+    (this). Body: {"service","item_code","rooms":[room_id,...],
+    "done": bool (default True)}.
 
     This exists because the ONLY other way to mark a room done was the
     item's own single overall %/quantity slider in the "All rooms" view --
@@ -689,23 +690,35 @@ def mark_rooms_done(slug: str, payload: dict, room: str = None):
     done, then touched that overall slider by mistake, would see their
     real per-room progress silently flatten to one number -- a real
     reported accident this route is built to prevent, not just a
-    convenience. Each room here gets its OWN per-room override (frac=1.0)
-    via itemprog.set_progress(..., room=room_id) -- called once per room,
-    never the room=None ("*") global path -- so this can never wipe any
-    other room's state, marked-done or still in progress, the way the
-    overall slider can. Ticking an already-done room is a harmless no-op;
-    an unticked room is simply left untouched."""
+    convenience. Each room here gets its OWN per-room override
+    (frac=1.0 or 0.0) via itemprog.set_progress(..., room=room_id) --
+    called once per room, never the room=None ("*") global path -- so this
+    can never wipe any other room's state, marked-done or still in
+    progress, the way the overall slider can. Ticking an already-matching
+    room (already done when done=True, already not-started when
+    done=False) is a harmless no-op; an unticked room is simply left
+    untouched.
+
+    `done=False` is the direct undo for a room ticked/marked done by
+    mistake -- a second reported real accident (tick the wrong room while
+    ticking a batch, or mark done then realise the work wasn't actually
+    finished). It sets the SAME ticked rooms back to 0% (not started), via
+    the identical per-room mechanism, so it carries the exact same "never
+    wipes another room" guarantee as marking done does -- undo is not a
+    special case, it's the same action with the opposite target value."""
     d = _need(slug)
     svc = payload.get("service")
     code = payload.get("item_code")
     room_ids = [str(r) for r in (payload.get("rooms") or [])]
+    done = payload.get("done", True)
     if not svc or code is None:
         raise HTTPException(400, "service and item_code are required")
     if not room_ids:
         raise HTTPException(400, "tick at least one room")
     store = _item_prog(d)
+    frac = 1.0 if done else 0.0
     for rid in room_ids:
-        itemprog.set_progress(store, svc, code, 1.0, room=rid)
+        itemprog.set_progress(store, svc, code, frac, room=rid)
     (d / "item_progress.json").write_text(json.dumps(store, ensure_ascii=False))
     return _service_view(d, svc, room=room)
 

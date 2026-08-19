@@ -118,12 +118,48 @@ async function main() {
   ok(markPost && markPost.body.item_code === "QI1" &&
     JSON.stringify([...markPost.body.rooms].sort()) === JSON.stringify(["r3", "r4"]),
     `posted exactly the ticked rooms (r3, r4), got ${JSON.stringify(markPost && markPost.body)}`);
+  ok(markPost && markPost.body.done === true, `mark-done posts done:true, got ${JSON.stringify(markPost && markPost.body)}`);
   ok(!posts.some((p) => p.url.includes("/item-room-qty") || p.url.includes("/item-rooms")),
     "marking done does NOT also touch the quantity/applicability routes -- fully independent action");
 
   // -------------------------------------------------- empty selection guarded
   const modalStillOpen = d.querySelector("#sp-modal");
   ok(!modalStillOpen, "modal closed after a successful mark-done (matches the normal save flow)");
+
+  // -------------------------------------------------- undo done
+  roomsBtn.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 20));
+  const modal2 = d.querySelector("#sp-modal");
+  ok(!!modal2, "Rooms modal re-opened for the undo check");
+
+  const undoBtn = d.querySelector("#sp-unmark-done");
+  ok(!!undoBtn, "'Undo done' button rendered alongside 'Mark ticked as done'");
+  ok(undoBtn.textContent === "Undo done", `button reads "Undo done", got "${undoBtn.textContent}"`);
+
+  const boxes2 = [...modal2.querySelectorAll("input[data-room]")];
+  boxes2.forEach((c) => { c.checked = false; });
+  boxes2.find((c) => c.dataset.room === "r1").checked = true;   // r1 is already done (mocked)
+
+  posts.length = 0;
+  undoBtn.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 20));
+
+  const undoPost = posts.find((p) => p.url.includes("/mark-rooms-done"));
+  ok(!!undoPost, "clicking 'Undo done' posted to the SAME /mark-rooms-done route");
+  ok(undoPost && undoPost.body.done === false, `undo posts done:false, got ${JSON.stringify(undoPost && undoPost.body)}`);
+  ok(undoPost && JSON.stringify(undoPost.body.rooms) === JSON.stringify(["r1"]),
+    `undo posted exactly the ticked room (r1), got ${JSON.stringify(undoPost && undoPost.body)}`);
+
+  // empty-selection guard applies to undo too
+  roomsBtn.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 20));
+  const modal3 = d.querySelector("#sp-modal");
+  modal3.querySelectorAll("input[data-room]").forEach((c) => { c.checked = false; });
+  posts.length = 0;
+  d.querySelector("#sp-unmark-done").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 20));
+  ok(!posts.some((p) => p.url.includes("/mark-rooms-done")), "undo with nothing ticked does not fire a request");
+  ok(!!d.querySelector("#sp-modal"), "modal stays open when the tick-list is empty");
 
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);

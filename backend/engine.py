@@ -235,13 +235,34 @@ def forecast(daily, asof=None, window=14, lead_time=7, buffer=2, today=None,
     nothing at all (the default) reproduces the old single-global-number
     behaviour byte-for-byte.
     """
-    asof = pd.Timestamp(asof or daily.date.max()).normalize()
-    # "today" is the real calendar day the user is viewing on. It is usually
-    # later than asof (the last date present in the register), because sites
-    # don't always enter data every day. Reading the forecast from today - not
-    # from a stale asof - is what stops "runs out 25 Jul" showing on the 27th
-    # while the stock is visibly still on the shelf.
-    today = pd.Timestamp(today).normalize() if today is not None else asof
+    # "today" is the real calendar day the user is viewing on. Defaults to
+    # the actual wall-clock date -- NOT to the register's own date columns,
+    # which routinely run past today into pre-formatted future placeholders
+    # (every column for the rest of the project term, sitting at zero until
+    # real data arrives -- a normal, common register template, not a data
+    # error). It is usually later than asof (the last date with REAL data in
+    # the register), because sites don't always enter data every day. Reading
+    # the forecast from today - not from a stale asof - is what stops
+    # "runs out 25 Jul" showing on the 27th while the stock is visibly still
+    # on the shelf.
+    today = pd.Timestamp(today).normalize() if today is not None else pd.Timestamp.now().normalize()
+    # `asof` is the last date the register actually has real numbers for. It
+    # can never legitimately be AFTER today - a register cannot contain
+    # verified activity from the future - so it is capped here. Without this
+    # cap, a sheet whose date columns extend past today (still empty, but
+    # structurally present in the parsed frame) silently became the rate
+    # window's own anchor: `daily.date.max()` picked up the LAST column, not
+    # the last REAL one, so the "last 14 days" window looked at 14 blank
+    # future days instead of the 14 real ones, fell back to a much blunter
+    # project-to-date average, and could mis-classify an actively consumed
+    # material NO_RECENT_USE / DEAD_STOCK despite real activity as recent as
+    # yesterday. Confirmed against a real Hyatt Hotel register: KITEC
+    # PE-AL-PEX PIPE COIL read 32.64/day ("project-to-date", wrong, status
+    # NO_RECENT_USE) with the uncapped default, vs 108.33/day ("last 14d",
+    # RED) once capped here -- the exact number already shown elsewhere in
+    # the product, confirming this restores the intended reading rather than
+    # changing it.
+    asof = min(pd.Timestamp(asof).normalize() if asof is not None else daily.date.max(), today)
     if today < asof:
         today = asof
     gap = (today - asof).days

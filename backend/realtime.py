@@ -81,10 +81,13 @@ def combine_item(item, stock_rows, rooms=None):
     got used or is still sitting on the shelf) and one overall verdict.
     """
     remaining = _num(item.get("remaining"))
+    planned_total = _num(item.get("planned_total"))
     item_unit = (item.get("unit") or "").strip().upper()
 
     links, worst = [], "ENOUGH"
     order_total = 0.0
+    order_optimistic_total = 0.0
+    optimistic_computable = True   # false the moment any SHORTAGE row can't compute it
     for s in stock_rows:
         on_hand = _num(s.get("stock"))
         rate = _num(s.get("rate_per_day"))
@@ -123,6 +126,32 @@ def combine_item(item, stock_rows, rooms=None):
                 if shortfall > 0:
                     row["verdict"] = "SHORTAGE"
                     order_total += shortfall
+
+                    # Optimistic order: max(planned_total*factor - received, 0).
+                    # Algebraically this equals shortfall MINUS (issued to
+                    # date - expected for work marked done) -- i.e. it credits
+                    # the over-issued gap the drawer's own "issued vs
+                    # expected" note already flags, on the ASSUMPTION that
+                    # gap is staged material sitting on site, not lost. This
+                    # is never asserted as the real number: real waste, a
+                    # stale progress entry, or genuine staging can each
+                    # explain the same gap, and only the engineer on site can
+                    # tell which. Shown as a second, clearly-labelled bound
+                    # alongside the safe order_qty -- never in place of it,
+                    # and never silently substituted -- so nothing here
+                    # narrows a real order on an unverified guess (see
+                    # rate.py's own "running out early costs far more than
+                    # ordering a little early" -- the same principle applies
+                    # to shrinking an order on an assumption, not just to
+                    # rate estimation).
+                    if received is not None and planned_total is not None and effective_factor is not None:
+                        opt = round(max(planned_total * effective_factor - received, 0.0), 2)
+                        if opt < shortfall:
+                            row["optimistic_shortfall"] = opt
+                            row["staged_gap"] = round(shortfall - opt, 2)
+                        order_optimistic_total += opt
+                    else:
+                        optimistic_computable = False
                 else:
                     row["verdict"] = "ENOUGH"
             # rate verdict: does stock run out before the work is done?
@@ -151,14 +180,24 @@ def combine_item(item, stock_rows, rooms=None):
     else:
         overall = "ENOUGH"
 
+    order_qty = round(order_total, 2) if overall == "SHORTAGE" else 0.0
+    # Only surfaced when it's a REAL, fully-computable, meaningfully-lower
+    # bound for every shortage row -- a partial picture (computable for some
+    # materials, not others) is not shown at all rather than mixing a real
+    # figure with a silently-skipped gap.
+    order_qty_optimistic = (round(order_optimistic_total, 2)
+                            if overall == "SHORTAGE" and optimistic_computable
+                            and order_optimistic_total < order_total else None)
+
     return {
         "item_code": item.get("item_code"),
         "unit": item.get("unit"),
-        "planned_total": _num(item.get("planned_total")),
+        "planned_total": planned_total,
         "used": _num(item.get("used")),
         "remaining": remaining,
         "progress_pct": _num(item.get("progress_pct")),
-        "order_qty": round(order_total, 2) if overall == "SHORTAGE" else 0.0,
+        "order_qty": order_qty,
+        "order_qty_optimistic": order_qty_optimistic,
         "verdict": overall,
         "links": links,
         "rooms": rooms,
@@ -200,11 +239,22 @@ def sentence(res):
         return (f"{res['remaining']:.0f} {u} of work remains, but the linked "
                 "stock has no rate/on-hand figures yet.")
     if res["verdict"] == "SHORTAGE":
+        opt = res.get("order_qty_optimistic")
+        # Second bound, never a replacement for the safe order_qty above --
+        # only added when it's a real, meaningfully-lower, fully-computable
+        # number (see combine_item's own note on why a partial picture is
+        # never shown at all). Framed as something the engineer verifies on
+        # site, not as a number the system is asserting.
+        opt_note = (f" If ~{(res['order_qty'] - opt):.0f} {u} of already-issued material "
+                   f"is confirmed staged on site (not lost), ~{opt:.0f} {u} would be "
+                   "enough instead — verify before ordering less than the safe amount."
+                   if opt is not None else "")
         if n is not None:
             return (f"{res['remaining']:.0f} {u} needed for{rooms_phrase} and stock "
-                    f"will run short — order about {res['order_qty']:.0f} more to finish.")
+                    f"will run short — order about {res['order_qty']:.0f} more to finish."
+                    f"{opt_note}")
         return (f"{res['remaining']:.0f} {u} of work remains and stock will run "
-                f"short — order about {res['order_qty']:.0f} more to finish.")
+                f"short — order about {res['order_qty']:.0f} more to finish.{opt_note}")
     if n is not None:
         return (f"{res['remaining']:.0f} {u} needed for{rooms_phrase} — stock on "
                 "hand is enough at the current rate.")

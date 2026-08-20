@@ -1,9 +1,9 @@
-// jsdom test: the optimistic-order note (realtime.sentence()'s new second
-// line) reaches the drawer with ZERO frontend changes -- res["message"] in
-// siteprogress.py's realistic() route already carries the full sentence()
-// text end to end, and the drawer already displays rl.message verbatim.
-// This test proves that wiring actually holds, not just that it should in
-// theory.
+// jsdom test for the note-consolidation: the drawer used to say the same
+// "issued vs expected" gap TWICE -- once as a standalone warning under
+// Linked Stock, once again inside the order-quantity message -- with two
+// different framings. Now it's said exactly once, inside the single
+// consolidated order-quantity message; the Linked Stock section shows only
+// the plain "X issued to date" fact.
 import { JSDOM } from "jsdom";
 import fs from "fs";
 import path from "path";
@@ -39,8 +39,7 @@ function serviceBody() {
   };
 }
 
-// exactly what realtime.combine_item()/sentence() now produce for this
-// real scenario -- the actual backend output, not a hand-written stand-in.
+// exactly what the fixed realtime.combine_item()/sentence() now produce.
 function realisticBody() {
   return {
     service: "Plumbing", has_run: true, run: "run1", linked_items: 1, shortages: 1,
@@ -48,6 +47,7 @@ function realisticBody() {
       item_code: "QI1", unit: "MTR", planned_total: 8160, used: 4240,
       remaining: 3920, progress_pct: 52,
       order_qty: 3426.0, order_qty_optimistic: 1660.0,
+      staged_gap: 1766.0, issued_to_date: 6006.0,
       verdict: "SHORTAGE",
       links: [{ material: "KITEC PE-AL-PEX PIPE COIL (IGC", unit: "MTR",
                on_hand: 494, rate_per_day: 108.3, engine_days_left: 5,
@@ -94,23 +94,34 @@ async function main() {
   await new Promise((r) => setTimeout(r, 60));
 
   const fxBtn = d.querySelector('[data-fx="QI1"]');
-  ok(!!fxBtn, "the item's forecast-link icon rendered");
   fxBtn.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 
-  const linkBlock = d.querySelector(".sp-dlink");
-  ok(!!linkBlock, "the stock-forecast message block rendered in the drawer");
-  const text = linkBlock.textContent;
+  const drawer = d.querySelector("#sp-draw");
+  ok(!!drawer, "drawer rendered");
+  const fullText = drawer.textContent;
 
-  ok(text.includes("order 3,426") || text.includes("order 3426"), `safe order figure present, got: "${text}"`);
-  ok(text.includes("1660"), `optimistic figure present, got: "${text}"`);
-  ok(text.includes("1766"), `the credited/staged gap is shown explicitly, got: "${text}"`);
-  ok(/verify/i.test(text), `framed as something to verify, not asserted fact, got: "${text}"`);
+  // -------------------------------------------------- said exactly once
+  const count1766 = (fullText.match(/1,?766/g) || []).length;
+  ok(count1766 === 1, `the 1766 gap appears exactly once in the whole drawer, got ${count1766} -- text: "${fullText.replace(/\s+/g, " ").slice(0, 400)}"`);
 
-  const boldOrder = linkBlock.querySelector("b");
-  ok(!!boldOrder && boldOrder.textContent.includes("3,426"),
-    `the bolded headline figure stays the SAFE order (3,426), not the optimistic one, got: "${boldOrder && boldOrder.textContent}"`);
-  ok(!boldOrder.textContent.includes("1,660") && !boldOrder.textContent.includes("1660"),
-    "the optimistic figure is not bolded/promoted above the safe one");
+  // -------------------------------------------------- Linked Stock section is now plain
+  const linkedStockRows = [...drawer.querySelectorAll(".sp-drow.sub")];
+  const linkedStockText = linkedStockRows.map((r) => r.textContent).join(" | ");
+  ok(linkedStockText.includes("6,006") && linkedStockText.includes("issued to date"),
+    `Linked Stock shows the plain "issued to date" fact, got: "${linkedStockText}"`);
+  ok(!linkedStockText.includes("expected for work marked done"),
+    `Linked Stock no longer carries its own "vs expected" framing (that moved to the order box), got: "${linkedStockText}"`);
+  ok(!linkedStockText.includes("1766") && !linkedStockText.includes("1,766"),
+    `the gap number itself doesn't appear in Linked Stock at all anymore, got: "${linkedStockText}"`);
+
+  // -------------------------------------------------- order box carries the full story
+  const orderBox = drawer.querySelector(".sp-dlink");
+  ok(!!orderBox, "order-quantity box rendered");
+  const orderText = orderBox.textContent;
+  ok(orderText.includes("3,426") || orderText.includes("3426"), `order box has the safe figure, got: "${orderText}"`);
+  ok(orderText.includes("1,660") || orderText.includes("1660"), `order box has the optimistic figure, got: "${orderText}"`);
+  ok(orderText.includes("1,766") || orderText.includes("1766"), `order box has the gap, got: "${orderText}"`);
+  ok(/verify/i.test(orderText), `framed as verify-first, not asserted, got: "${orderText}"`);
 
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);

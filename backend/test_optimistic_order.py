@@ -51,7 +51,7 @@ class TestOptimisticOrderMatchesRealScenario:
         stock = [_stock(stock=494, consumed=6006)]
         res = realtime.combine_item(item, stock)
         msg = realtime.sentence(res)
-        assert "order about 3426" in msg
+        assert "order 3426" in msg
         assert "1660" in msg
         assert "1766" in msg   # the staged/credited gap, shown explicitly
         assert "verify" in msg.lower()   # never framed as asserted fact
@@ -64,6 +64,25 @@ class TestOptimisticOrderMatchesRealScenario:
         msg = realtime.sentence(res)
         assert "98 rooms" in msg
         assert "1660" in msg
+
+    def test_the_gap_is_stated_exactly_once_not_duplicated(self):
+        """The whole point of this consolidation: one number, one place --
+        not the same 1,766-style gap repeated in two separate paragraphs
+        with two different framings."""
+        item = _item(planned_total=8160, used=4240, remaining=3920)
+        stock = [_stock(stock=494, consumed=6006)]
+        res = realtime.combine_item(item, stock)
+        msg = realtime.sentence(res)
+        assert msg.count("1766") == 1
+        assert msg.count("1660") == 1
+        assert msg.count("3426") == 1
+
+    def test_new_fields_exposed_for_the_frontend(self):
+        item = _item(planned_total=8160, used=4240, remaining=3920)
+        stock = [_stock(stock=494, consumed=6006)]
+        res = realtime.combine_item(item, stock)
+        assert res["staged_gap"] == 1766.0
+        assert res["issued_to_date"] == 6006.0
 
 
 class TestOptimisticOrderNeverShownWithoutARealGap:

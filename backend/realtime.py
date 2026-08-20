@@ -87,6 +87,7 @@ def combine_item(item, stock_rows, rooms=None):
     links, worst = [], "ENOUGH"
     order_total = 0.0
     order_optimistic_total = 0.0
+    consumed_total = 0.0   # for the ONE consolidated "X issued" figure in sentence()
     optimistic_computable = True   # false the moment any SHORTAGE row can't compute it
     for s in stock_rows:
         on_hand = _num(s.get("stock"))
@@ -130,26 +131,25 @@ def combine_item(item, stock_rows, rooms=None):
                     # Optimistic order: max(planned_total*factor - received, 0).
                     # Algebraically this equals shortfall MINUS (issued to
                     # date - expected for work marked done) -- i.e. it credits
-                    # the over-issued gap the drawer's own "issued vs
-                    # expected" note already flags, on the ASSUMPTION that
-                    # gap is staged material sitting on site, not lost. This
-                    # is never asserted as the real number: real waste, a
-                    # stale progress entry, or genuine staging can each
-                    # explain the same gap, and only the engineer on site can
-                    # tell which. Shown as a second, clearly-labelled bound
-                    # alongside the safe order_qty -- never in place of it,
-                    # and never silently substituted -- so nothing here
-                    # narrows a real order on an unverified guess (see
-                    # rate.py's own "running out early costs far more than
-                    # ordering a little early" -- the same principle applies
-                    # to shrinking an order on an assumption, not just to
-                    # rate estimation).
+                    # the over-issued gap, on the ASSUMPTION that gap is
+                    # staged material sitting on site, not lost. This is
+                    # never asserted as the real number: real waste, a stale
+                    # progress entry, or genuine staging can each explain the
+                    # same gap, and only the engineer on site can tell which.
+                    # Surfaced as a second, clearly-labelled bound inside
+                    # sentence()'s ONE consolidated message -- never in place
+                    # of the safe order_qty, and never silently substituted
+                    # (see rate.py's own "running out early costs far more
+                    # than ordering a little early" -- the same principle
+                    # applies to shrinking an order on an assumption).
                     if received is not None and planned_total is not None and effective_factor is not None:
                         opt = round(max(planned_total * effective_factor - received, 0.0), 2)
                         if opt < shortfall:
                             row["optimistic_shortfall"] = opt
                             row["staged_gap"] = round(shortfall - opt, 2)
                         order_optimistic_total += opt
+                        if consumed is not None:
+                            consumed_total += consumed
                     else:
                         optimistic_computable = False
                 else:
@@ -185,9 +185,15 @@ def combine_item(item, stock_rows, rooms=None):
     # bound for every shortage row -- a partial picture (computable for some
     # materials, not others) is not shown at all rather than mixing a real
     # figure with a silently-skipped gap.
-    order_qty_optimistic = (round(order_optimistic_total, 2)
-                            if overall == "SHORTAGE" and optimistic_computable
-                            and order_optimistic_total < order_total else None)
+    show_optimistic = (overall == "SHORTAGE" and optimistic_computable
+                       and order_optimistic_total < order_total)
+    order_qty_optimistic = round(order_optimistic_total, 2) if show_optimistic else None
+    # the same "issued vs expected" gap used to be a SEPARATE warning
+    # elsewhere in the drawer, repeating this exact number in a second
+    # place with a second framing -- now it lives only here, one number,
+    # inside sentence()'s single consolidated message.
+    staged_gap = round(order_qty - order_qty_optimistic, 2) if show_optimistic else None
+    issued_to_date = round(consumed_total, 2) if show_optimistic else None
 
     return {
         "item_code": item.get("item_code"),
@@ -198,6 +204,8 @@ def combine_item(item, stock_rows, rooms=None):
         "progress_pct": _num(item.get("progress_pct")),
         "order_qty": order_qty,
         "order_qty_optimistic": order_qty_optimistic,
+        "staged_gap": staged_gap,
+        "issued_to_date": issued_to_date,
         "verdict": overall,
         "links": links,
         "rooms": rooms,
@@ -240,21 +248,22 @@ def sentence(res):
                 "stock has no rate/on-hand figures yet.")
     if res["verdict"] == "SHORTAGE":
         opt = res.get("order_qty_optimistic")
-        # Second bound, never a replacement for the safe order_qty above --
-        # only added when it's a real, meaningfully-lower, fully-computable
-        # number (see combine_item's own note on why a partial picture is
-        # never shown at all). Framed as something the engineer verifies on
-        # site, not as a number the system is asserting.
-        opt_note = (f" If ~{(res['order_qty'] - opt):.0f} {u} of already-issued material "
-                   f"is confirmed staged on site (not lost), ~{opt:.0f} {u} would be "
-                   "enough instead — verify before ordering less than the safe amount."
+        # ONE consolidated line -- the safe order plus, only when it's real
+        # and fully computable, the one clarifying parenthetical about an
+        # over-issued gap possibly being staged material. Never a second
+        # separate paragraph repeating the same numbers with a different
+        # framing (that used to live here AND in a standalone "issued vs
+        # expected" warning elsewhere in the drawer -- the same 1,766-style
+        # gap, said twice, was noise, not clarity).
+        opt_note = (f" ({res['issued_to_date']:.0f} {u} already issued is {res['staged_gap']:.0f} {u} "
+                   f"more than this progress should have used — if that's staged material on "
+                   f"site, {opt:.0f} {u} more would be enough instead; verify first.)"
                    if opt is not None else "")
         if n is not None:
-            return (f"{res['remaining']:.0f} {u} needed for{rooms_phrase} and stock "
-                    f"will run short — order about {res['order_qty']:.0f} more to finish."
-                    f"{opt_note}")
-        return (f"{res['remaining']:.0f} {u} of work remains and stock will run "
-                f"short — order about {res['order_qty']:.0f} more to finish.{opt_note}")
+            return (f"{res['remaining']:.0f} {u} needed for{rooms_phrase} — order "
+                    f"{res['order_qty']:.0f} {u} to be safe.{opt_note}")
+        return (f"{res['remaining']:.0f} {u} of work remains — order "
+                f"{res['order_qty']:.0f} {u} to be safe.{opt_note}")
     if n is not None:
         return (f"{res['remaining']:.0f} {u} needed for{rooms_phrase} — stock on "
                 "hand is enough at the current rate.")

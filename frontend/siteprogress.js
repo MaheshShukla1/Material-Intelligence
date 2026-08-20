@@ -1375,27 +1375,28 @@
       stockHTML = rl.links.map((L) => {
         const recv = L.received == null ? "" : ` · <b class="sp-recv">${qf(L.received)}</b> received to date`;
         const cons = L.rate_per_day == null ? "" : ` · ≈${qf(L.rate_per_day)}/day`;
-        // Cross-check THIS material's own issued-vs-used gap -- per material,
-        // never pooled, because two materials linked to the same item can
-        // have completely different factors (e.g. wire at 1 Rmt/Nos, conduit
-        // at 1.2 Rmt/Nos): summing their total_consumed into one number and
-        // comparing it to one `used` figure would silently mix two different
-        // conversions into a meaningless total. This is a READ-ONLY cross-
-        // check, not a new progress input -- it never touches `used`/
-        // `planned`/room taps, exactly like waste_summary() reads
-        // actual_consumed without ever becoming the source of truth for %
-        // complete. A real gap is informative either way -- staged material,
-        // a stale progress entry, or genuine over-consumption -- so it's
-        // shown plainly, not diagnosed for them.
+        // Cross-check THIS material's own issued-vs-used gap -- per
+        // material, never pooled, because two materials linked to the same
+        // item can have completely different factors (e.g. wire at 1
+        // Rmt/Nos, conduit at 1.2 Rmt/Nos): summing their total_consumed
+        // into one number and comparing it to one `used` figure would
+        // silently mix two different conversions into a meaningless total.
+        // This is READ-ONLY, never a new progress input -- exactly like
+        // waste_summary() reads actual_consumed without ever becoming the
+        // source of truth for % complete.
+        //
+        // Whether issued-to-date is running ahead of what this progress
+        // should have used is surfaced in exactly ONE place: the single
+        // consolidated order-quantity message below (see realtime.sentence()
+        // -- "X already issued is Y more than this progress should have
+        // used"). This used to ALSO compute and show that same gap here,
+        // with a second framing -- the same number, said twice in two
+        // different paragraphs, which was noise, not clarity. This stays a
+        // plain fact line.
         let issuedNote = "";
         if (L.total_consumed != null) {
           if (L.units_match || L.factor != null) {
-            const eff = L.factor != null ? L.factor : 1.0;
-            const expected = (it.used || 0) * eff;
-            const gap = L.total_consumed - expected;
-            issuedNote = gap > 0 && expected > 0 && (gap / Math.max(expected, 1)) > 0.1
-              ? `<div class="sp-drow sub"><span></span><span>${qf(L.total_consumed)} ${esc(L.unit || "")} issued vs ≈${qf(expected)} expected for work marked done — staged on site, or progress needs an update</span></div>`
-              : `<div class="sp-drow sub"><span></span><span>${qf(L.total_consumed)} ${esc(L.unit || "")} issued to date</span></div>`;
+            issuedNote = `<div class="sp-drow sub"><span></span><span>${qf(L.total_consumed)} ${esc(L.unit || "")} issued to date</span></div>`;
           } else {
             issuedNote = `<div class="sp-drow sub"><span></span><span>${qf(L.total_consumed)} ${esc(L.unit || "")} issued — unit differs from ${esc(it.unit)}; set a conversion factor in Link stock to compare against work done</span></div>`;
           }

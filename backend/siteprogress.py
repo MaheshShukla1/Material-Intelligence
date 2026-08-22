@@ -181,7 +181,14 @@ def _install_pct(d, service):
 # slider drag they already do today, just kept instead of overwritten.
 # --------------------------------------------------------------------------
 def _dpr_log(d):
-    return _read_json(d / "dpr_log.json", []) or []
+    """Read dpr_log.json, silently dropping legacy entries this project's
+    log may still carry from BEFORE the overall-slider fix (an earlier
+    version of _log_dpr_change wrote a literal floor="OVERALL" placeholder;
+    current code never writes that string -- any entry with it is always
+    stale, pre-fix data, safe to drop on every read without ever touching
+    the file, so old noise disappears on its own as real data accumulates)."""
+    log = _read_json(d / "dpr_log.json", []) or []
+    return [e for e in log if e.get("floor") != "OVERALL"]
 
 
 def _save_dpr_log(d, log):
@@ -208,27 +215,141 @@ def _location_label(d):
     return dpr.LOCATION_LABEL.get(st.get("kind"), "LOCATION")
 
 
-def _log_dpr_change(d, service, room_id, item_code):
-    """Layer 1's actual hook. Only logs when a SPECIFIC room is known --
-    never the '*' catch-all (itemprog.set_progress's own docs explain why
-    that one number can't be attributed to any one room) and never a
-    bulk-all-rooms write -- and only for an item actually mapped to an
-    activity (an unmapped item has no home in the narrative log, the same
-    reasoning pnl.rollup_pnl already applies to unmapped items' money).
-    A silent no-op otherwise -- callers never need to check first."""
-    if not room_id:
-        return
-    info = _room_location_map(d).get(str(room_id))
-    if not info or not info["location"]:
-        return
+def _leaf_label(d):
+    st = _read_json(d / "structure.json", {}) or {}
+    return dpr.LEAF_LABEL.get(st.get("kind"), "ROOM")
+
+
+def _qty_for_room(d, service, item_code, room_id, frac):
+    """The real quantity one specific captured action represents: the room's
+    own quantity (room_qty_groups override if the item uses them -- reuses
+    itemprog's own group-resolution helper rather than reimplementing it --
+    else the item's plain per-room qty from the BOQ) x the fraction just
+    set. NOT a true delta from the room's PREVIOUS fraction (no history is
+    kept -- see dpr.py's module docstring on why this logs the fact of an
+    action, not a diff of two states), so two saves the same day update in
+    place (record_change()'s own job) rather than summing. Returns
+    (qty, unit) -- (None, None) when no real quantity is knowable, never a
+    guessed number."""
+    groups = _item_room_qty(d).get(service, {}).get(str(item_code))
+    room_qty = None
+    if groups:
+        rq, _ = itemprog._room_qty_from_groups(groups, {str(room_id)})
+        if rq and str(room_id) in rq:
+            room_qty = rq[str(room_id)]
+    if room_qty is None:
+        boqdf = _load_boq(d, service)
+        row = boqdf[boqdf.item_code.astype(str) == str(item_code)]
+        if row.empty:
+            return None, None
+        v = row.iloc[0].get("qty")
+        room_qty = float(v) if v is not None else None
+        unit = row.iloc[0].get("unit")
+    else:
+        boqdf = _load_boq(d, service)
+        row = boqdf[boqdf.item_code.astype(str) == str(item_code)]
+        unit = row.iloc[0].get("unit") if not row.empty else None
+    if room_qty is None:
+        return None, None
+    return round(room_qty * max(0.0, min(1.0, float(frac))), 4), unit
+
+
+def _applicable_rooms(d, service, item_code):
+    """The real set of rooms one item applies to -- mirrors
+    itemprog.compute()'s own applicability resolution exactly (room_qty_groups
+    layered as exceptions on top of the base item_rooms.json applicability,
+    else every room) so this can never quietly disagree with what the item's
+    own progress/quantity math already uses. Needed for the overall '*'
+    slider case below: it applies uniformly across every one of THESE rooms,
+    so every FLOOR they belong to is real, known scope for this item -- not
+    invented, just not narrowed to one specific room within that floor."""
+    all_room_ids = _all_room_ids(d)
+    room_set = set(all_room_ids)
+    code = str(item_code)
+    groups = _item_room_qty(d).get(service, {}).get(code)
+    room_qty, group_appl = itemprog._room_qty_from_groups(groups, room_set)
+    rooms_svc = _item_rooms(d).get(service, {})
+    if room_qty is not None:
+        base_appl = rooms_svc.get(code) or all_room_ids
+        base_appl = [r for r in base_appl if r in room_set] or all_room_ids
+        return list(dict.fromkeys(base_appl + group_appl))
+    appl = rooms_svc.get(code) or all_room_ids
+    return [r for r in appl if r in room_set] or all_room_ids
+
+
+def _log_dpr_change(d, service, room_id, item_code, frac=None):
+    """Layer 1's actual hook. Works generically across hotel/mall/hospital/
+    custom -- never assumes what a "room" or "floor" is called, only reads
+    Structure.rooms()'s own path.
+
+    Two cases, both logged honestly, never inventing a location that isn't
+    known:
+      - A SPECIFIC room is known (per-room slider, or /mark-rooms-done) ->
+        logged against that room's real location (floor/level/wing+floor),
+        with the item's own description and (when `frac` is given) a real
+        qty via _qty_for_room() above.
+      - room_id is None (the overall "*" slider -- itemprog.set_progress's
+        own docs explain why this ONE number can't be attributed to any one
+        room) -> logged against EVERY REAL floor the item is actually
+        applicable on (via _applicable_rooms() above, mapped to their real
+        floors) -- not a generic "OVERALL" bucket. This is still never a
+        guess: the fraction genuinely does apply uniformly across all of an
+        item's applicable rooms, so every floor those rooms belong to is
+        real, known scope, not invented. No specific room name is claimed
+        within that floor (qty also stays blank -- see below), since that
+        part genuinely isn't known.
+
+    Only for an item actually mapped to an activity (an unmapped item has no
+    home in the narrative log, same reasoning pnl.rollup_pnl already applies
+    to unmapped items' money). A silent no-op otherwise -- callers never
+    need to check first."""
     m = _load_mapping(d)
     acts = [a for a in m.activities(service) if str(item_code) in m.get(service, a)]
     if not acts:
         return
+    boqdf = _load_boq(d, service)
+    row = boqdf[boqdf.item_code.astype(str) == str(item_code)]
+    item_desc = str(row.iloc[0].get("description")) if not row.empty else None
     log = _dpr_log(d)
     today = dt.date.today().isoformat()
-    for act in acts:
-        dpr.record_change(log, today, service, info["location"], act, info["name"])
+    if room_id:
+        info = _room_location_map(d).get(str(room_id))
+        if not info or not info["location"]:
+            return
+        qty, unit = (None, None)
+        if frac is not None:
+            qty, unit = _qty_for_room(d, service, item_code, room_id, frac)
+        for act in acts:
+            dpr.record_change(log, today, service, info["location"], act, info["name"],
+                              item=item_desc, qty=qty, unit=unit)
+    else:
+        rooms_map = _room_location_map(d)
+        appl = _applicable_rooms(d, service, item_code)
+        by_floor = {}
+        for r in appl:
+            info = rooms_map.get(r)
+            if info and info["location"]:
+                by_floor.setdefault(info["location"], []).append(r)
+        if not by_floor:
+            return   # no structure/rooms yet -- nothing real to attach this to
+        for act in acts:
+            for floor in sorted(by_floor):
+                # honest floor-level qty: sum of THIS floor's own applicable
+                # rooms' real quantity (same per-room resolution as the
+                # specific-room path, room_qty_groups aware) x the fraction
+                # just set. Still never claims which room within the floor
+                # did the work -- only that this floor's total applicable
+                # quantity moved by this much.
+                qty_total, unit, has_qty = 0.0, None, False
+                if frac is not None:
+                    for r in by_floor[floor]:
+                        q, u = _qty_for_room(d, service, item_code, r, frac)
+                        if q is not None:
+                            qty_total += q
+                            unit = u or unit
+                            has_qty = True
+                dpr.record_change(log, today, service, floor, act, None, item=item_desc,
+                                  qty=(round(qty_total, 3) if has_qty else None), unit=unit)
     _save_dpr_log(d, log)
 
 
@@ -668,7 +789,7 @@ def set_item_progress(slug: str, payload: dict):
     store = _item_prog(d)
     itemprog.set_progress(store, svc, code, payload.get("frac", 0), room=payload.get("room"))
     (d / "item_progress.json").write_text(json.dumps(store, ensure_ascii=False))
-    _log_dpr_change(d, svc, payload.get("room"), code)
+    _log_dpr_change(d, svc, payload.get("room"), code, frac=payload.get("frac", 0))
     return _service_view(d, svc, room=payload.get("room"))
 
 
@@ -835,7 +956,7 @@ def mark_rooms_done(slug: str, payload: dict, room: str = None):
     (d / "item_progress.json").write_text(json.dumps(store, ensure_ascii=False))
     if done:   # an undo is not "work done today" -- never logged as one
         for rid in room_ids:
-            _log_dpr_change(d, svc, rid, code)
+            _log_dpr_change(d, svc, rid, code, frac=1.0)
     return _service_view(d, svc, room=room)
 
 
@@ -1330,6 +1451,7 @@ def export_dpr(slug: str, start: str, end: str = None):
     if not struct:
         raise HTTPException(400, "no structure yet")
     location_label = _location_label(d)
+    leaf_label = _leaf_label(d)
 
     boqdf = _load_boq(d)
     services = sorted(boqdf.service.unique().tolist()) if not boqdf.empty else []
@@ -1382,7 +1504,7 @@ def export_dpr(slug: str, start: str, end: str = None):
     while cur <= end_d:
         date_list.append(cur.isoformat())
         cur += dt.timedelta(days=1)
-    days = [(ds, dpr.group_for_export(by_date.get(ds, []), services)) for ds in date_list]
+    days = [(ds, dpr.group_for_export(by_date.get(ds, []), services, leaf_label=leaf_label)) for ds in date_list]
 
     date_label = start if start == end else f"{start} to {end}"
     prog = _load_progress(d).df

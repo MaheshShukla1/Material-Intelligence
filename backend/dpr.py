@@ -30,7 +30,6 @@ from datetime import date as _date
 
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.formatting.rule import CellIsRule
 from openpyxl.utils import get_column_letter
 
@@ -38,15 +37,30 @@ from openpyxl.utils import get_column_letter
 # --------------------------------------------------------------------------
 # Layer 1 — auto-capture. Pure data, no I/O here (the caller owns the file).
 # --------------------------------------------------------------------------
-def record_change(log, date_str, service, floor, activity, room):
-    """Append one captured fact to `log` (a plain list, e.g. loaded from
-    dpr_log.json) if it isn't already there today. Returns the list back
-    (so a caller can `log = record_change(log, ...)` or ignore the return).
+def record_change(log, date_str, service, floor, activity, room, item=None, qty=None, unit=None):
+    """Append (or UPDATE) one captured fact in `log` (a plain list, e.g.
+    loaded from dpr_log.json). `item`/`qty`/`unit` are optional (older log
+    entries on disk won't have them -- group_for_export() below tolerates
+    that) -- when given, `item` is the BOQ item's own description and `qty`
+    is the real per-room quantity this specific action represents (room_qty
+    x the fraction just set -- see siteprogress.py's _log_dpr_change() for
+    exactly how that's resolved; never a guess, and left None for the
+    OVERALL/no-room case where no honest room-scoped quantity exists).
+
+    Same (date, service, floor, activity, room, item) touched again the same
+    day UPDATES that entry's qty in place rather than adding a second row --
+    dragging one room's slider from 30% to 70% twice in a day must show 70%
+    worth of qty once, not 30%+70% double-counted. Returns the list back (so
+    a caller can `log = record_change(log, ...)` or ignore the return).
     """
-    entry = {"date": date_str, "service": service, "floor": floor,
-             "activity": activity, "room": room}
-    if entry not in log:
-        log.append(entry)
+    key = (date_str, service, floor, activity, room, item)
+    for e in log:
+        if (e["date"], e["service"], e["floor"], e["activity"],
+            e.get("room"), e.get("item")) == key:
+            e["qty"], e["unit"] = qty, unit
+            return log
+    log.append({"date": date_str, "service": service, "floor": floor,
+               "activity": activity, "room": room, "item": item, "qty": qty, "unit": unit})
     return log
 
 
@@ -67,16 +81,30 @@ def entries_for_range(log, start_date, end_date=None):
 # order floors first appear in the log (which is the order the engineer
 # actually worked them, a perfectly reasonable default row order).
 # --------------------------------------------------------------------------
-def group_for_export(day_entries, all_services):
+def group_for_export(day_entries, all_services, leaf_label="ROOM"):
     """day_entries: the list for ONE date, from entries_for_range().
     all_services: every service this project tracks (so a service with zero
     changes still gets its own "NO ACTIVITY" section, matching the site
     team's own sheet, which lists HVAC even when nothing happened there).
+    leaf_label: "ROOM" or "ZONE" (see dpr.LEAF_LABEL) -- the word used in
+    the generated text ("...IN ROOM NO 5,6" vs "...IN ZONE NO 5,6"), picked
+    from the project's structure.kind, never hardcoded.
 
-    Returns {service: [(floor, activity_text), ...]}. `activity_text` is the
-    activity name plus the rooms touched that day for that (floor, activity)
-    pair, comma-joined -- e.g. "POINT WIRING IN ROOM NO 5,14,15,16" -- built
-    from real logged rooms, never guessed.
+    Groups by (floor, activity, item) now, not just (floor, activity) --
+    two different BOQ items under the same activity (e.g. pipe + saddle
+    both under "Wall Piping") must not have their room lists blended into
+    one misleading combined list. Older log entries with no `item` (from
+    before this field existed) fall back to one row per (floor, activity)
+    exactly as before, item/qty columns simply blank.
+
+    Returns {service: [(floor, activity_text, item, qty, unit), ...]}.
+    `activity_text` is the activity name plus the rooms touched that day for
+    that (floor, activity, item), comma-joined -- built from real logged
+    rooms, never guessed. `qty` is the SUM of each captured action's own qty
+    for that (floor, activity, item) group -- see record_change()'s own note
+    on why repeat touches of the SAME room update in place rather than
+    summing (so this sum is real, not double-counted); different rooms
+    genuinely do add up.
     """
     by_service = {s: {} for s in all_services}
     order = {s: [] for s in all_services}
@@ -85,20 +113,29 @@ def group_for_export(day_entries, all_services):
         if svc not in by_service:
             by_service[svc] = {}
             order[svc] = []
-        key = (e["floor"], e["activity"])
+        key = (e["floor"], e["activity"], e.get("item"))
         if key not in by_service[svc]:
-            by_service[svc][key] = []
+            by_service[svc][key] = {"rooms": [], "qty": 0.0, "unit": e.get("unit"), "has_qty": False}
+        slot = by_service[svc][key]
+        if key not in order[svc]:
             order[svc].append(key)
-        if e["room"] and e["room"] not in by_service[svc][key]:
-            by_service[svc][key].append(e["room"])
+        if e["room"] and e["room"] not in slot["rooms"]:
+            slot["rooms"].append(e["room"])
+        if e.get("qty") is not None:
+            slot["qty"] += e["qty"]
+            slot["has_qty"] = True
+            slot["unit"] = e.get("unit") or slot["unit"]
 
     out = {}
     for svc in all_services:
         rows = []
-        for (floor, activity) in order.get(svc, []):
-            rooms = by_service[svc][(floor, activity)]
-            text = f"{activity.upper()} IN ROOM NO {','.join(rooms)}" if rooms else activity.upper()
-            rows.append((floor, text))
+        for (floor, activity, item) in order.get(svc, []):
+            slot = by_service[svc][(floor, activity, item)]
+            rooms = slot["rooms"]
+            text = (f"{activity.upper()} IN {leaf_label} NO {','.join(rooms)}"
+                   if rooms else activity.upper())
+            qty = round(slot["qty"], 3) if slot["has_qty"] else None
+            rows.append((floor, text, item, qty, slot["unit"]))
         out[svc] = rows
     return out
 
@@ -111,6 +148,10 @@ FONT = "Arial"
 # same idea, one level up the tree: the label for a room's immediate/joined
 # container path, picked from structure.kind, never hardcoded to "FLOOR".
 LOCATION_LABEL = {"hotel": "FLOOR", "mall": "LEVEL", "hospital": "WING / FLOOR", "custom": "LOCATION"}
+# Matches siteprogress.js's leafLabel(kind): "Zone" only for a mall, "Room"
+# for hotel/hospital/custom -- used inside the generated activity text
+# ("...IN ROOM NO 5,6" / "...IN ZONE NO 5,6"), not the column header.
+LEAF_LABEL = {"hotel": "ROOM", "mall": "ZONE", "hospital": "ROOM", "custom": "ROOM"}
 _thin = Side(style="thin", color="000000")
 BORDER = Border(left=_thin, right=_thin, top=_thin, bottom=_thin)
 SECTION_FILL = {  # cycle through these for services beyond the first 4, so a
@@ -121,33 +162,33 @@ SECTION_FILL = {  # cycle through these for services beyond the first 4, so a
 
 def _write_day_block(ws, row, date_str, grouped, location_label="FLOOR"):
     ws.cell(row, 1, "DATE:").font = Font(name=FONT, bold=True, size=11)
-    ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=4)
+    ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=5)
     ws.cell(row, 2, date_str).font = Font(name=FONT, size=11)
-    for c in range(1, 5):
+    for c in range(1, 6):
         ws.cell(row, c).border = BORDER
     row += 1
 
-    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=4)
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=5)
     t = ws.cell(row, 1, "DAILY WORK UPDATES")
     t.font = Font(name=FONT, bold=True, size=11)
     t.alignment = Alignment(horizontal="center")
-    for c in range(1, 5):
+    for c in range(1, 6):
         ws.cell(row, c).border = BORDER
     row += 1
 
-    status_ranges = []
     for i, (service, items) in enumerate(grouped.items()):
         fill = PatternFill("solid", fgColor=SECTION_FILL[i % len(SECTION_FILL)])
-        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=4)
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=5)
         s = ws.cell(row, 1, service.upper())
         s.font = Font(name=FONT, bold=True, size=11)
         s.alignment = Alignment(horizontal="center")
-        for c in range(1, 5):
+        for c in range(1, 6):
             ws.cell(row, c).fill = fill
             ws.cell(row, c).border = BORDER
         row += 1
 
-        for c, h in zip(range(1, 5), [location_label, "ACTIVITY", "AS PER SCHEDULE", "REMARKS"]):
+        headers = [location_label, "ACTIVITY", "ITEM", "QTY EXECUTED", "REMARKS"]
+        for c, h in zip(range(1, 6), headers):
             hc = ws.cell(row, c, h)
             hc.font = Font(name=FONT, bold=True, size=10)
             hc.alignment = Alignment(horizontal="center")
@@ -155,18 +196,18 @@ def _write_day_block(ws, row, date_str, grouped, location_label="FLOOR"):
         row += 1
 
         if not items:
-            ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=4)
+            ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=5)
             na = ws.cell(row, 1, "NO ACTIVITY")
             na.font = Font(name=FONT, size=10)
             na.alignment = Alignment(horizontal="center")
-            for c in range(1, 5):
+            for c in range(1, 6):
                 ws.cell(row, c).border = BORDER
             row += 1
             continue
 
         floor_start_row = row
         prev_floor = None
-        for floor, activity_text in items:
+        for floor, activity_text, item, qty, unit in items:
             if floor != prev_floor and prev_floor is not None and row - 1 > floor_start_row:
                 ws.merge_cells(start_row=floor_start_row, start_column=1, end_row=row - 1, end_column=1)
             if floor != prev_floor:
@@ -176,14 +217,22 @@ def _write_day_block(ws, row, date_str, grouped, location_label="FLOOR"):
             fc.alignment = Alignment(horizontal="center", vertical="center")
             ac = ws.cell(row, 2, activity_text)
             ac.font = Font(name=FONT, size=10)
-            for c in range(1, 5):
+            ic = ws.cell(row, 3, item or "—")
+            ic.font = Font(name=FONT, size=10, italic=(not item), color="9A9890" if not item else "000000")
+            if qty is not None:
+                qc = ws.cell(row, 4, f"{qty:,.2f} {unit}" if unit else round(qty, 2))
+                qc.alignment = Alignment(horizontal="right")
+                qc.font = Font(name=FONT, size=10)
+            else:
+                qc = ws.cell(row, 4, "—")
+                qc.font = Font(name=FONT, size=10, italic=True, color="9A9890")
+            for c in range(1, 6):
                 ws.cell(row, c).border = BORDER
             prev_floor = floor
             row += 1
         if row - 1 > floor_start_row:
             ws.merge_cells(start_row=floor_start_row, start_column=1, end_row=row - 1, end_column=1)
-        status_ranges.append((f"C{row - len(items)}", f"C{row - 1}"))
-    return row, status_ranges
+    return row
 
 
 def build_workbook(days, location_label="FLOOR"):
@@ -212,33 +261,16 @@ def build_workbook(days, location_label="FLOOR"):
     longest = len(location_label)
     for _, grouped in days:
         for rows in grouped.values():
-            for floor, _ in rows:
+            for floor, *_rest in rows:
                 longest = max(longest, len(floor))
-    widths = {1: max(9, longest + 2), 2: 58, 3: 18, 4: 30}
+    widths = {1: max(9, longest + 2), 2: 40, 3: 26, 4: 16, 5: 30}
     for c, w in widths.items():
         ws.column_dimensions[get_column_letter(c)].width = w
 
-    status_dv = DataValidation(type="list", formula1='"Leading,On schedule,Lagging"', allow_blank=True)
-    ws.add_data_validation(status_dv)
-    all_status_ranges = []
-
     row = 1
     for date_str, grouped in days:
-        row, ranges = _write_day_block(ws, row, date_str, grouped, location_label)
-        all_status_ranges.extend(ranges)
+        row = _write_day_block(ws, row, date_str, grouped, location_label)
         row += 1   # blank row between day blocks
-
-    for start, end in all_status_ranges:
-        for r in range(int(start[1:]), int(end[1:]) + 1):
-            status_dv.add(ws.cell(r, 3))
-    for start, end in all_status_ranges:
-        rng = f"{start}:{end}"
-        ws.conditional_formatting.add(rng, CellIsRule(operator="equal", formula=['"Leading"'],
-                                      font=Font(name=FONT, color="185FA5", size=10)))
-        ws.conditional_formatting.add(rng, CellIsRule(operator="equal", formula=['"On schedule"'],
-                                      font=Font(name=FONT, color="3B6D11", size=10)))
-        ws.conditional_formatting.add(rng, CellIsRule(operator="equal", formula=['"Lagging"'],
-                                      font=Font(name=FONT, color="A32D2D", size=10)))
     return wb
 
 

@@ -133,7 +133,52 @@
   function projBar() {
     return `<div class="sp-crumb" style="display:flex;gap:10px;align-items:center;margin-bottom:14px">
       <select id="sp-proj" class="ctl">${S.projects.map((p) => `<option value="${esc(p.slug)}" ${p.slug === S.slug ? "selected" : ""}>${esc(p.project)}</option>`).join("")}</select>
-      <span id="sp-where" style="color:var(--ink3)"></span></div>`;
+      <span id="sp-where" style="color:var(--ink3);cursor:default"></span></div>`;
+  }
+
+  // ---------- DPR (Daily Progress Report) ----------
+  // Populates the SAME #sp-where span projBar() already reserves next to the
+  // project dropdown -- no new UI surface, matching the app's own existing
+  // "Set rates"/"Refresh" text-link weight, not a new colored-pill pattern.
+  // Called after every projBar() render (Setup/Overall/per-service), same
+  // way $("sp-proj").onchange is already re-wired at each of those 3 sites.
+  async function wireProjBar() {
+    const where = $("sp-where");
+    if (!where || !S.state || !S.state.has_boq) return;   // nothing to report before setup is done
+    try {
+      const d = await jget(api("/" + S.slug + "/dpr/today"));
+      if (d.count > 0) {
+        where.textContent = `${d.count} update${d.count === 1 ? "" : "s"} today`;
+      } else {
+        where.textContent = "Export DPR";   // always reachable, even with nothing logged yet today
+      }
+      where.style.cursor = "pointer";
+      where.style.color = "var(--violet)";
+      where.onclick = () => openDprModal();
+    } catch (e) {}
+  }
+
+  function openDprModal() {
+    const today = new Date().toISOString().slice(0, 10);
+    modal("Export daily update",
+      "Auto-captured from today's progress updates — pick a single date or a range.",
+      `<div style="display:flex;gap:8px;align-items:center;font-size:13px;padding:10px 0">
+         <span style="color:var(--ink3)">Date range</span>
+         <input class="ctl" id="sp-dpr-start" type="date" value="${today}" style="width:150px">
+         <span style="color:var(--ink3)">to</span>
+         <input class="ctl" id="sp-dpr-end" type="date" value="${today}" style="width:150px">
+       </div>`,
+      async () => {
+        const start = $("sp-dpr-start").value;
+        const end = $("sp-dpr-end").value;
+        if (!start) return toast("Pick a start date");
+        const q = "?start=" + encodeURIComponent(start) +
+                  (end && end !== start ? "&end=" + encodeURIComponent(end) : "");
+        const a = document.createElement("a");
+        a.href = api("/" + S.slug + "/export-dpr" + q);
+        a.click();
+        closeModal();
+      }, "Export DPR", "min(420px,92vw)");
   }
 
   async function loadState(fromOpen) {
@@ -188,6 +233,7 @@
         </div>
       </div>`;
     $("sp-proj").onchange = (e) => { S.slug = e.target.value; S.service = null; loadState(); };
+    wireProjBar();
     $("sp-tmpl").querySelectorAll("button").forEach((b) => b.addEventListener("click", () => {
       $("sp-tmpl").querySelectorAll("button").forEach((x) => x.classList.remove("on"));
       b.classList.add("on"); S.tmpl = b.dataset.k; renderTmplBody();
@@ -335,6 +381,7 @@
         </div>
       </div>`;
     $("sp-proj").onchange = (e) => { S.slug = e.target.value; S.service = null; loadState(); };
+    wireProjBar();
     $("sp-refresh").onclick = () => loadService();
     $("sp-linkbtn").onclick = () => openLinkModal();
     $("sp-rates").onclick = () => openRatesModal();
@@ -524,6 +571,7 @@
         <div id="sp-ovlist">${svcRows}</div>
       </div>`;
     $("sp-proj").onchange = (e) => { S.slug = e.target.value; S.service = null; S.room = null; loadState(); };
+    wireProjBar();
     renderPills();
     $("sp-oring").style.setProperty("--p", (o.pct_value_done || 0).toFixed(1));
     $("sp-ovlist").querySelectorAll(".sp-ovrow").forEach((row) =>
@@ -1209,20 +1257,53 @@
   // ---------- bulk rates ----------
   function openRatesModal() {
     if (!S.svc || S.service === "__overall__") return toast("Open a service first.");
-    const rows = S.svc.items.filter((it) => it.qty > 0 || it.quick).map((it) =>
-      `<div class="sp-maprow"><span class="c">${esc(it.code)}</span>
-        <span style="flex:1">${esc(short(it.desc, 46))}</span>
-        <input class="ctl sp-rateinput" data-code="${esc(it.code)}" type="number" min="0" placeholder="₹ / ${esc(it.unit)}" value="${it.rate != null ? it.rate : ""}" style="width:120px">
-        <span class="sub" style="width:70px;text-align:right">${qf(it.planned)} ${esc(it.unit)}</span></div>`).join("");
-    modal("Set install rates (₹ per unit)",
-      "Enter the ₹/unit for each BOQ item — this is what turns progress into a work-done value. Leave blank to skip; you can come back anytime.",
-      rows, async () => {
+    // prefill from the project-level default (S.state.settings), never from
+    // an item's already-resolved it.install_pct -- that number could be the
+    // DEFAULT showing through, and pre-filling every row with it would turn
+    // every item into an explicit override the instant the engineer saves
+    // without touching that column.
+    const curDefault = (S.state && S.state.settings && S.state.settings.default_install_pct != null)
+      ? S.state.settings.default_install_pct : "";
+    const rows = S.svc.items.filter((it) => it.qty > 0 || it.quick).map((it) => {
+      const hasOwn = it.install_pct_own != null;
+      return `<div class="sp-maprow"><span class="c">${esc(it.code)}</span>
+        <span style="flex:1">${esc(short(it.desc, 38))}</span>
+        <input class="ctl sp-rateinput" data-code="${esc(it.code)}" type="number" min="0" placeholder="₹ / ${esc(it.unit)}" value="${it.rate != null ? it.rate : ""}" style="width:100px">
+        <input class="ctl sp-installinput" data-code="${esc(it.code)}" data-had-override="${hasOwn ? "1" : "0"}" type="number" min="0" max="100"
+          placeholder="${curDefault !== "" ? curDefault + "%" : "100%"}" value="${hasOwn ? it.install_pct_own : ""}" style="width:80px">
+        <span class="sub" style="width:68px;text-align:right">${qf(it.planned)} ${esc(it.unit)}</span></div>`;
+    }).join("");
+    const body = `
+      <div class="sp-maprow" style="border-bottom:2px solid var(--line2);margin-bottom:2px">
+        <span style="flex:1;font-weight:600">Payment term default</span>
+        <input class="ctl" id="sp-default-install" type="number" min="0" max="100" placeholder="e.g. 15" value="${curDefault}" style="width:80px">
+        <span class="sub">% installation</span>
+      </div>
+      <div class="sp-maprow" style="color:var(--ink3);font-size:11px;padding-bottom:4px">
+        <span class="c"></span><span style="flex:1"></span>
+        <span style="width:100px">₹ rate</span><span style="width:80px">Install %</span><span style="width:68px;text-align:right">Planned</span>
+      </div>
+      ${rows}`;
+    modal("Set rates & payment term",
+      "₹/unit for each item turns progress into a work-done value. Install % is the installation share of that rate — used unless a row below overrides it; leave blank to use the default.",
+      body, async () => {
         const rates = {};
         document.querySelectorAll(".sp-rateinput").forEach((i) => { if (i.value !== "") rates[i.dataset.code] = Number(i.value); });
-        S.svc = await jpost(api("/" + S.slug + "/rates" + roomQ()), { service: S.service, rates });
+        const install_pct = {};
+        document.querySelectorAll(".sp-installinput").forEach((i) => {
+          const had = i.dataset.hadOverride === "1";
+          const val = i.value.trim();
+          if (val === "") { if (had) install_pct[i.dataset.code] = null; }   // explicit clear -> back to default
+          else install_pct[i.dataset.code] = Number(val);
+        });
+        const defRaw = $("sp-default-install").value.trim();
+        const defVal = defRaw === "" ? null : Number(defRaw);
+        await jpost(api("/" + S.slug + "/settings"), { default_install_pct: defVal });
+        S.state = S.state || {}; S.state.settings = Object.assign({}, S.state.settings, { default_install_pct: defVal });
+        S.svc = await jpost(api("/" + S.slug + "/rates" + roomQ()), { service: S.service, rates, install_pct });
         try { S.pnl = await jget(pnlUrl()); } catch (e) {}
         closeModal(); renderMain();
-      }, "Save rates", "min(680px,96vw)");
+      }, "Save rates", "min(780px,96vw)");
   }
 
   // ---------- item master link modal ----------
@@ -1337,7 +1418,7 @@
 
   // ---------- rates ----------
   async function setRate(code) {
-    const it = S._byCode[code]; const v = prompt(`Install rate for ${code} (₹ per ${it.unit}):`, it.rate || ""); if (v == null || v === "") return;
+    const it = S._byCode[code]; const v = prompt(`Rate for ${code} (₹ per ${it.unit}, combined supply + install):`, it.rate || ""); if (v == null || v === "") return;
     const rate = Number(v); if (isNaN(rate)) return toast("Enter a number");
     try { S.svc = await jpost(api("/" + S.slug + "/rates" + roomQ()), { service: S.service, rates: { [code]: rate } });
       try { S.pnl = await jget(pnlUrl()); } catch (e) {} renderMain(); }
@@ -1434,7 +1515,11 @@
       <div class="sp-drow"><span>Used so far</span><b>${qf(it.used)} ${esc(it.unit)}</b></div>
       <div class="sp-drow"><span>Remaining work</span><b>${qf(it.remaining)} ${esc(it.unit)}</b></div>
       ${roomsBlockHTML(it)}
-      <div class="sp-drow"><span>Install rate</span><b>${it.rate != null ? inr(it.rate) + " /" + esc(it.unit) : "not set"}</b></div>
+      <div class="sp-drow"><span>Rate</span><b>${it.rate != null ? inr(it.rate) + " /" + esc(it.unit) : "not set"}</b></div>
+      ${it.rate != null ? `
+      <div class="sp-drow"><span>Value done</span><b>${inr(it.done_val)}</b></div>
+      <div class="sp-drow"><span>Value remaining</span><b>${inr(it.rem_val)}</b></div>
+      ${it.install_pct != null ? `<div class="sp-drow sub"><span></span><span>${qf(it.install_pct)}% installation applied — full contract value ${inr(it.full_val)}</span></div>` : ""}` : ""}
       <div class="sp-dbar"><i style="width:${Math.round(it.pct || 0)}%"></i></div>
       <div style="text-align:right;font-size:11.5px;color:var(--ink3)">${Math.round(it.pct || 0)}% complete</div>
       ${stockHTML ? `<p class="sub" style="margin:16px 0 4px">Linked stock</p>${stockHTML}` : ""}

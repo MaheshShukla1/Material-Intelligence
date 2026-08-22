@@ -137,6 +137,39 @@ def project_summary(prog):
     return out
 
 
+def activity_completion(prog, service=None, by_floor=False):
+    """Per-activity room completion -- the same tick-grid signal
+    project_summary() already uses (frac>=1 done, 0<frac<1 partial, frac<=0
+    pending), just grouped by ACTIVITY (and optionally FLOOR too) instead of
+    only by service. This is what a real "Activity Completion Summary"
+    report needs: e.g. "13th floor: 106 of 108 rooms done for Wall Piping".
+
+    Returns {service: {activity: {total, done, partial, pending, pct_done,
+    pct_pending}}} when by_floor=False, or {service: {activity: {floor:
+    {...same...}}}} when by_floor=True. Never invents a percentage for an
+    activity with zero tracked rooms -- pct_done/pct_pending are 0.0 in that
+    case, same as _pct()'s own empty-series convention elsewhere in this
+    module."""
+    df = prog if service is None else prog[prog.service == service]
+    keys = ["service", "floor", "activity"] if by_floor else ["service", "activity"]
+    out = {}
+    for key, g in df.groupby(keys):
+        total = len(g)
+        done = int((g.frac >= 1.0).sum())
+        partial = int(((g.frac > 0) & (g.frac < 1)).sum())
+        pending = int((g.frac <= 0).sum())
+        row = {"total": total, "done": done, "partial": partial, "pending": pending,
+              "pct_done": round(100.0 * done / total, 2) if total else 0.0,
+              "pct_pending": round(100.0 * pending / total, 2) if total else 0.0}
+        if by_floor:
+            svc, floor, act = key
+            out.setdefault(svc, {}).setdefault(act, {})[floor] = row
+        else:
+            svc, act = key
+            out.setdefault(svc, {})[act] = row
+    return out
+
+
 # --------------------------------------------------------------------------
 # The consumption bridge: progress x BOQ -> used / remaining per item.
 # --------------------------------------------------------------------------

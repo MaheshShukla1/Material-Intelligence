@@ -11,6 +11,13 @@ read/write on a NEW per-project store:
         activities.json   ({service: [activity, ...]})
         mapping.json      (editable {service: {activity: [item_code]}})
         rates.json        ({service: {item_code: ₹/unit}})
+        settings.json     ({"default_install_pct": 0-100} — optional project-
+                           level payment-term default; absent => feature unused,
+                           every rate counts as installation value, unchanged
+                           from before this existed)
+        install_pct.json  ({service: {item_code: 0-100}} — optional per-item
+                           payment-term overrides, take precedence over the
+                           project default)
         boq.parquet       (parsed line items, all services)
         progress.parquet  (tidy tick grid, editable by the slider)
 
@@ -19,15 +26,16 @@ forecast run (forecast.parquet) to attach stock/rate/order-by to a BOQ item.
 The engine, its routes and its files are never written here.
 """
 import json
+import io
 import shutil
 import datetime as dt
 import functools
 from pathlib import Path
 
 import pandas as pd
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile, Response
 
-from . import structure, boq, activity, progress, pnl, linkage, schema, subcat, realtime, itemprog
+from . import structure, boq, activity, progress, pnl, linkage, schema, subcat, realtime, itemprog, dpr
 
 ROOT = Path(__file__).resolve().parent.parent
 PROJECTS = ROOT / "data" / "projects"
@@ -145,6 +153,85 @@ def _rates(d, service):
     return (_read_json(d / "rates.json", {}) or {}).get(service, {})
 
 
+def _settings(d):
+    """Project-level settings — currently just `default_install_pct` (the
+    payment-term default: what share of a combined supply+install rate
+    counts as "installation" for done/remaining ₹, when an item has no
+    override of its own). A separate small file rather than folding into an
+    existing store, matching this codebase's own convention (item_rooms.json,
+    labour_only.json, etc. are each their own file) and so it never risks
+    colliding with rates.json's existing {service: {item_code: rate}} shape."""
+    return _read_json(d / "settings.json", {}) or {}
+
+
+def _install_pct(d, service):
+    """Per-item installation-percent OVERRIDES for one service — kept in its
+    own file (install_pct.json), deliberately separate from rates.json, so
+    an existing rates.json on disk (a flat {item_code: rate} number) never
+    needs a migration to hold a second field. Missing => no override, i.e.
+    fall back to the project default (see pnl._install_pct_for)."""
+    return (_read_json(d / "install_pct.json", {}) or {}).get(service, {})
+
+
+# --------------------------------------------------------------------------
+# DPR (Daily Progress Report) -- Layer 1: auto-capture, Layer 3: export.
+# dpr_log.json is a plain append-only list of {date, service, floor,
+# activity, room} facts, written from the same routes that already write
+# item_progress.json -- the engineer never sees this happen, it is the same
+# slider drag they already do today, just kept instead of overwritten.
+# --------------------------------------------------------------------------
+def _dpr_log(d):
+    return _read_json(d / "dpr_log.json", []) or []
+
+
+def _save_dpr_log(d, log):
+    (d / "dpr_log.json").write_text(json.dumps(log, ensure_ascii=False))
+
+
+def _room_location_map(d):
+    """{room_id: {"name":..., "location": "13TH" / "Wing A · Floor 1" / "B1"}}
+    -- location is the room's own container path (Structure.rooms()'s own
+    `path`, minus the project name at path[0]), joined. Generic across
+    hotel/mall/hospital/custom -- see dpr.py's own note on why this is a
+    joined path, not a flat "floor" field (a hospital has one more container
+    level -- Wing > Floor -- than hotel/mall do)."""
+    st = _read_json(d / "structure.json", None)
+    if not st:
+        return {}
+    s = structure.Structure.from_dict(st)
+    return {r["id"]: {"name": r["name"], "location": " · ".join(r["path"][1:])}
+           for r in s.rooms()}
+
+
+def _location_label(d):
+    st = _read_json(d / "structure.json", {}) or {}
+    return dpr.LOCATION_LABEL.get(st.get("kind"), "LOCATION")
+
+
+def _log_dpr_change(d, service, room_id, item_code):
+    """Layer 1's actual hook. Only logs when a SPECIFIC room is known --
+    never the '*' catch-all (itemprog.set_progress's own docs explain why
+    that one number can't be attributed to any one room) and never a
+    bulk-all-rooms write -- and only for an item actually mapped to an
+    activity (an unmapped item has no home in the narrative log, the same
+    reasoning pnl.rollup_pnl already applies to unmapped items' money).
+    A silent no-op otherwise -- callers never need to check first."""
+    if not room_id:
+        return
+    info = _room_location_map(d).get(str(room_id))
+    if not info or not info["location"]:
+        return
+    m = _load_mapping(d)
+    acts = [a for a in m.activities(service) if str(item_code) in m.get(service, a)]
+    if not acts:
+        return
+    log = _dpr_log(d)
+    today = dt.date.today().isoformat()
+    for act in acts:
+        dpr.record_change(log, today, service, info["location"], act, info["name"])
+    _save_dpr_log(d, log)
+
+
 def _latest_run_for(slug):
     """Newest forecast run whose meta.project_slug == slug (read-only)."""
     slug = _slugify(slug)
@@ -259,7 +346,10 @@ def _service_view_core(d, service, items, used, prog, rooms_cfg, room_qty_groups
     m = _load_mapping(d)
     acts = (_read_json(d / "activities.json", {}) or {}).get(service, [])
     rates = _rates(d, service)
-    ip = pnl.compute_item_pnl(used, rates=rates)
+    install_pct = _install_pct(d, service)
+    default_install_pct = _settings(d).get("default_install_pct")
+    ip = pnl.compute_item_pnl(used, rates=rates, install_pct=install_pct,
+                              default_install_pct=default_install_pct)
     rp = pnl.rollup_pnl(ip, m, service)
     planned_over = _planned(d, service)   # for the "manually set" flag below
 
@@ -277,6 +367,13 @@ def _service_view_core(d, service, items, used, prog, rooms_cfg, room_qty_groups
     for a in m.activities(service):
         for c in m.get(service, a):
             inv.setdefault(str(c), []).append(a)
+    # raw per-item overrides only (not the resolved/effective install_pct
+    # already on `it`) -- the "Set rates" modal needs to tell "this item has
+    # its OWN override" apart from "inheriting the project default" so it can
+    # leave the input blank (default shown as placeholder) instead of
+    # silently turning every item into an explicit override the moment the
+    # engineer saves without touching that column.
+    own_install_pct = {str(k): v for k, v in install_pct.items()} if install_pct else {}
 
     def fv(x):
         try:
@@ -297,6 +394,9 @@ def _service_view_core(d, service, items, used, prog, rooms_cfg, room_qty_groups
             "rooms": int(it.rooms), "in_room": bool(it.in_room),
             "rate": fv(it.rate), "quick": c in quick_codes,
             "done_val": fv(it.done_value), "rem_val": fv(it.remaining_value),
+            "full_val": fv(it.full_value), "install_pct": fv(it.install_pct),
+            "install_rate": fv(it.install_rate),
+            "install_pct_own": fv(own_install_pct.get(c)),
             "room_done": rb["done"], "room_progress": rb["in_progress"],
             "room_pending": rb["not_started"], "room_total": rb["total"],
             "planned_override": c in planned_over,
@@ -396,6 +496,7 @@ def get_state(slug: str):
         "activities": activities,
         "progress_summary": summary,
         "has_boq": not boqdf.empty,
+        "settings": _settings(d),
     }
 
 
@@ -431,7 +532,15 @@ def _waste_for(d, slug, service, items=None, used=None):
                                     _item_rooms(d).get(service, {}), _all_room_ids(d),
                                     _planned(d, service), room_qty_groups=_item_room_qty(d).get(service, {}))
         actual = _actual_consumed(slug, service, items)
-        ip = pnl.compute_item_pnl(used, rates=_rates(d, service), actual_consumed=actual)
+        # install_pct/default passed through for consistency with every other
+        # compute_item_pnl() call -- waste_value itself stays on the full
+        # rate regardless (see pnl.py), this only keeps this frame's
+        # planned/done/remaining columns from silently disagreeing with the
+        # ones the rest of the page already shows, if anything here ever
+        # starts reading them.
+        ip = pnl.compute_item_pnl(used, rates=_rates(d, service), actual_consumed=actual,
+                                  install_pct=_install_pct(d, service),
+                                  default_install_pct=_settings(d).get("default_install_pct"))
         w = pnl.waste_summary(ip)
         if w.get("available"):
             return {"wasted": w.get("wasted_value") or 0.0, "saved": w.get("saved_value") or 0.0,
@@ -453,7 +562,7 @@ def overall(slug: str):
         raise HTTPException(404, "no BOQ uploaded yet")
     services = sorted(boqdf.service.unique().tolist())
     per, all_pcts = {}, []
-    tot = {"done": 0.0, "planned": 0.0, "remaining": 0.0, "waste": 0.0, "saved": 0.0}
+    tot = {"done": 0.0, "planned": 0.0, "remaining": 0.0, "waste": 0.0, "saved": 0.0, "full": 0.0}
     m = _load_mapping(d)
     all_rooms = _all_room_ids(d)
     # Loaded ONCE for the whole route. Each of these already holds every
@@ -495,8 +604,10 @@ def overall(slug: str):
         done = t.get("done_value") or 0.0
         planned = t.get("planned_value") or 0.0
         rem = t.get("remaining_value") or 0.0
+        full = t.get("full_value") or 0.0
         w = _waste_for(d, slug, svc, items=items_svc, used=used_svc)
         tot["done"] += done; tot["planned"] += planned; tot["remaining"] += rem
+        tot["full"] += full
         tot["waste"] += w["wasted"]; tot["saved"] += w["saved"]
         if w.get("caveat"):
             waste_caveats.append(f"{svc}: {w['caveat']}")
@@ -506,6 +617,7 @@ def overall(slug: str):
         all_pcts.extend(view["labour_pct"].values())
         per[svc] = {"pct": view["overall_pct"], "done_value": round(done, 2),
                     "remaining_value": round(rem, 2), "planned_value": round(planned, 2),
+                    "full_value": round(full, 2),
                     "items": len(view["items"]), "waste_value": round(w["wasted"], 2),
                     "waste_recorded_pct": w.get("recorded_pct")}
         mapped_codes = {code for a in m.activities(svc) for code in m.get(svc, a)}
@@ -531,7 +643,7 @@ def overall(slug: str):
     return {
         "overall_pct": overall_pct, "pct_value_done": pct_value,
         "done_value": round(tot["done"], 2), "planned_value": round(tot["planned"], 2),
-        "remaining_value": round(tot["remaining"], 2),
+        "remaining_value": round(tot["remaining"], 2), "full_value": round(tot["full"], 2),
         "waste_value": round(tot["waste"], 2), "saved_value": round(tot["saved"], 2),
         "waste_caveat": waste_caveat,
         "services": services, "by_service": per,
@@ -556,6 +668,7 @@ def set_item_progress(slug: str, payload: dict):
     store = _item_prog(d)
     itemprog.set_progress(store, svc, code, payload.get("frac", 0), room=payload.get("room"))
     (d / "item_progress.json").write_text(json.dumps(store, ensure_ascii=False))
+    _log_dpr_change(d, svc, payload.get("room"), code)
     return _service_view(d, svc, room=payload.get("room"))
 
 
@@ -720,6 +833,9 @@ def mark_rooms_done(slug: str, payload: dict, room: str = None):
     for rid in room_ids:
         itemprog.set_progress(store, svc, code, frac, room=rid)
     (d / "item_progress.json").write_text(json.dumps(store, ensure_ascii=False))
+    if done:   # an undo is not "work done today" -- never logged as one
+        for rid in room_ids:
+            _log_dpr_change(d, svc, rid, code)
     return _service_view(d, svc, room=room)
 
 
@@ -1123,11 +1239,22 @@ def set_progress_bulk(slug: str, payload: dict, room: str = None):
 
 @router.post("/{slug}/rates")
 def save_rates(slug: str, payload: dict, room: str = None):
-    """Set install rates. Body: {"service","rates":{"2.16":95,...}}.
-    Merges into the stored rates and returns the refreshed service view."""
+    """Set rates and, optionally, per-item payment-term overrides in one
+    save — same "Set rates" panel, same click, both stores updated together.
+
+    Body: {"service", "rates": {"2.16": 95, ...},
+           "install_pct": {"2.16": 20, ...}}   (install_pct is optional; a
+    project with no payment-term feature in use never sends it, and nothing
+    below changes for that project.)
+
+    Merges into rates.json and (if given) install_pct.json — an item with no
+    key in `install_pct` here keeps whatever it already had (or falls back to
+    the project default at read time, never guessed here). Returns the
+    refreshed service view."""
     d = _need(slug)
     svc = payload.get("service")
     new = payload.get("rates", {})
+    new_install_pct = payload.get("install_pct")
     if not svc:
         raise HTTPException(400, "service is required")
     allr = _read_json(d / "rates.json", {}) or {}
@@ -1136,7 +1263,143 @@ def save_rates(slug: str, payload: dict, room: str = None):
         cur[str(k)] = v
     allr[svc] = cur
     (d / "rates.json").write_text(json.dumps(allr, ensure_ascii=False))
+
+    if new_install_pct:
+        allip = _read_json(d / "install_pct.json", {}) or {}
+        curip = allip.get(svc, {})
+        for k, v in new_install_pct.items():
+            if v is None:
+                curip.pop(str(k), None)     # explicit clear -> back to project default
+            else:
+                curip[str(k)] = v
+        allip[svc] = curip
+        (d / "install_pct.json").write_text(json.dumps(allip, ensure_ascii=False))
+
     return _service_view(d, svc, room=room)
+
+
+@router.post("/{slug}/settings")
+def save_settings(slug: str, payload: dict):
+    """Project-level settings. Currently one field: {"default_install_pct":
+    15} (or null to clear it). Not scoped to a service or a room, and not
+    part of the BOQ-upload wizard — this is meant to be revisited any time
+    from the same "Set rates" panel, the same way a rate itself can be
+    changed at any time. Merges (only keys present in the payload are
+    touched), so future settings fields can be added here without this route
+    needing to change."""
+    d = _need(slug)
+    cur = _settings(d)
+    if "default_install_pct" in payload:
+        v = payload["default_install_pct"]
+        if v is None:
+            cur.pop("default_install_pct", None)
+        else:
+            try:
+                v = float(v)
+            except (TypeError, ValueError):
+                raise HTTPException(400, "default_install_pct must be a number or null")
+            if not (0.0 <= v <= 100.0):
+                raise HTTPException(400, "default_install_pct must be between 0 and 100")
+            cur["default_install_pct"] = v
+    (d / "settings.json").write_text(json.dumps(cur, ensure_ascii=False))
+    return cur
+
+
+@router.get("/{slug}/dpr/today")
+def dpr_today(slug: str):
+    """What the projBar() indicator shows: how many distinct (service,
+    location, activity) rows today's captured changes will produce in the
+    export -- the exact same grouping key group_for_export() itself uses,
+    so this count can never disagree with what the export actually shows."""
+    d = _need(slug)
+    today = dt.date.today().isoformat()
+    todays = [e for e in _dpr_log(d) if e["date"] == today]
+    keys = {(e["service"], e["floor"], e["activity"]) for e in todays}
+    return {"date": today, "count": len(keys)}
+
+
+@router.get("/{slug}/export-dpr")
+def export_dpr(slug: str, start: str, end: str = None):
+    """The full DPR -- Summary + Item detail + Daily updates -- for one date
+    (end omitted) or a range (inclusive). Reuses the exact same pnl.py /
+    itemprog.py / dpr.py functions every other route here already calls;
+    nothing new is computed, only assembled and formatted."""
+    d = _need(slug)
+    end = end or start
+    struct = _read_json(d / "structure.json", None)
+    if not struct:
+        raise HTTPException(400, "no structure yet")
+    location_label = _location_label(d)
+
+    boqdf = _load_boq(d)
+    services = sorted(boqdf.service.unique().tolist()) if not boqdf.empty else []
+    m = _load_mapping(d)
+    all_rooms = _all_room_ids(d)
+
+    rollups, item_rows = {}, []
+    for svc in services:
+        items = boqdf[boqdf.service == svc]
+        if items.empty:
+            continue
+        prog_svc = _item_prog(d).get(svc, {})
+        rooms_cfg = _item_rooms(d).get(svc, {})
+        room_qty_groups = _item_room_qty(d).get(svc, {})
+        planned_over = _planned(d, svc)
+        used = itemprog.compute(items, prog_svc, rooms_cfg, all_rooms, planned_over,
+                                room_qty_groups=room_qty_groups)
+        ip = pnl.compute_item_pnl(used, rates=_rates(d, svc), install_pct=_install_pct(d, svc),
+                                  default_install_pct=_settings(d).get("default_install_pct"))
+        rp = pnl.rollup_pnl(ip, m, svc)
+        rollups[svc] = rp
+        mapped_codes = {str(c) for a in m.activities(svc) for c in m.get(svc, a)}
+        for it in ip.itertuples():
+            code = str(it.item_code)
+            if code not in mapped_codes:
+                continue   # only items actually inside an activity -- not raw/unmapped BOQ noise
+            rb = itemprog.room_buckets(code, prog_svc, rooms_cfg, all_rooms, room_qty_groups=room_qty_groups)
+            item_rows.append({
+                "service": svc, "item": it.description,
+                "planned": round(it.planned_total, 2) if it.planned_total is not None else None,
+                "used": round(it.used, 2) if it.used is not None else None,
+                "remaining": round(it.remaining, 2) if it.remaining is not None else None,
+                "done": rb["done"], "in_progress": rb["in_progress"], "pending": rb["not_started"]})
+
+    proj = pnl.project_pnl(rollups) if rollups else {
+        "done_value": 0.0, "remaining_value": 0.0, "full_value": 0.0,
+        "waste_value": 0.0, "pct_value_done": 0.0}
+    by_service = {svc: {"done_value": rp["totals"]["done_value"],
+                        "remaining_value": rp["totals"]["remaining_value"]}
+                 for svc, rp in rollups.items()}
+
+    try:
+        start_d, end_d = dt.date.fromisoformat(start), dt.date.fromisoformat(end)
+    except ValueError:
+        raise HTTPException(400, "start/end must be YYYY-MM-DD")
+    if end_d < start_d:
+        raise HTTPException(400, "end date is before start date")
+    by_date = dpr.entries_for_range(_dpr_log(d), start, end)
+    date_list, cur = [], start_d
+    while cur <= end_d:
+        date_list.append(cur.isoformat())
+        cur += dt.timedelta(days=1)
+    days = [(ds, dpr.group_for_export(by_date.get(ds, []), services)) for ds in date_list]
+
+    date_label = start if start == end else f"{start} to {end}"
+    prog = _load_progress(d).df
+    completion = progress.activity_completion(prog) if len(prog) else None
+    completion_by_floor = progress.activity_completion(prog, by_floor=True) if len(prog) else None
+    generated_at = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+    wb = dpr.build_full_export(date_label, proj, by_service, item_rows, days,
+                               location_label=location_label, completion=completion,
+                               completion_by_floor=completion_by_floor, generated_at=generated_at)
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    fname = f"DPR_{_slugify(slug)}_{start}" + (f"_to_{end}" if end != start else "") + ".xlsx"
+    return Response(
+        content=buf.read(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
 
 @router.post("/{slug}/structure/reset")
@@ -1305,17 +1568,21 @@ def service_pnl(slug: str, service: str, room: str = None):
     all_rooms = _all_room_ids(d)
     planned_over = _planned(d, service)
     rates = _rates(d, service)
+    install_pct = _install_pct(d, service)
+    default_install_pct = _settings(d).get("default_install_pct")
     room_qty_groups = _item_room_qty(d).get(service, {})
 
     used = itemprog.compute(items, prog, rooms_cfg, all_rooms, planned_over, room=room, room_qty_groups=room_qty_groups)
-    ip = pnl.compute_item_pnl(used, rates=rates)
+    ip = pnl.compute_item_pnl(used, rates=rates, install_pct=install_pct,
+                              default_install_pct=default_install_pct)
     rp = pnl.rollup_pnl(ip, m, service)
     proj = pnl.project_pnl({service: rp})
 
     used_whole = used if room is None else itemprog.compute(
         items, prog, rooms_cfg, all_rooms, planned_over, room=None, room_qty_groups=room_qty_groups)
     actual = _actual_consumed(slug, service, items)
-    ip_whole = pnl.compute_item_pnl(used_whole, rates=rates, actual_consumed=actual)
+    ip_whole = pnl.compute_item_pnl(used_whole, rates=rates, actual_consumed=actual,
+                                    install_pct=install_pct, default_install_pct=default_install_pct)
     waste = pnl.waste_summary(ip_whole)
 
     return {"service": service, "room": room, "project": proj,

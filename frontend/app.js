@@ -68,6 +68,23 @@ function runsOut(r) {
   return [main, sub];
 }
 
+/* Total received = everything that ever came in and either got used or is
+   still sitting on the shelf, i.e. total_consumed + stock (on hand). Same
+   formula as realtime.py's combine_item() `received` field and algebraically
+   the same number as the drawer's own "Total received" line (opening +
+   dated IN) -- just read from the two forecast-row columns that are already
+   on every /api/forecast row instead of a separate daily-ledger sum, so no
+   extra fetch is needed to show it in the table.
+   Only computed when BOTH halves are real numbers (never invents one side
+   and guesses) -- same "never invent" rule realtime.py documents for its own
+   received/need calculations. Returns null (renders as "—" via num()) when
+   either figure is missing, e.g. a material with no consumption history yet. */
+function totalReceived(r) {
+  const c = r.total_consumed, s = r.stock;
+  if (c === null || c === undefined || s === null || s === undefined) return null;
+  return Number(c) + Number(s);
+}
+
 const DOTS = { HIGH: "●●●", MEDIUM: "●●○", LOW: "●○○", NONE: "○○○" };
 
 /* Real per-material lead time (from actual PO->GRN history) shows as a small
@@ -313,7 +330,7 @@ $("sync").onclick = () => {
 };
 
 async function show(runId, meta, summary) {
-  RUN = runId; META = meta; TYPE = "";
+  RUN = runId; META = meta; TYPE = ""; SIZE = "";
   try { localStorage.setItem("currentRun", runId); } catch (e) {}
   LEAD = meta.lead_time || LEAD;
   $("lead").value = LEAD;
@@ -817,8 +834,28 @@ function paintTypes() {
   const opts = [`<option value="">All types</option>`].concat(
     list.map((t) =>
       `<option value="${esc(t.name)}" ${t.name === TYPE ? "selected" : ""}>${
-        esc(t.name)} (${t.count})</option>`));
+        esc(t.name)}</option>`));
   sel.innerHTML = opts.join("");
+}
+
+/* Size is a cascading filter under Type, sitting right after it in the same
+   filter row - reuses the very same $("size") select the Inventory/PPE tabs
+   already use for their own facet dropdown (same element, same slot), just
+   re-populated here for forecast mode. Only shown once a Type is picked AND
+   that type actually has extractable sizes among its materials - decided by
+   the real GET /api/sizes route (linkage.size_tokens() extraction), never a
+   frontend guess at what counts as a size. Switching Type always resets SIZE
+   to "" first at the call sites below, mirroring how switching SVC already
+   resets TYPE - a size chosen under the old Type is not meaningful under a
+   different one. */
+async function paintSizes() {
+  const sel = $("size");
+  if (modeFor(SVC) !== "forecast" || !TYPE) { sel.hidden = true; return; }
+  const p = new URLSearchParams({ service: SVC, subcategory: TYPE });
+  const list = await (await fetch(`/api/sizes/${RUN}?${p}`)).json();
+  if (!list.length) { sel.hidden = true; return; }
+  fillFacet(sel, "All sizes", list, SIZE);
+  sel.hidden = false;
 }
 
 $("type").onchange = (e) => {
@@ -826,6 +863,7 @@ $("type").onchange = (e) => {
   // rows - just set it and re-filter from cache, no service reset.
   if (modeFor(SVC) !== "forecast") { TYPE = e.target.value; rerenderFacets(); return; }
   const v = e.target.value;
+  SIZE = "";   // a Type change always drops whatever Size was picked before
   if (v === "") {
     // "All types" = leave the single-service view entirely: reset to All
     // services and show every type across MEP, no type filter applied. The
@@ -837,7 +875,7 @@ $("type").onchange = (e) => {
     sel.hidden = false;
     sel.innerHTML = [`<option value="">All types</option>`].concat(
       (SUBCATS ? SUBCATS.all : []).map((t) =>
-        `<option value="${esc(t.name)}">${esc(t.name)} (${t.count})</option>`)
+        `<option value="${esc(t.name)}">${esc(t.name)}</option>`)
     ).join("");
   } else {
     TYPE = v;
@@ -845,7 +883,14 @@ $("type").onchange = (e) => {
   load();
 };
 
-$("size").onchange = (e) => { SIZE = e.target.value; rerenderFacets(); };
+$("size").onchange = (e) => {
+  SIZE = e.target.value;
+  // Forecast mode filters server-side (the size token isn't in the already-
+  // loaded rows' own facet cache the way Inventory/PPE sizes are), so it
+  // re-fetches via load() rather than re-filtering client-side.
+  if (modeFor(SVC) === "forecast") { load(); return; }
+  rerenderFacets();
+};
 $("contractor").onchange = (e) => { CONTRACTOR = e.target.value; rerenderFacets(); };
 
 /* Re-filter the already-loaded inventory / PPE rows after a facet change,
@@ -872,7 +917,7 @@ function fillFacet(sel, allLabel, list, current) {
   sel.innerHTML = [`<option value="">${allLabel}</option>`].concat(
     list.map((t) =>
       `<option value="${esc(t.name)}" ${t.name === current ? "selected" : ""}>${
-        esc(t.name)} (${t.count})</option>`)).join("");
+        esc(t.name)}</option>`)).join("");
 }
 
 /* Normalise a hand-typed PPE shoe size ("6 NUMBER", "7 NIMBER", "9*NUMBER") down
@@ -894,11 +939,17 @@ async function load() {
   applyMode(mode);
   if (mode === "ppe") return loadPPE();
   if (mode === "inventory") return loadInventory();
+  // Every forecast load re-derives whether the Size dropdown should be
+  // visible from the current TYPE/SIZE state - not just right after a Type
+  // change - so it stays correct through every other trigger too (status
+  // filter, search box) instead of only being set once and then going stale
+  // the next time applyMode() above unconditionally hides it.
+  paintSizes();
 
   // "Order date passed" is not a status - it is the overdue (order-by in the
   // past) set, so it is sent as its own flag to match the KPI card exactly.
   const stVal = $("status").value;
-  const params = { service: SVC, subcategory: TYPE, q: $("q").value };
+  const params = { service: SVC, subcategory: TYPE, size: SIZE, q: $("q").value };
   if (stVal === "__overdue__") params.overdue = 1;
   else params.status = stVal;
   const p = new URLSearchParams(params);
@@ -907,7 +958,7 @@ async function load() {
 }
 
 /* Reshape the shared table chrome for the current mode. The forecast table has
-   five columns; inventory needs three; PPE brings its own header. We swap the
+   six columns; inventory needs three; PPE brings its own header. We swap the
    <thead> cells and hide forecast-only controls, then restore them on the way
    back so the MEP view is untouched. */
 function applyMode(mode) {
@@ -923,8 +974,9 @@ function applyMode(mode) {
   // paintTypes, the inventory/PPE ones by their loaders below.
   $("size").hidden = true;
   $("contractor").hidden = true;
-  // The fixed 5-column widths only make sense for the forecast table. Disable
-  // them in the other modes so 3/4-column layouts size naturally.
+  // The fixed 6-column widths (now defined once, correctly, in index.html's
+  // own <colgroup>) only make sense for the forecast table. Disable them in
+  // the other modes so 3/4-column layouts size naturally.
   if (colgroup) colgroup.style.display = mode === "forecast" ? "" : "none";
   // The KPI row (Act today / Already out / ...) is Forecast-specific — it
   // counts RED/AMBER/GREEN shortage status, which Safety/Tools inventory
@@ -939,7 +991,7 @@ function applyMode(mode) {
   if (mode === "forecast") {
     head.innerHTML =
       `<th>Material</th><th>What to do</th><th class="n">Stock</th>` +
-      `<th>Runs out</th><th>Trust</th>`;
+      `<th class="n">Total rcvd</th><th>Runs out</th><th>Trust</th>`;
     statuswrap.hidden = false; rule.hidden = false;
     if (legend) legend.hidden = false;
     note.hidden = true;
@@ -1155,6 +1207,7 @@ function paintRows(rows) {
           ${leadTag(r)}</td>
       <td class="n"><div class="big">${num(r.stock)}</div>
           <div class="sub">${num(r.rate_per_day, 1)} / day</div></td>
+      <td class="n"><div class="big">${num(totalReceived(r))}</div></td>
       <td><div>${ro}</div><div class="sub">${roSub}</div></td>
       <td><div class="dots">${DOTS[r.confidence] || "○○○"}</div>
           <div class="sub">${r.consumption_days}d</div></td>

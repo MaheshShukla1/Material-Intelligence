@@ -12,7 +12,7 @@ from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import engine, health, leadtime, schema, subcat, toolcat
+from . import engine, health, leadtime, linkage, schema, subcat, toolcat
 
 ROOT = Path(__file__).resolve().parent.parent
 UPLOADS = ROOT / "data" / "uploads"
@@ -524,7 +524,7 @@ def delete_project(slug: str, confirm: str = ""):
 
 @app.get("/api/forecast/{run_id}")
 def forecast_rows(run_id: str, status: str = "", service: str = "",
-                  subcategory: str = "", q: str = "", overdue: int = 0,
+                  subcategory: str = "", size: str = "", q: str = "", overdue: int = 0,
                   limit: int = 1000):
     f, _ = load_run(run_id)
     if "subcategory" not in f.columns:            # older runs, tag on the fly
@@ -543,6 +543,13 @@ def forecast_rows(run_id: str, status: str = "", service: str = "",
         f = f[f.service == service]
     if subcategory:
         f = f[f.subcategory == subcategory]
+    # Size is a token from linkage.size_tokens() (e.g. "1.5SQMM", "25MM"), the
+    # SAME extraction linkage.py already uses for BOQ matching - never a
+    # second, looser guess at what counts as a size. Recomputed per request
+    # rather than baked into the parquet: cheap regex work over a few hundred
+    # materials at most, same order of cost as subcat.add_subcategory below.
+    if size:
+        f = f[f.material.map(lambda m: size in linkage.size_tokens(m))]
     if q:
         f = f[f.material.str.contains(q.strip().upper(), regex=False)]
     return jsonable(f.head(limit))
@@ -568,6 +575,34 @@ def subcategories(run_id: str):
     allc = f.subcategory.value_counts()
     return {"by_service": by_service,
             "all": [{"name": k, "count": int(v)} for k, v in allc.items()]}
+
+
+@app.get("/api/sizes/{run_id}")
+def sizes(run_id: str, service: str = "", subcategory: str = ""):
+    """Which size tokens exist among materials in this scope (service +
+    optional type/subcategory), with counts. Drives the Forecast tab's
+    cascading Size dropdown, which only appears once a Type is picked AND
+    that type actually has extractable sizes among its materials - answered
+    by the SAME linkage.size_tokens() extraction linkage.py already uses for
+    BOQ matching (see its docstring), not a second guess at what a "size" is.
+    Same scoping rules as /api/subcategories: MEP only, Safety/Tools excluded
+    (a size token from a helmet's name would be meaningless noise here).
+    """
+    f, _ = load_run(run_id)
+    if "subcategory" not in f.columns:
+        f = subcat.add_subcategory(f)
+    if "service" in f.columns:
+        f = f[~f.service.isin(INVENTORY_SERVICES)]
+    if service:
+        f = f[f.service == service]
+    if subcategory:
+        f = f[f.subcategory == subcategory]
+    counts = {}
+    for name in f.material.dropna():
+        for tok in linkage.size_tokens(name):
+            counts[tok] = counts.get(tok, 0) + 1
+    ordered = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return [{"name": k, "count": v} for k, v in ordered]
 
 
 @app.get("/api/material/{run_id}")

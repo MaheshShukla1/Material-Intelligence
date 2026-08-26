@@ -176,6 +176,10 @@ main{max-width:1240px;margin:0 auto;padding:0 22px 72px}
 
 .tablewrap{background:var(--panel);border:1px solid var(--line);border-radius:12px}
 table{width:100%;border-collapse:separate;border-spacing:0}
+/* Fixed layout ONLY for the report table (it has a real <colgroup> driving
+   its widths) - NOT for the drawer's .mini table, which has no colgroup and
+   relies on auto layout's first-row content sizing for its 4 simple columns. */
+.tablewrap table{table-layout:fixed}
 th{position:sticky;top:var(--hdr);z-index:10;text-align:left;font-size:11.5px;
   font-weight:600;color:var(--ink2);text-transform:uppercase;letter-spacing:.4px;
   padding:11px 14px;background:#f6f4f0;white-space:nowrap;

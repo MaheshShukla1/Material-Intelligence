@@ -957,8 +957,19 @@ async function load() {
   syncKpiHighlight();
 }
 
+/* Column widths for the report table's shared <colgroup>, per mode. Single
+   source of truth lives here now (not split between index.html and app.js
+   the way the forecast-only version briefly was) - the same <colgroup>
+   element is reused across modes, so it has to be repopulated on every mode
+   switch rather than statically defined once. PPE doesn't use it (still
+   hidden/auto, unchanged). Inventory's Total rcvd sits in the same relative
+   spot as forecast's -- right after Stock -- for a consistent scanning
+   pattern between the two tabs. */
+const FORECAST_COLS = ["28%", "26%", "9%", "10%", "18%", "9%"];
+const INVENTORY_COLS = ["48%", "10%", "10%", "32%"];
+
 /* Reshape the shared table chrome for the current mode. The forecast table has
-   six columns; inventory needs three; PPE brings its own header. We swap the
+   six columns; inventory has four; PPE brings its own header. We swap the
    <thead> cells and hide forecast-only controls, then restore them on the way
    back so the MEP view is untouched. */
 function applyMode(mode) {
@@ -974,10 +985,18 @@ function applyMode(mode) {
   // paintTypes, the inventory/PPE ones by their loaders below.
   $("size").hidden = true;
   $("contractor").hidden = true;
-  // The fixed 6-column widths (now defined once, correctly, in index.html's
-  // own <colgroup>) only make sense for the forecast table. Disable them in
-  // the other modes so 3/4-column layouts size naturally.
-  if (colgroup) colgroup.style.display = mode === "forecast" ? "" : "none";
+  // Fixed column widths make sense for forecast and inventory (each has its
+  // own real <colgroup> shape); PPE has no colgroup support and stays hidden,
+  // sizing naturally instead.
+  if (colgroup) {
+    if (mode === "forecast" || mode === "inventory") {
+      const widths = mode === "forecast" ? FORECAST_COLS : INVENTORY_COLS;
+      colgroup.innerHTML = widths.map((w) => `<col style="width:${w}">`).join("");
+      colgroup.style.display = "";
+    } else {
+      colgroup.style.display = "none";
+    }
+  }
   // The KPI row (Act today / Already out / ...) is Forecast-specific — it
   // counts RED/AMBER/GREEN shortage status, which Safety/Tools inventory
   // rows and the PPE issue log don't have at all. It used to render
@@ -997,7 +1016,7 @@ function applyMode(mode) {
     note.hidden = true;
   } else if (mode === "inventory") {
     head.innerHTML =
-      `<th>Item</th><th class="n">Stock</th><th>Type</th>`;
+      `<th>Item</th><th class="n">Stock</th><th class="n">Total rcvd</th><th>Type</th>`;
     statuswrap.hidden = true; rule.hidden = true;
     if (legend) legend.hidden = true;
     note.textContent = "Inventory view — count only, no forecast.";
@@ -1085,6 +1104,7 @@ function renderInventory(rows) {
       <td><div class="mat">${esc(r.material)}</div>
           <div class="sub">${esc(r.unit || "")}</div></td>
       <td class="n"><div class="big">${num(r.stock)}</div></td>
+      <td class="n"><div class="big">${num(totalReceived(r))}</div></td>
       <td>${esc(r.tool_type || "—")}${
         r.tool_size ? ` <span class="sub">· size ${esc(r.tool_size)}</span>` : ""}</td>
     </tr>`).join("");

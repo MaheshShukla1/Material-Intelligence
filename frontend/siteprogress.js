@@ -159,7 +159,6 @@
       where.title = "Site Progress's own daily report — different from the Export button in the top-right, which exports the stock register.";
       where.style.cursor = "pointer";
       where.style.color = "var(--violet)";
-      where.style.textDecoration = "underline";   // reads as a link, not a status line -- the whole discoverability gap
       where.onclick = () => openDprModal();
     } catch (e) {}
   }

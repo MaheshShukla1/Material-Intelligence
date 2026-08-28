@@ -835,33 +835,26 @@
     const it = S._byCode[code];
     const rooms = allRoomsList();
     if (!rooms.length) return toast(`No ${curLeafPluralLower(2)} in the structure yet.`);
-    const current = (S.svc.item_rooms || {})[code];
     const existingGroups = (S.svc.item_room_qty || {})[code] || [];
-    // missing/empty entry means "all rooms" (typical) — that is the default state
-    const checked = new Set(current && current.length ? current : rooms.map((r) => r.id));
-    // if this item already uses real per-room quantities, pre-check whichever
-    // rooms are NOT yet in any group (the room set most likely being edited
-    // next) rather than "all rooms" -- ticking "all" on a grouped item would
-    // otherwise look like it re-applies to every room uniformly, which isn't
-    // what grouped items mean anymore.
-    if (existingGroups.length) {
-      const grouped = new Set(existingGroups.flatMap((g) => g.rooms));
-      checked.clear();
-      rooms.forEach((r) => { if (!grouped.has(r.id)) checked.add(r.id); });
-    }
 
     // which rooms are already 100% done for THIS item -- same per-room
     // fraction resolution compute()/frac_for() use server-side (a room's own
-    // override if it has one, else the item's overall "*" value), just read
-    // from the raw item_progress store the service view now exposes. Purely
-    // a display hint (the small ✓ next to a room's name below) and the
-    // "N done" count on each quantity group -- ticking/saving here never
-    // reads or depends on it.
+    // override if it has one, else the item's overall "*" value), read from
+    // the raw item_progress store the service view exposes. Purely a display
+    // hint now (the small ✓ next to a room's name below, and the "N done"
+    // count on each quantity group) -- it does not drive tick-state at all.
     const progNode = (S.svc.item_progress || {})[code] || {};
     const isDone = (roomId) => {
       const v = roomId in progNode ? progNode[roomId] : progNode["*"];
       return (v || 0) >= 1;
     };
+
+    // No automatic tick-state, of any kind -- not "all rooms", not "only
+    // pending ones", nothing computed from applicability/groups/done-status.
+    // Every checkbox starts empty; the engineer ticks exactly the rooms
+    // they're acting on right now, every time. "Select all (typical)" below
+    // is one click away for the genuinely-all-rooms case.
+    const checked = new Set();
 
     const groups = {};
     rooms.forEach((r) => { (groups[r.path] = groups[r.path] || []).push(r); });
@@ -896,13 +889,18 @@
           <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:5px">
           ${rs.map((r) => `<label style="display:flex;align-items:center;gap:5px;font-size:12.5px;cursor:pointer" class="${isDone(r.id) ? "sp-roomdone" : ""}"><input type="checkbox" data-room="${esc(r.id)}" ${checked.has(r.id) ? "checked" : ""}>${esc(r.name)}${isDone(r.id) ? ' <span class="sp-doneck" title="Already marked done">✓</span>' : ""}</label>`).join("")}
           </div>
-        </div>`).join("")}
-      <div style="margin-top:6px"><button type="button" class="btn" id="sp-mark-done" style="border-color:var(--green);color:var(--green)">Mark ticked as done</button>
-      <button type="button" class="btn" id="sp-unmark-done" style="margin-left:8px">Undo done</button>
-      <span class="hint" style="display:block;margin-top:6px">Uses the SAME ticks as Save below — tick the ${curLeafPluralLower(2)} that are actually finished, then either mark them done, save a quantity for them, or both. Ticked the wrong one? Tick it again and hit "Undo done".</span></div>`;
+        </div>`).join("")}`;
+
+    // Mark done / Undo done live in the modal's FIXED FOOTER (see modal()'s
+    // extraFooterHTML param), not inside the scrollable room list -- always
+    // visible, no scrolling needed, same fix on mobile since the footer is
+    // the one part of this modal that was never inside the scroll area.
+    const footerButtons = `
+      <button type="button" class="btn" id="sp-mark-done" style="border-color:var(--green);color:var(--green)">Mark ticked as done</button>
+      <button type="button" class="btn" id="sp-unmark-done">Undo done</button>`;
 
     modal(`${curLeafPlural(2)} → ${esc(code)}`,
-      `${esc(short(it.desc, 70))} — pick which ${curLeafPluralLower(2)} this item applies to. All ${curLeafPluralLower(2)} are ticked by default (typical); untick the exceptions (e.g. ${curLeafPluralLower(2)} where the item mix differs). To record a REAL quantity for a set of ${curLeafPluralLower(2)} (e.g. ones that genuinely need more material), tick just those ${curLeafPluralLower(2)} and enter their quantity above instead.`,
+      `${esc(short(it.desc, 70))} — pick which ${curLeafPluralLower(2)} this item applies to. Nothing is ticked by default; tick exactly the ${curLeafPluralLower(2)} you're updating right now (✓ marks ones already done, for reference). To record a REAL quantity for a set of ${curLeafPluralLower(2)}, tick just those ${curLeafPluralLower(2)} and enter their quantity above instead. Tick the ${curLeafPluralLower(2)} that are actually finished, then hit "Mark ticked as done" in the footer below.`,
       body, async () => {
         const boxes = [...document.querySelectorAll("#sp-modal input[data-room]")];
         const ids = boxes.filter((c) => c.checked).map((c) => c.dataset.room);
@@ -924,7 +922,7 @@
         // planned/used/remaining, which the drawer's stock-forecast message
         // is directly built from.
         await afterSvc();
-      }, `Save ${curLeafPluralLower(2)}`, "min(600px,94vw)");
+      }, `Save ${curLeafPluralLower(2)}`, "min(600px,94vw)", footerButtons);
 
     $("sp-rooms-all").onclick = () => document.querySelectorAll("#sp-modal input[data-room]").forEach((c) => { c.checked = true; });
     $("sp-rooms-none").onclick = () => document.querySelectorAll("#sp-modal input[data-room]").forEach((c) => { c.checked = false; });
@@ -1531,13 +1529,26 @@
   }
 
   // ---------- generic modal ----------
-  function modal(title, sub, bodyHTML, onSave, saveLabel, width) {
+  function modal(title, sub, bodyHTML, onSave, saveLabel, width, extraFooterHTML) {
     closeModal();
     const w = width || "min(600px,94vw)";
+    // extraFooterHTML (optional) sits in the SAME always-visible footer row as
+    // Cancel/Save, on its own left-hand group -- NOT inside bodyHTML, which
+    // lives in .sp-maplist and scrolls independently. A caller that needs
+    // action buttons to survive a long scrollable body (the Rooms modal's
+    // "Mark ticked as done"/"Undo done", previously buried at the bottom of
+    // a 30+ room checkbox list) passes this instead of putting them in the
+    // body. Callers that don't pass it get the exact same markup as before -
+    // a bare "mact" footer with just Cancel/Save, unchanged.
+    const footerClass = extraFooterHTML ? "mact mact-split" : "mact";
+    const footer = extraFooterHTML
+      ? `<div class="${footerClass}"><div class="mact-left">${extraFooterHTML}</div>
+          <div class="mact-right"><button class="btn" id="sp-modal-cancel">Cancel</button><button class="btn primary" id="sp-modal-save">${saveLabel || "Save"}</button></div></div>`
+      : `<div class="${footerClass}"><button class="btn" id="sp-modal-cancel">Cancel</button><button class="btn primary" id="sp-modal-save">${saveLabel || "Save"}</button></div>`;
     const html = `<div class="sheet mid" id="sp-modal"><div class="card wide" style="width:${w}">
       <div class="sheethd"><div><h2>${title}</h2><p>${sub}</p></div><button class="btn" id="sp-modal-x">Close</button></div>
       <div class="sp-maplist">${bodyHTML}</div>
-      <div class="mact"><button class="btn" id="sp-modal-cancel">Cancel</button><button class="btn primary" id="sp-modal-save">${saveLabel || "Save"}</button></div></div></div>`;
+      ${footer}</div></div>`;
     const d = document.createElement("div"); d.innerHTML = html; document.body.appendChild(d.firstChild);
     $("sp-modal-x").onclick = closeModal; $("sp-modal-cancel").onclick = closeModal;
     $("sp-modal").addEventListener("click", (e) => { if (e.target.id === "sp-modal") closeModal(); });

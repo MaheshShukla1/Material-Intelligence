@@ -168,6 +168,41 @@ def parse_ppe_log(path, max_rows=5000):
                     rec[k] = None
                 elif isinstance(v, (dt.datetime, pd.Timestamp)):
                     rec[k] = pd.Timestamp(v).strftime("%Y-%m-%d")
+                elif k == "date":
+                    # Real Excel date cells land in the branch above and come
+                    # out clean. But a "DATE" column is routinely a mix of
+                    # real date cells AND free-typed text in whatever format
+                    # the person happened to type that day ("31-03-2026",
+                    # "2026-06-04", "4/6/2026"...) - passing that text through
+                    # as-is is exactly why the same column shows several
+                    # different formats on screen. Parse it the same way
+                    # regardless of which format it arrived in, so every row
+                    # normalises to the one ISO shape the rest of the app
+                    # already uses for dates (order_by, exhaust_earliest, ...).
+                    s = str(v).strip()
+                    if re.match(r"^\d{4}-\d{2}-\d{2}$", s):
+                        # Already unambiguous (year first, 4 digits) - parse
+                        # directly. dayfirst=True below is for disambiguating
+                        # a genuinely ambiguous DD-MM vs MM-DD pair; fed an
+                        # already-ISO string it can misread which of the
+                        # trailing two groups is day vs month (dateutil
+                        # quirk), silently swapping them. No ambiguity here,
+                        # so there's nothing for dayfirst to resolve.
+                        parsed = pd.to_datetime(s, format="%Y-%m-%d", errors="coerce")
+                    else:
+                        # dayfirst=True because this is Indian site data - an
+                        # ambiguous "04-06-2026" is 4 June, not April 6.
+                        parsed = pd.to_datetime(s, dayfirst=True, errors="coerce")
+                        if pd.isna(parsed):
+                            # try the other reading before giving up - some
+                            # rows may have been pasted in from a non-Indian source
+                            parsed = pd.to_datetime(s, dayfirst=False, errors="coerce")
+                    # Never invent a date: text that genuinely isn't one (a
+                    # typo, a placeholder like "pending") is kept as the
+                    # original text rather than silently dropped or guessed,
+                    # matching the "never invent" rule the rest of this
+                    # codebase already follows for missing/ambiguous data.
+                    rec[k] = parsed.strftime("%Y-%m-%d") if pd.notna(parsed) else s
                 else:
                     rec[k] = str(v).strip()
             records.append(rec)

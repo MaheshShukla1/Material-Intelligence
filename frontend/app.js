@@ -9,10 +9,26 @@ const num = (v, d = 0) =>
     : Number(v).toLocaleString("en-IN", { maximumFractionDigits: d });
 
 const MON = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-const short = (iso) => {
-  if (!iso) return "";
-  const [, m, d] = iso.split("-").map(Number);
-  return `${d} ${MON[m - 1]}`;
+// ONE date format for the whole app - "31 Mar 2026", every date, every table
+// (Forecast's Order-by/Runs-out, the item drawer's daily ledger, PPE's issue
+// log). Previously the Forecast tab used a day+month-only "short" format
+// while PPE and the drawer used other shapes (or none at all - the drawer
+// rendered the raw "YYYY-MM-DD" backend string untouched) - three different
+// looks for the same kind of data. This one function replaces all of them.
+// The backend normalises PPE's DATE column to ISO YYYY-MM-DD regardless of
+// how it was typed in Excel (see parse_ppe_log's date handling); every other
+// date source (order_by, exhaust_earliest/latest, the drawer's daily ledger)
+// was already real ISO from the engine. This only re-renders that ISO
+// string, it never re-parses free text itself. The one rare case the
+// backend can't resolve (text that genuinely isn't a date) comes through
+// unchanged rather than guessed, so it's shown as-is here too instead of
+// being hidden.
+const fmtDate = (v) => {
+  if (!v) return "—";
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v);
+  if (!m) return v;   // not the expected ISO shape - show the original text, don't guess
+  const [, y, mo, d] = m;
+  return `${Number(d)} ${MON[Number(mo) - 1]} ${y}`;
 };
 const todayISO = () => new Date().toISOString().slice(0, 10);
 const daysTo = (iso) =>
@@ -52,8 +68,8 @@ function action(r) {
     return ["soon", "Order this week",
       thin ? "borderline — thin data, worth a look" : "borderline, worth a look"];
   }
-  if (d === 1) return ["soon", `Order by ${short(r.order_by)}`, "tomorrow"];
-  return ["soon", `Order by ${short(r.order_by)}`, `in ${d} days`];
+  if (d === 1) return ["soon", `Order by ${fmtDate(r.order_by)}`, "tomorrow"];
+  return ["soon", `Order by ${fmtDate(r.order_by)}`, `in ${d} days`];
 }
 
 function runsOut(r) {
@@ -63,8 +79,8 @@ function runsOut(r) {
   let sub = "";
   if (r.exhaust_earliest && r.exhaust_latest)
     sub = r.exhaust_earliest === r.exhaust_latest
-      ? short(r.exhaust_earliest)
-      : `${short(r.exhaust_earliest)} – ${short(r.exhaust_latest)}`;
+      ? fmtDate(r.exhaust_earliest)
+      : `${fmtDate(r.exhaust_earliest)} – ${fmtDate(r.exhaust_latest)}`;
   return [main, sub];
 }
 
@@ -1207,7 +1223,7 @@ function renderPPE(recs) {
       <td><div class="mat">${esc(r.name || "—")}</div></td>
       <td>${items.length ? items.map(esc).join(", ") : "—"}</td>
       <td>${esc(r.contractor || "—")}</td>
-      <td class="n">${esc(r.date || "—")}</td>
+      <td class="n">${esc(fmtDate(r.date))}</td>
     </tr>`;
   }).join("");
   // PPE rows are people, not materials - no drill-in drawer.
@@ -1248,7 +1264,7 @@ async function openSheet(name) {
     `${moved.length} days with movement · ${rows.length} days on record`;
   $("spark").innerHTML = sparkline(rows);
   $("srows").innerHTML = moved.slice(-40).reverse().map((r) =>
-    `<tr><td>${r.date}</td><td class="n">${r.qty_in || ""}</td>
+    `<tr><td>${esc(fmtDate(r.date))}</td><td class="n">${r.qty_in || ""}</td>
      <td class="n">${r.qty_out || ""}</td><td class="n">${num(r.balance)}</td></tr>`
   ).join("");
   $("sheet").hidden = false;

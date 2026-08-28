@@ -229,6 +229,20 @@ tbody tr:hover{background:#faf9f6}
 .card .ctl{width:100%}
 .merr{color:var(--red);font-size:12.5px;margin:8px 0 0}
 .mact{display:flex;justify-content:flex-end;gap:9px;margin-top:16px}
+/* Split footer: a left-hand action group (e.g. Site Progress's Rooms modal --
+   quick-select + Mark done/Undo done) alongside the normal right-hand
+   Cancel/Save, both always visible without scrolling the modal body. Only
+   applied when modal() is called with extraFooterHTML - every other modal
+   keeps the plain .mact rule above, completely unaffected. */
+.mact-split{justify-content:space-between;flex-wrap:wrap;row-gap:10px}
+.mact-left{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.mact-right{display:flex;gap:9px;flex-shrink:0}
+@media(max-width:640px){
+  /* Four-plus buttons in one row doesn't fit a phone width - stack the two
+     groups, each group's own buttons still wrap/flow naturally within it. */
+  .mact-split{flex-direction:column;align-items:stretch}
+  .mact-right{justify-content:flex-end}
+}
 
 .card.wide{width:min(560px,92vw);max-height:82vh;overflow:auto}
 .mhd{display:flex;justify-content:space-between;align-items:center;gap:16px;

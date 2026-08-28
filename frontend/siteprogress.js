@@ -153,10 +153,18 @@
       // never realised it was the way to export today's report. A tooltip
       // also tells them apart from the unrelated Export button in the
       // top-right (that one exports the stock register, not this).
+      // d.count is deliberately the number of distinct (service, floor,
+      // activity) rows today's export WILL contain -- see dpr_today()'s own
+      // docstring, "can never disagree with what the export actually shows".
+      // A single project-wide quantity change (no specific room) fans out
+      // to one line per floor the item touches, so ONE click can genuinely
+      // read as "3" here -- that's real, not a bug. "updates" implied "3
+      // clicks" though, which isn't what's being counted; "entries" says
+      // what it actually is without adding any extra words to explain it.
       where.textContent = d.count > 0
-        ? `Export today's DPR (${d.count} update${d.count === 1 ? "" : "s"})`
+        ? `Export today's DPR (${d.count} entr${d.count === 1 ? "y" : "ies"})`
         : "Export DPR";
-      where.title = "Site Progress's own daily report — different from the Export button in the top-right, which exports the stock register.";
+      where.title = "Site Progress's own daily report — different from the Export button in the top-right, which exports the stock register. The count is report lines (one per floor a change touches), not clicks.";
       where.style.cursor = "pointer";
       where.style.color = "var(--violet)";
       where.onclick = () => openDprModal();

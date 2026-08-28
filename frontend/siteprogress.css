@@ -87,6 +87,15 @@
   padding:22px 24px;display:grid;grid-template-columns:auto 1fr;gap:26px;align-items:center;
   margin-bottom:20px}
 @media(max-width:620px){.sp-hero{grid-template-columns:1fr;gap:16px}}
+@property --p{syntax:'<number>';inherits:true;initial-value:0}
+/* Registering --p as a typed number is what makes the ring's own
+   `transition:--p .5s` below actually interpolate instead of snapping --
+   an unregistered custom property is opaque to the transition engine, so
+   that declaration was a no-op until this existed. Ticking a room now
+   visibly fills the ring rather than jumping straight to the new %
+   (endowed-progress effect: a small, real reward for a real action).
+   Browsers without @property support (older Firefox) just keep today's
+   instant-snap behaviour -- purely additive, nothing to break. */
 .sp-ring{--p:0;width:128px;height:128px;border-radius:50%;flex:none;
   background:conic-gradient(var(--green) calc(var(--p)*1%),var(--line2) 0);
   display:flex;align-items:center;justify-content:center;transition:--p .5s}
@@ -100,6 +109,15 @@
 .sp-stat .v{font-size:21px;font-weight:600;letter-spacing:-.3px;font-variant-numeric:tabular-nums}
 .sp-stat .v.g{color:var(--green)}.sp-stat .v.a{color:var(--amber)}.sp-stat .v.r{color:var(--red)}
 .sp-stat .h{font-size:11px;color:var(--ink3);margin:2px 0 0}
+
+/* Shortage ticker -- one quiet line, only rendered when there is real history
+   to show (see renderOverall()). Not a stat card: this is a summary of past
+   events, not a live number the hero ring/stats already cover. */
+.sp-shortagetick{font-size:12.5px;color:var(--ink3);margin:10px 2px 16px;cursor:pointer;width:fit-content}
+.sp-shortagetick:hover{color:var(--ink)}
+.sp-shortagetick:hover b{text-decoration:underline}
+.sp-shortagetick b{color:var(--ink);font-weight:600}
+.sp-shortagetick .g{color:var(--green)}
 
 .sp-secttl{font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:var(--ink3);
   margin:0 2px 12px;display:flex;justify-content:space-between;align-items:center}
@@ -311,6 +329,7 @@
 /* link chip on item rows + clean wide link modal (added) */
 .sp-linkchip{border:none;background:none;font:inherit;font-size:10.5px;color:var(--violet);cursor:pointer;padding:1px 6px;border-radius:5px}.sp-linkchip:hover{background:var(--violetbg)}
 .sp-linkchip.on{color:var(--green)}
+.sp-linkchip.warn{color:var(--amber)}.sp-linkchip.warn:hover{background:var(--amberbg)}
 .sp-labourbadge{border:none;background:var(--violetbg);color:var(--violet);font:inherit;
   font-size:10.5px;font-weight:500;padding:2px 8px;border-radius:20px;cursor:pointer;
   vertical-align:1px}

@@ -352,10 +352,11 @@
     // their sum. Each still fails independently exactly as before (S.pnl/
     // S.real quietly fall back to null on error; the main service fetch
     // still throws and shows the error state) -- only the timing changed.
-    const [svcSettled, pnlSettled, realSettled] = await Promise.allSettled([
+    const [svcSettled, pnlSettled, realSettled, shortSettled] = await Promise.allSettled([
       jget(api("/" + S.slug + "/service/" + encodeURIComponent(S.service) + q)),
       jget(pnlUrl()),
       jget(api("/" + S.slug + "/realistic/" + encodeURIComponent(S.service))),
+      jget(api("/" + S.slug + "/shortage-items/" + encodeURIComponent(S.service))),
     ]);
     if (svcSettled.status === "rejected") {
       sp.innerHTML = `<div class="sp-empty">${esc(briefErr(svcSettled.reason))}</div>`;
@@ -364,6 +365,10 @@
     S.svc = svcSettled.value;
     S.pnl = pnlSettled.status === "fulfilled" ? pnlSettled.value : null;
     S.real = realSettled.status === "fulfilled" ? realSettled.value : null;
+    // {item_code: {episodes, ongoing}} for items with real shortage history
+    // -- see shortage_history.py's own docstring on why most items are
+    // simply absent from this map (they never had a shortage at all).
+    S.shortageItems = shortSettled.status === "fulfilled" ? shortSettled.value : {};
     renderMain();
   }
 
@@ -555,6 +560,13 @@
     const sp = ensureSection();
     sp.innerHTML = `${projBar()}<div class="sp-empty">Loading overall…</div>`;
     let o; try { o = await jget(api("/" + S.slug + "/overall")); } catch (e) { sp.innerHTML = `${projBar()}<div class="sp-empty">${esc(briefErr(e))}</div>`; return; }
+    // Not on the critical path -- the overview must render even if these
+    // fail, so they're fetched separately and quietly fall back to nothing
+    // shown at all (see the empty-state checks below), same pattern as
+    // S.real/S.pnl elsewhere in this file.
+    let shortageSum = null, shortageLife = null;
+    try { shortageSum = await jget(api("/" + S.slug + "/shortage-summary")); } catch (e) {}
+    try { shortageLife = await jget(api("/" + S.slug + "/shortage-summary-lifetime")); } catch (e) {}
     S._ovCache = {};
     const rs = o.rooms_summary || { done: 0, in_progress: 0, not_started: 0, total: 0 };
     const svcRows = Object.entries(o.by_service).map(([s, v]) =>
@@ -568,6 +580,29 @@
         </div>
         <div class="sp-cbody"><div class="sp-ovacts" data-ovacts="${esc(s)}"></div></div>
       </div>`).join("");
+    // Leads with the LIFETIME catch-rate once there's real resolved history
+    // (a persistent trust signal, never wiped by a quiet month -- see
+    // shortage_history.lifetime_summary's own docstring). Before that
+    // exists, falls back to "N flagged this month" (nothing to rate yet).
+    // Renders nothing at all only when there's truly no history anywhere.
+    const hasLifetime = shortageLife && (shortageLife.prevented + shortageLife.materialized) > 0;
+    const hasMonthly = shortageSum && shortageSum.flagged > 0;
+    let shortageTicker = "";
+    if (hasLifetime) {
+      const resolved = shortageLife.prevented + shortageLife.materialized;
+      shortageTicker = `
+        <div class="sp-shortagetick" id="sp-shortagetick" data-scope="lifetime" role="button" tabindex="0">
+          <b>${shortageLife.prevented}</b> of <b>${resolved}</b> stock shortage${resolved === 1 ? "" : "s"} caught in time
+          <span class="g">(${shortageLife.catch_rate}%)</span>
+          ${hasMonthly ? ` · ${shortageSum.flagged} flagged this month` : ""}
+          ${shortageLife.value_protected > 0 ? ` · <span class="g">₹${Math.round(shortageLife.value_protected).toLocaleString("en-IN")} of exposure protected lifetime</span>` : ""}
+        </div>`;
+    } else if (hasMonthly) {
+      shortageTicker = `
+        <div class="sp-shortagetick" id="sp-shortagetick" data-scope="month" role="button" tabindex="0">
+          <b>${shortageSum.flagged}</b> stock shortage${shortageSum.flagged === 1 ? "" : "s"} flagged this month
+        </div>`;
+    }
     sp.innerHTML = `${projBar()}
       <div style="max-width:1560px;margin:0 auto">
         <div class="sp-pills" id="sp-pills"></div>
@@ -580,6 +615,7 @@
             <div class="sp-stat sp-statdiv"><p class="l">${curLeafPlural(2)} — whole site</p><div class="v">${rs.done} <span style="font-size:13px;font-weight:400;color:var(--ink3)">done</span> · ${rs.in_progress} <span style="font-size:13px;font-weight:400;color:var(--ink3)">in progress</span></div><p class="h">of ${rs.total} ${curLeafPluralLower(rs.total)}</p></div>
           </div>
         </div>
+        ${shortageTicker}
         <div class="sp-secttl"><span>By service — tap to see activities, tap an activity to see items</span></div>
         <div id="sp-ovlist">${svcRows}</div>
       </div>`;
@@ -589,6 +625,54 @@
     $("sp-oring").style.setProperty("--p", (o.pct_value_done || 0).toFixed(1));
     $("sp-ovlist").querySelectorAll(".sp-ovrow").forEach((row) =>
       row.addEventListener("click", () => toggleOvService(row.closest(".sp-card"))));
+    const tick = $("sp-shortagetick");
+    if (tick) {
+      const scope = tick.dataset.scope;
+      const open = () => openShortageEpisodesPopover(scope);
+      tick.addEventListener("click", open);
+      tick.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } });
+    }
+  }
+
+  // Drill-down behind the Overall ticker: every flagged episode this month,
+  // across every service (the ticker's own scope) -- makes "1 flagged" a
+  // real click target instead of a dead-end number. Same read-only,
+  // single-button modal pattern as openShortageHistoryPopover() below, just
+  // listing several items instead of one.
+  async function openShortageEpisodesPopover(scope) {
+    let data;
+    try {
+      const endpoint = scope === "lifetime" ? "/shortage-episodes-all" : "/shortage-episodes";
+      data = await jget(api("/" + S.slug + endpoint));
+    }
+    catch (e) { return toast("Failed: " + briefErr(e)); }
+    const episodes = data.episodes || [];
+    const OUTCOME = {
+      prevented: { label: "Prevented", color: "var(--green)" },
+      materialized: { label: "Ran out for real", color: "var(--amber)" },
+      no_longer_needed: { label: "Work finished first", color: "var(--ink3)" },
+      ongoing: { label: "Still flagged", color: "var(--amber)" },
+    };
+    const body = episodes.length ? episodes.map((ep) => {
+      const o = OUTCOME[ep.outcome] || { label: ep.outcome, color: "inherit" };
+      const range = ep.resolved_date ? `${esc(ep.flagged_date)} → ${esc(ep.resolved_date)}` : `${esc(ep.flagged_date)} — ongoing`;
+      const value = ep.value_protected
+        ? `<span style="color:var(--green);font-size:12px">₹${Math.round(ep.value_protected).toLocaleString("en-IN")} protected</span>` : "";
+      return `<div style="padding:9px 0;border-bottom:1px solid var(--line2)">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px">
+          <div><span style="font-size:11px;color:var(--ink3)">${esc(ep.service)} · ${esc(ep.item_code)}</span><br>
+            <b style="font-size:13px">${esc(ep.desc ? short(ep.desc, 50) : ep.item_code)}</b></div>
+          <b style="color:${o.color};font-size:12.5px;white-space:nowrap">${esc(o.label)}</b>
+        </div>
+        <div style="font-size:11.5px;color:var(--ink3);margin-top:2px">${range}</div>
+        ${value}
+      </div>`;
+    }).join("") : `<p style="color:var(--ink3);font-size:13px">No shortages flagged this month.</p>`;
+    modal(scope === "lifetime" ? "Shortage track record — whole project" : "Shortages flagged this month",
+      "Every item tracked automatically from forecast runs — never asked of an engineer.",
+      body, async () => { closeModal(); }, "Close", "min(460px,92vw)");
+    const cancelBtn = $("sp-modal-cancel");
+    if (cancelBtn) cancelBtn.style.display = "none";
   }
 
   async function toggleOvService(card) {
@@ -665,6 +749,11 @@
   // ---------- activities + items (calm style) ----------
   function byCode() { return (S._byCode = Object.fromEntries(S.svc.items.map((i) => [i.code, i]))); }
   function realOf(code) { if (!S.real) return null; return (S.real.items || []).find((x) => x.item_code === code) || null; }
+  // Sparse on purpose -- most items are simply absent (never had a shortage
+  // at all), so this returning null/undefined is the COMMON case, not an
+  // error state. Never fetched per-item; always the one bulk map loaded
+  // alongside S.real (see loadService()/afterSvc() above).
+  function shortageOf(code) { return (S.shortageItems || {})[code] || null; }
   // qty>0 hides labour-only BOQ lines with no material; a quick item always
   // has real material (it was picked from the stock register), it just has
   // no "per room" qty of its own -- its quantity lives in the planned
@@ -743,6 +832,7 @@
       S.room ? editPlannedFromRoom(b.dataset.planned) : editPlanned(b.dataset.planned)));
     $("sp-acts").querySelectorAll("[data-linkedit]").forEach((b) => b.addEventListener("click", () => editItemLink(b.dataset.linkedit)));
     $("sp-acts").querySelectorAll("[data-roomsedit]").forEach((b) => b.addEventListener("click", () => openRoomsModal(b.dataset.roomsedit)));
+    $("sp-acts").querySelectorAll("[data-histedit]").forEach((b) => b.addEventListener("click", () => openShortageHistoryPopover(b.dataset.histedit)));
     $("sp-acts").querySelectorAll("[data-removeitem]").forEach((b) => b.addEventListener("click", () => removeItemFromActivity(b.dataset.removeitem, b.dataset.removeact)));
     $("sp-acts").querySelectorAll("[data-fx]").forEach((b) => b.addEventListener("click", () => openDrawer(b.dataset.fx)));
   }
@@ -760,6 +850,20 @@
     return `<button class="sp-planned" data-planned="${esc(it.code)}" title="Edit planned">${qf(it.planned)} ✎</button><span>${esc(it.unit)} planned${S.room ? " here" : ""}</span>`;
   }
 
+  // Sparse chip -- rendered ONLY when shortageOf(code) has real history (the
+  // common case is nothing, so most rows show nothing extra at all, exactly
+  // the "don't clutter every row" requirement). "warn" (amber) styling only
+  // while something is still actively ongoing; once every episode has
+  // resolved one way or another it settles to the same violet as the other
+  // informational chips -- it's a record to check, not an active alert.
+  function histChip(code) {
+    const h = shortageOf(code);
+    if (!h) return "";
+    const cls = h.ongoing ? "warn" : "";
+    const label = h.ongoing ? "shortage history" : `history (${h.episodes})`;
+    return `<button class="sp-linkchip ${cls}" data-histedit="${esc(code)}" title="${h.episodes} shortage ${h.episodes === 1 ? "event" : "events"} tracked for this item, automatically">🕘 ${esc(label)}</button>`;
+  }
+
   function rowHTML(it, activity) {
     const rl = realOf(it.code); const alert = rl && rl.verdict === "SHORTAGE";
     const links = rl && rl.links ? rl.links : [];
@@ -774,7 +878,8 @@
           ${it.quick ? `<span class="sp-tag" title="added straight from the stock register, not the BOQ file">from stock</span>` : ""}
           ${alert ? `<span class="sp-tag rev">shortage</span>` : ""}
           <button class="sp-linkchip ${linked ? "on" : ""}" data-linkedit="${esc(it.code)}">${linked ? "🔗 linked · edit" : "＋ link stock"}</button>
-          <button class="sp-linkchip" data-roomsedit="${esc(it.code)}">🏠 ${esc(roomsChipLabel(it.code))}</button></div></div>
+          <button class="sp-linkchip" data-roomsedit="${esc(it.code)}">🏠 ${esc(roomsChipLabel(it.code))}</button>
+          ${histChip(it.code)}</div></div>
       <div class="sp-bqty">${plannedControlHTML(it)}</div>
       <div class="sp-entry">
         <div class="sp-entrymain">
@@ -963,7 +1068,44 @@
     }));
   }
 
-  // activity CRUD (engineer-driven) + planned edit
+  // Shortage history: a small, read-only popover for ONE item -- never the
+  // drawer (see shortage_history.py's own docstring on why). Reuses the same
+  // modal() chrome as everything else for visual consistency, but as a
+  // single-button informational view -- there is nothing to save here.
+  async function openShortageHistoryPopover(code) {
+    let data;
+    try {
+      data = await jget(api("/" + S.slug + "/shortage-timeline/" + encodeURIComponent(S.service) + "/" + encodeURIComponent(code)));
+    } catch (e) { return toast("Failed: " + briefErr(e)); }
+    const timeline = data.timeline || [];
+    const OUTCOME = {
+      prevented: { label: "Prevented", color: "var(--green)" },
+      materialized: { label: "Ran out for real", color: "var(--amber)" },
+      no_longer_needed: { label: "Work finished first — no order needed", color: "var(--ink3)" },
+      ongoing: { label: "Still flagged", color: "var(--amber)" },
+    };
+    const it = S._byCode[code];
+    const body = timeline.length ? timeline.map((ep) => {
+      const o = OUTCOME[ep.outcome] || { label: ep.outcome, color: "inherit" };
+      const range = ep.resolved_date ? `${esc(ep.flagged_date)} → ${esc(ep.resolved_date)}` : `${esc(ep.flagged_date)} — ongoing`;
+      const value = ep.value_protected
+        ? `<span style="color:var(--green);font-size:12px">₹${Math.round(ep.value_protected).toLocaleString("en-IN")} of exposure protected</span>` : "";
+      return `<div style="padding:9px 0;border-bottom:1px solid var(--line2)">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px">
+          <b style="color:${o.color};font-size:13px">${esc(o.label)}</b>
+          <span style="font-size:11.5px;color:var(--ink3)">${range}</span>
+        </div>
+        ${value}
+      </div>`;
+    }).join("") : `<p style="color:var(--ink3);font-size:13px">No shortage history recorded yet for this item.</p>`;
+    modal(`Shortage history → ${esc(code)}`,
+      `${esc(short(it ? it.desc : "", 70))} — tracked automatically from forecast runs, never asked of an engineer.`,
+      body, async () => { closeModal(); }, "Close", "min(440px,92vw)");
+    const cancelBtn = $("sp-modal-cancel");
+    if (cancelBtn) cancelBtn.style.display = "none";   // Close alone is enough for a read-only view
+  }
+
+
   async function newActivity() {
     const name = prompt("New activity name (e.g. Wall Piping):", ""); if (!name || !name.trim()) return;
     try { S.svc = await jpost(api("/" + S.slug + "/activity" + roomQ()), { service: S.service, op: "create", name: name.trim() }); afterSvc(); }
@@ -1017,6 +1159,7 @@
   async function afterSvc() {
     try { S.pnl = await jget(pnlUrl()); } catch (e) {}
     try { S.real = await jget(api("/" + S.slug + "/realistic/" + encodeURIComponent(S.service))); } catch (e) {}
+    try { S.shortageItems = await jget(api("/" + S.slug + "/shortage-items/" + encodeURIComponent(S.service))); } catch (e) {}
     renderMain();
   }
 
@@ -1189,6 +1332,7 @@
       S.svc = await jpost(api("/" + S.slug + "/mapping" + roomQ()), { service: S.service, activity: a, codes: [...checked] });
       try { S.pnl = await jget(pnlUrl()); } catch (e) {}
       try { S.real = await jget(api("/" + S.slug + "/realistic/" + encodeURIComponent(S.service))); } catch (e) {}
+      try { S.shortageItems = await jget(api("/" + S.slug + "/shortage-items/" + encodeURIComponent(S.service))); } catch (e) {}
       closeModal(); renderMain();
     }, "Save items", "min(760px,96vw)");
     renderRows("");

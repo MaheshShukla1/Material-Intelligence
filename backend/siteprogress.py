@@ -35,7 +35,7 @@ from pathlib import Path
 import pandas as pd
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile, Response
 
-from . import structure, boq, activity, progress, pnl, linkage, schema, subcat, realtime, itemprog, dpr
+from . import structure, boq, activity, progress, pnl, linkage, schema, subcat, realtime, itemprog, dpr, shortage_history
 
 ROOT = Path(__file__).resolve().parent.parent
 PROJECTS = ROOT / "data" / "projects"
@@ -2151,7 +2151,13 @@ def realistic(slug: str, service: str):
     (progress) with the linked stock's on-hand + burn rate (engine, read-only)
     to say whether stock will finish the work, and the order quantity if not.
     Items with no link fall back to verdict NOT_LINKED — their stock keeps being
-    forecast the ordinary rate-only way on the Forecast tab, untouched."""
+    forecast the ordinary rate-only way on the Forecast tab, untouched.
+
+    Also snapshots every linked item's verdict for THIS run into
+    shortage_log.json (shortage_history.snapshot_run(), idempotent per run —
+    safe to call on every hit) — see shortage_history.py's own module
+    docstring for why this can only track forward from here, never
+    reconstruct old runs after the fact."""
     d = _need(slug)
     items = _load_boq(d, service)
     if items.empty:
@@ -2164,10 +2170,13 @@ def realistic(slug: str, service: str):
                             _planned(d, service), room_qty_groups=room_qty_groups)
     links = _load_links(d).get(service, {})
     rows, names, run, _filtered = _forecast_pool(slug, service)
+    rate_map = _rates(d, service)
 
     used_by_code = {str(r.item_code): r for r in used.itertuples()}
     descs = {str(r.item_code): r.description for r in items.itertuples()}
     full_rows = None   # built at most once, only if a link needs it
+    shortage_log = _read_json(d / "shortage_log.json", []) or []
+    today = dt.date.today().isoformat()
     out, n_short = [], 0
     for code, raw_mats in links.items():
         u = used_by_code.get(code)
@@ -2202,10 +2211,131 @@ def realistic(slug: str, service: str):
         res["message"] = realtime.sentence(res)
         if res["verdict"] == "SHORTAGE":
             n_short += 1
+        if run is not None:
+            on_hand, shortfall = _aggregate_stock_snapshot(res)
+            rate = rate_map.get(str(code))
+            try:
+                rate = float(rate) if rate is not None else None
+            except (TypeError, ValueError):
+                rate = None
+            shortage_log = shortage_history.snapshot_run(
+                shortage_log, today, run, service, code, res["verdict"],
+                remaining_need=item["remaining"], on_hand=on_hand,
+                shortfall=shortfall, rate=rate)
         out.append(res)
+    if run is not None:
+        (d / "shortage_log.json").write_text(json.dumps(shortage_log, ensure_ascii=False))
     return {"service": service, "has_run": run is not None, "run": run,
             "linked_items": len(links), "shortages": n_short,
             "items": out}
+
+
+def _aggregate_stock_snapshot(res):
+    """(on_hand, shortfall) for shortage_history.snapshot_run() from one
+    combine_item() result -- summed across every linked stock material (the
+    common case is exactly one). None for either when nothing is actually
+    known yet (an UNKNOWN/UNKNOWN_FACTOR/NOT_LINKED item's links carry no
+    real on_hand/shortfall figures) -- never a zero standing in for
+    "unknown", matching this module's own "never invent" rule elsewhere."""
+    on_hand_total, shortfall_total, known = 0.0, 0.0, False
+    for link in res.get("links", []):
+        if link.get("on_hand") is not None:
+            on_hand_total += link["on_hand"]
+            known = True
+        if link.get("shortfall") is not None:
+            shortfall_total += link["shortfall"]
+    return (on_hand_total if known else None), (shortfall_total if known else None)
+
+
+@router.get("/{slug}/shortage-summary")
+def shortage_summary(slug: str, service: str = None, year_month: str = None):
+    """The ticker's own data: {"flagged","prevented","materialized",
+    "no_longer_needed","ongoing","value_protected"} for one month (default
+    the latest month tracked). Reads shortage_log.json directly -- nothing
+    here recomputes a verdict, only rolls up what realistic() already
+    snapshotted."""
+    d = _need(slug)
+    log = _read_json(d / "shortage_log.json", []) or []
+    return shortage_history.month_summary(log, service=service, year_month=year_month)
+
+
+@router.get("/{slug}/shortage-summary-lifetime")
+def shortage_summary_lifetime(slug: str, service: str = None):
+    """The PERSISTENT trust signal -- cumulative across the whole project,
+    with a catch_rate percent, so it never disappears just because this
+    particular month had nothing new flagged (see
+    shortage_history.lifetime_summary's own docstring on why that matters)."""
+    d = _need(slug)
+    log = _read_json(d / "shortage_log.json", []) or []
+    return shortage_history.lifetime_summary(log, service=service)
+
+
+@router.get("/{slug}/shortage-episodes")
+def shortage_episodes(slug: str, service: str = None, year_month: str = None):
+    """The ticker's DRILL-DOWN: every individual episode behind its
+    aggregate counts, across every service when `service` isn't given (the
+    Overall view's own scope) -- so "1 shortage flagged this month" is a
+    real click target, not a dead-end number. Item descriptions are attached
+    best-effort per service (from the same BOQ each service's own item list
+    already reads) so the popover can show more than a bare item code."""
+    d = _need(slug)
+    log = _read_json(d / "shortage_log.json", []) or []
+    episodes = shortage_history.month_episodes(log, service=service, year_month=year_month)
+    return {"episodes": _attach_descs(d, episodes)}
+
+
+@router.get("/{slug}/shortage-episodes-all")
+def shortage_episodes_all(slug: str, service: str = None):
+    """Same drill-down shape as shortage-episodes, but for the LIFETIME
+    catch-rate ticker -- every episode ever, not scoped to one month."""
+    d = _need(slug)
+    log = _read_json(d / "shortage_log.json", []) or []
+    episodes = shortage_history.all_episodes(log, service=service)
+    return {"episodes": _attach_descs(d, episodes)}
+
+
+def _attach_descs(d, episodes):
+    """Best-effort item descriptions for a list of shortage episodes, from
+    each episode's own service's BOQ. A genuinely blank BOQ description cell
+    reads as NaN through pandas, which json.dumps refuses to serialise
+    ("Out of range float values are not JSON compliant") -- normalised to
+    None here, the honest JSON-safe way to say "no description on file"."""
+    descs = {}
+    for svc in {e["service"] for e in episodes}:
+        try:
+            items = _load_boq(d, svc)
+            for r in items.itertuples():
+                desc = r.description
+                descs[str(r.item_code)] = None if pd.isna(desc) else desc
+        except Exception:
+            pass
+    for e in episodes:
+        e["desc"] = descs.get(e["item_code"])
+    return episodes
+
+
+@router.get("/{slug}/shortage-timeline/{service}/{item_code}")
+def shortage_timeline(slug: str, service: str, item_code: str):
+    """The small popover's data for ONE item -- never rendered in the main
+    drawer (see shortage_history.item_timeline's own docstring). Empty list
+    when the item has no shortage history at all, which is the common case
+    and exactly why the UI trigger for this should only appear when this
+    list is non-empty, not as a permanent fixture on every item row."""
+    d = _need(slug)
+    log = _read_json(d / "shortage_log.json", []) or []
+    return {"item_code": item_code, "service": service,
+           "timeline": shortage_history.item_timeline(log, service, item_code)}
+
+
+@router.get("/{slug}/shortage-items/{service}")
+def shortage_items(slug: str, service: str):
+    """{item_code: {"episodes","ongoing"}} for every item in this service
+    with real shortage history -- the ONE bulk call the item list needs to
+    decide which rows get a history trigger at all, instead of one request
+    per item. Most items are simply absent from the response."""
+    d = _need(slug)
+    log = _read_json(d / "shortage_log.json", []) or []
+    return shortage_history.items_with_history(log, service)
 
 
 # --- helpers for the forecast-linked bits -------------------------------

@@ -147,13 +147,19 @@
     if (!where || !S.state || !S.state.has_boq) return;   // nothing to report before setup is done
     try {
       const d = await jget(api("/" + S.slug + "/dpr/today"));
-      if (d.count > 0) {
-        where.textContent = `${d.count} update${d.count === 1 ? "" : "s"} today`;
-      } else {
-        where.textContent = "Export DPR";   // always reachable, even with nothing logged yet today
-      }
+      // The word "Export" (and "DPR") must be in this label EVERY time, not
+      // just when nothing's logged yet -- the count-only version ("6 updates
+      // today") read as a status line, not a click target, so engineers
+      // never realised it was the way to export today's report. A tooltip
+      // also tells them apart from the unrelated Export button in the
+      // top-right (that one exports the stock register, not this).
+      where.textContent = d.count > 0
+        ? `Export today's DPR (${d.count} update${d.count === 1 ? "" : "s"})`
+        : "Export DPR";
+      where.title = "Site Progress's own daily report — different from the Export button in the top-right, which exports the stock register.";
       where.style.cursor = "pointer";
       where.style.color = "var(--violet)";
+      where.style.textDecoration = "underline";   // reads as a link, not a status line -- the whole discoverability gap
       where.onclick = () => openDprModal();
     } catch (e) {}
   }

@@ -165,10 +165,13 @@ def rollup_across_floors(entries, all_services):
     lets a caller attach a real ₹ figure by BOQ rate lookup if it wants to;
     floor_label is the SAME "FLOOR" column the site team's own template
     already has: the real floor name when only one was touched (identical
-    to the un-rolled-up behaviour for the common case), or a short "N
-    Floors" summary when the same activity+item spans several -- never a
-    long comma-joined list, which would defeat the entire point of this
-    being the short version."""
+    to the un-rolled-up behaviour for the common case), or every real floor
+    name comma-joined when the same activity+item spans several -- NEVER a
+    synthetic "N Floors" count. A count sits in the exact column real floor
+    names normally appear in and reads as if it WERE one ("6 Floors" looks
+    like a floor that doesn't exist) -- reported directly, and it also
+    throws away the one thing a DPR exists to answer: which floors work
+    actually happened on today."""
     by_service = {s: {} for s in all_services}
     order = {s: [] for s in all_services}
     for e in entries:
@@ -199,12 +202,14 @@ def rollup_across_floors(entries, all_services):
             slot = by_service[svc][(activity, item)]
             qty = round(slot["qty"], 3) if slot["has_qty"] else None
             floors = sorted(slot["floors"])
-            if len(floors) == 1:
-                floor_label = floors[0]
-            elif len(floors) > 1:
-                floor_label = f"{len(floors)} Floors"
-            else:
-                floor_label = "—"
+            # Real floor names, comma-joined -- NEVER a synthetic "N Floors"
+            # count. Reported directly: "6 Floors" sat in the exact column
+            # real floor names normally appear in, and read as if "6 Floors"
+            # were itself a floor -- there's no such floor, and losing WHICH
+            # floors were actually touched breaks the one thing a DPR is
+            # for (knowing where work happened). Same comma-join convention
+            # group_for_export() already uses for room lists, one level up.
+            floor_label = ",".join(floors) if floors else "—"
             rows.append((activity, item, slot["item_code"], qty, slot["unit"], floor_label))
         out[svc] = rows
     return out
@@ -230,7 +235,7 @@ SECTION_FILL = {  # cycle through these for services beyond the first 4, so a
 }
 
 
-def _write_day_block(ws, row, date_str, grouped):
+def _write_day_block(ws, row, date_str, grouped, location_label="FLOOR"):
     ws.cell(row, 1, "DATE:").font = Font(name=FONT, bold=True, size=11)
     ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=5)
     ws.cell(row, 2, date_str).font = Font(name=FONT, size=11)
@@ -257,7 +262,7 @@ def _write_day_block(ws, row, date_str, grouped):
             ws.cell(row, c).border = BORDER
         row += 1
 
-        headers = ["FLOOR", "ACTIVITY", "ITEM", "QTY EXECUTED", "REMARKS"]
+        headers = [location_label, "ACTIVITY", "ITEM", "QTY EXECUTED", "REMARKS"]
         for c, h in zip(range(1, 6), headers):
             hc = ws.cell(row, c, h)
             hc.font = Font(name=FONT, bold=True, size=10)
@@ -278,7 +283,11 @@ def _write_day_block(ws, row, date_str, grouped):
         for activity, item, item_code, qty, unit, floor_label in items:
             fc = ws.cell(row, 1, floor_label)
             fc.font = Font(name=FONT, size=10)
-            fc.alignment = Alignment(horizontal="center", vertical="center")
+            # Left-aligned + wrapped, not centered -- a single floor name
+            # still reads fine either way, but a comma-joined multi-floor
+            # list (the whole point of this fix) needs to wrap onto its own
+            # lines rather than overflow as one long centered line.
+            fc.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
             ac = ws.cell(row, 2, activity.upper())
             ac.font = Font(name=FONT, size=10)
             ic = ws.cell(row, 3, item or "—")
@@ -296,28 +305,32 @@ def _write_day_block(ws, row, date_str, grouped):
     return row
 
 
-def build_workbook(days):
+def build_workbook(days, location_label="FLOOR"):
     """days: [(date_str, rolled_up), ...] -- rollup_across_floors()'s output
     for that date, in the order dates should stack. One sheet, one block per
     day, the SAME five columns the site team's own template already uses
-    (FLOOR, ACTIVITY, ITEM, QTY EXECUTED, REMARKS) -- unchanged headers, on
-    purpose: the fix the site engineer/PM actually asked for is fewer rows,
-    not a new format to learn. ONE row per (activity, item): FLOOR shows the
+    (FLOOR/LEVEL/WING · FLOOR/LOCATION -- whichever this project's own
+    structure kind calls it, via location_label; see dpr.LOCATION_LABEL and
+    siteprogress.py's _location_label()) -- unchanged headers, on purpose:
+    the fix the site engineer/PM actually asked for is fewer rows, not a
+    new format to learn. ONE row per (activity, item): FLOOR shows the
     real floor name when only one was touched that day (identical to the
-    original per-floor behaviour for the common case), or a short "N
-    Floors" summary when the same activity+item spans several -- which is
-    exactly the case that used to produce that many near-duplicate rows."""
+    original per-floor behaviour for the common case), or every real floor
+    name comma-joined when the same activity+item spans several -- which is
+    exactly the case that used to produce that many near-duplicate rows.
+    Never a bare count: a real floor list is still traceable; "N Floors"
+    isn't, and reads as a floor name that doesn't exist."""
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "DPR"
     ws.sheet_view.showGridLines = False
-    widths = {1: 14, 2: 30, 3: 34, 4: 16, 5: 30}
+    widths = {1: 26, 2: 30, 3: 34, 4: 16, 5: 30}
     for c, w in widths.items():
         ws.column_dimensions[get_column_letter(c)].width = w
 
     row = 1
     for date_str, grouped in days:
-        row = _write_day_block(ws, row, date_str, grouped)
+        row = _write_day_block(ws, row, date_str, grouped, location_label=location_label)
         row += 1   # blank row between day blocks
     return wb
 
@@ -632,7 +645,7 @@ def build_full_export(date_label, project_totals, by_service, item_rows, days, l
     if completion:
         build_activity_completion_sheet(wb, completion, completion_by_floor=completion_by_floor)
     build_item_detail_sheet(wb, item_rows)
-    narrative = build_workbook(days)
+    narrative = build_workbook(days, location_label=location_label)
     src = narrative.active
     dst = wb.create_sheet("Daily updates")
     import copy

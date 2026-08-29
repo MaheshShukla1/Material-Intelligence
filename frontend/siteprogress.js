@@ -872,13 +872,21 @@
     const linked = links.length > 0;
     const qtyVal = Math.round((it.used || 0) * 100) / 100;
     const roomBadge = S.room ? `<span class="sp-tag" style="color:var(--violet)" title="This row shows only ${esc(S.roomName || "this " + curLeafLower())}'s own progress, not the whole project's">${esc(S.roomName || "this " + curLeafLower())} only</span>` : "";
+    // The rooms-edit chip opens a picker across EVERY room (applicability +
+    // quantity groups, openRoomsModal()) -- reported directly as confusing
+    // once an engineer has already drilled into ONE specific room: seeing
+    // "204 of 204 rooms" while standing inside "Room 5" reads as "I can
+    // update other rooms from here", which isn't what this scoped view is
+    // for. Hidden entirely when S.room is set; the room-scoped progress
+    // control (plannedControlHTML below, via roomQ()) is the correct way
+    // to update THIS room specifically. Nothing else about the row changes.
     return `<div class="sp-brow" data-code="${esc(it.code)}">
       <div class="sp-bname"><span class="code">${esc(it.code)}</span>${esc(short(it.desc))}
         <div class="sp-bmeta"><span class="sp-tag">${esc(it.sub)}</span>${cons}${roomBadge}
           ${it.quick ? `<span class="sp-tag" title="added straight from the stock register, not the BOQ file">from stock</span>` : ""}
           ${alert ? `<span class="sp-tag rev">shortage</span>` : ""}
           <button class="sp-linkchip ${linked ? "on" : ""}" data-linkedit="${esc(it.code)}">${linked ? "🔗 linked · edit" : "＋ link stock"}</button>
-          <button class="sp-linkchip" data-roomsedit="${esc(it.code)}">🏠 ${esc(roomsChipLabel(it.code))}</button>
+          ${S.room ? "" : `<button class="sp-linkchip" data-roomsedit="${esc(it.code)}">🏠 ${esc(roomsChipLabel(it.code))}</button>`}
           ${histChip(it.code)}</div></div>
       <div class="sp-bqty">${plannedControlHTML(it)}</div>
       <div class="sp-entry">

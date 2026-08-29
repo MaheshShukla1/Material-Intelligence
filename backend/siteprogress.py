@@ -224,13 +224,24 @@ def _qty_for_room(d, service, item_code, room_id, frac):
     """The real quantity one specific captured action represents: the room's
     own quantity (room_qty_groups override if the item uses them -- reuses
     itemprog's own group-resolution helper rather than reimplementing it --
-    else the item's plain per-room qty from the BOQ) x the fraction just
-    set. NOT a true delta from the room's PREVIOUS fraction (no history is
-    kept -- see dpr.py's module docstring on why this logs the fact of an
-    action, not a diff of two states), so two saves the same day update in
-    place (record_change()'s own job) rather than summing. Returns
-    (qty, unit) -- (None, None) when no real quantity is knowable, never a
-    guessed number."""
+    else the item's effective per-room qty) x the fraction just set. NOT a
+    true delta from the room's PREVIOUS fraction (no history is kept -- see
+    dpr.py's module docstring on why this logs the fact of an action, not a
+    diff of two states), so two saves the same day update in place
+    (record_change()'s own job) rather than summing. Returns (qty, unit) --
+    (None, None) when no real quantity is knowable, never a guessed number.
+
+    "Effective per-room qty" (no groups case) MUST account for a whole-
+    project planned-quantity override (save_planned(), the (pencil) edit),
+    not just the raw BOQ qty column -- confirmed against real production
+    data: every quick-added item (add_quick_item() starts qty at 0, per its
+    own docstring) still logged qty=0.0 forever, even on items whose real
+    total HAD been set afterward via that same pencil, because that edit
+    writes planned_total to planned.json, never back into a per-room qty.
+    Divides the override by the SAME applicable-room count
+    _applicable_rooms() resolves (mirrors itemprog.compute()'s own
+    denominator exactly, per that function's own docstring), so this never
+    quietly disagrees with how planned_total itself was derived."""
     groups = _item_room_qty(d).get(service, {}).get(str(item_code))
     room_qty = None
     if groups:
@@ -242,9 +253,19 @@ def _qty_for_room(d, service, item_code, room_id, frac):
         row = boqdf[boqdf.item_code.astype(str) == str(item_code)]
         if row.empty:
             return None, None
-        v = row.iloc[0].get("qty")
-        room_qty = float(v) if v is not None else None
         unit = row.iloc[0].get("unit")
+        override = _planned(d, service).get(str(item_code))
+        if override is not None:
+            try:
+                planned_total = float(override)
+                n_rooms = len(_applicable_rooms(d, service, item_code))
+                if n_rooms:
+                    room_qty = planned_total / n_rooms
+            except (TypeError, ValueError):
+                pass
+        if room_qty is None:
+            v = row.iloc[0].get("qty")
+            room_qty = float(v) if v is not None else None
     else:
         boqdf = _load_boq(d, service)
         row = boqdf[boqdf.item_code.astype(str) == str(item_code)]
@@ -321,7 +342,7 @@ def _log_dpr_change(d, service, room_id, item_code, frac=None):
             qty, unit = _qty_for_room(d, service, item_code, room_id, frac)
         for act in acts:
             dpr.record_change(log, today, service, info["location"], act, info["name"],
-                              item=item_desc, qty=qty, unit=unit)
+                              item=item_desc, qty=qty, unit=unit, item_code=str(item_code))
     else:
         rooms_map = _room_location_map(d)
         appl = _applicable_rooms(d, service, item_code)
@@ -349,7 +370,8 @@ def _log_dpr_change(d, service, room_id, item_code, frac=None):
                             unit = u or unit
                             has_qty = True
                 dpr.record_change(log, today, service, floor, act, None, item=item_desc,
-                                  qty=(round(qty_total, 3) if has_qty else None), unit=unit)
+                                  qty=(round(qty_total, 3) if has_qty else None), unit=unit,
+                                  item_code=str(item_code))
     _save_dpr_log(d, log)
 
 
@@ -1451,7 +1473,6 @@ def export_dpr(slug: str, start: str, end: str = None):
     if not struct:
         raise HTTPException(400, "no structure yet")
     location_label = _location_label(d)
-    leaf_label = _leaf_label(d)
 
     boqdf = _load_boq(d)
     services = sorted(boqdf.service.unique().tolist()) if not boqdf.empty else []
@@ -1504,7 +1525,12 @@ def export_dpr(slug: str, start: str, end: str = None):
     while cur <= end_d:
         date_list.append(cur.isoformat())
         cur += dt.timedelta(days=1)
-    days = [(ds, dpr.group_for_export(by_date.get(ds, []), services, leaf_label=leaf_label)) for ds in date_list]
+    # Rolled up ACROSS floors, per day -- the real fix for "bahut bada"
+    # (the same activity+item touching several floors used to produce that
+    # many near-duplicate lines in this exact sheet). Same real entries as
+    # before, aggregated one level higher; nothing about what actually
+    # happened is lost, see dpr.rollup_across_floors's own docstring.
+    days = [(ds, dpr.rollup_across_floors(by_date.get(ds, []), services)) for ds in date_list]
 
     date_label = start if start == end else f"{start} to {end}"
     prog = _load_progress(d).df

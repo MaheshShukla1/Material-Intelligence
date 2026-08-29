@@ -37,7 +37,7 @@ from openpyxl.utils import get_column_letter
 # --------------------------------------------------------------------------
 # Layer 1 — auto-capture. Pure data, no I/O here (the caller owns the file).
 # --------------------------------------------------------------------------
-def record_change(log, date_str, service, floor, activity, room, item=None, qty=None, unit=None):
+def record_change(log, date_str, service, floor, activity, room, item=None, qty=None, unit=None, item_code=None):
     """Append (or UPDATE) one captured fact in `log` (a plain list, e.g.
     loaded from dpr_log.json). `item`/`qty`/`unit` are optional (older log
     entries on disk won't have them -- group_for_export() below tolerates
@@ -46,6 +46,10 @@ def record_change(log, date_str, service, floor, activity, room, item=None, qty=
     x the fraction just set -- see siteprogress.py's _log_dpr_change() for
     exactly how that's resolved; never a guess, and left None for the
     OVERALL/no-room case where no honest room-scoped quantity exists).
+    `item_code` (optional, not part of the uniqueness key -- one description
+    always maps to one code) lets a later rollup (rollup_across_floors())
+    look the real ₹ rate up by code rather than fuzzy-matching description
+    text back to a BOQ row. Older entries simply have it as None.
 
     Same (date, service, floor, activity, room, item) touched again the same
     day UPDATES that entry's qty in place rather than adding a second row --
@@ -58,9 +62,11 @@ def record_change(log, date_str, service, floor, activity, room, item=None, qty=
         if (e["date"], e["service"], e["floor"], e["activity"],
             e.get("room"), e.get("item")) == key:
             e["qty"], e["unit"] = qty, unit
+            e["item_code"] = item_code
             return log
     log.append({"date": date_str, "service": service, "floor": floor,
-               "activity": activity, "room": room, "item": item, "qty": qty, "unit": unit})
+               "activity": activity, "room": room, "item": item, "qty": qty,
+               "unit": unit, "item_code": item_code})
     return log
 
 
@@ -140,6 +146,70 @@ def group_for_export(day_entries, all_services, leaf_label="ROOM"):
     return out
 
 
+def rollup_across_floors(entries, all_services):
+    """The SAME real entries group_for_export() uses, aggregated one level
+    higher: by (activity, item) only, qty SUMMED across every floor/room --
+    "Wall Piping, 25MM PVC Bend, 396 NOS total", not six separate per-floor
+    lines for the same activity+item. Floors are disjoint room sets, so
+    summing their already-deduplicated per-floor quantities across floors
+    never double-counts (group_for_export's own per-floor sum already
+    guarantees that within one floor).
+
+    Reported directly: a real site engineer/PM complaint that the DAILY
+    UPDATES sheet becomes "bahut bada" (very large) the moment one activity
+    touches several floors in a day -- this is the short version of the
+    exact same real numbers, not a different calculation.
+
+    Returns {service: [(activity, item, item_code, qty, unit, floor_label),
+    ...]} -- item_code (may be None for older, pre-item_code log entries)
+    lets a caller attach a real ₹ figure by BOQ rate lookup if it wants to;
+    floor_label is the SAME "FLOOR" column the site team's own template
+    already has: the real floor name when only one was touched (identical
+    to the un-rolled-up behaviour for the common case), or a short "N
+    Floors" summary when the same activity+item spans several -- never a
+    long comma-joined list, which would defeat the entire point of this
+    being the short version."""
+    by_service = {s: {} for s in all_services}
+    order = {s: [] for s in all_services}
+    for e in entries:
+        svc = e["service"]
+        if svc not in by_service:
+            by_service[svc] = {}
+            order[svc] = []
+        key = (e["activity"], e.get("item"))
+        if key not in by_service[svc]:
+            by_service[svc][key] = {"qty": 0.0, "unit": e.get("unit"), "has_qty": False,
+                                    "floors": set(), "item_code": e.get("item_code")}
+        slot = by_service[svc][key]
+        if key not in order[svc]:
+            order[svc].append(key)
+        if e.get("qty") is not None:
+            slot["qty"] += e["qty"]
+            slot["has_qty"] = True
+            slot["unit"] = e.get("unit") or slot["unit"]
+        if e.get("floor"):
+            slot["floors"].add(e["floor"])
+        if e.get("item_code") and not slot["item_code"]:
+            slot["item_code"] = e["item_code"]
+
+    out = {}
+    for svc in all_services:
+        rows = []
+        for (activity, item) in order.get(svc, []):
+            slot = by_service[svc][(activity, item)]
+            qty = round(slot["qty"], 3) if slot["has_qty"] else None
+            floors = sorted(slot["floors"])
+            if len(floors) == 1:
+                floor_label = floors[0]
+            elif len(floors) > 1:
+                floor_label = f"{len(floors)} Floors"
+            else:
+                floor_label = "—"
+            rows.append((activity, item, slot["item_code"], qty, slot["unit"], floor_label))
+        out[svc] = rows
+    return out
+
+
 # --------------------------------------------------------------------------
 # Layer 3 — the formatter. Pure function: grouped data in, Workbook out.
 # --------------------------------------------------------------------------
@@ -160,7 +230,7 @@ SECTION_FILL = {  # cycle through these for services beyond the first 4, so a
 }
 
 
-def _write_day_block(ws, row, date_str, grouped, location_label="FLOOR"):
+def _write_day_block(ws, row, date_str, grouped):
     ws.cell(row, 1, "DATE:").font = Font(name=FONT, bold=True, size=11)
     ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=5)
     ws.cell(row, 2, date_str).font = Font(name=FONT, size=11)
@@ -187,7 +257,7 @@ def _write_day_block(ws, row, date_str, grouped, location_label="FLOOR"):
             ws.cell(row, c).border = BORDER
         row += 1
 
-        headers = [location_label, "ACTIVITY", "ITEM", "QTY EXECUTED", "REMARKS"]
+        headers = ["FLOOR", "ACTIVITY", "ITEM", "QTY EXECUTED", "REMARKS"]
         for c, h in zip(range(1, 6), headers):
             hc = ws.cell(row, c, h)
             hc.font = Font(name=FONT, bold=True, size=10)
@@ -205,17 +275,11 @@ def _write_day_block(ws, row, date_str, grouped, location_label="FLOOR"):
             row += 1
             continue
 
-        floor_start_row = row
-        prev_floor = None
-        for floor, activity_text, item, qty, unit in items:
-            if floor != prev_floor and prev_floor is not None and row - 1 > floor_start_row:
-                ws.merge_cells(start_row=floor_start_row, start_column=1, end_row=row - 1, end_column=1)
-            if floor != prev_floor:
-                floor_start_row = row
-            fc = ws.cell(row, 1, floor)
+        for activity, item, item_code, qty, unit, floor_label in items:
+            fc = ws.cell(row, 1, floor_label)
             fc.font = Font(name=FONT, size=10)
             fc.alignment = Alignment(horizontal="center", vertical="center")
-            ac = ws.cell(row, 2, activity_text)
+            ac = ws.cell(row, 2, activity.upper())
             ac.font = Font(name=FONT, size=10)
             ic = ws.cell(row, 3, item or "—")
             ic.font = Font(name=FONT, size=10, italic=(not item), color="9A9890" if not item else "000000")
@@ -228,48 +292,32 @@ def _write_day_block(ws, row, date_str, grouped, location_label="FLOOR"):
                 qc.font = Font(name=FONT, size=10, italic=True, color="9A9890")
             for c in range(1, 6):
                 ws.cell(row, c).border = BORDER
-            prev_floor = floor
             row += 1
-        if row - 1 > floor_start_row:
-            ws.merge_cells(start_row=floor_start_row, start_column=1, end_row=row - 1, end_column=1)
     return row
 
 
-def build_workbook(days, location_label="FLOOR"):
-    """days: [(date_str, grouped), ...] -- grouped is group_for_export()'s
-    output for that date, in the order dates should stack. One sheet, one
-    block per day, exactly matching the site team's own printed layout.
-
-    location_label: the header text for the first column. record_change()/
-    group_for_export() already treat "floor" as an opaque grouping string --
-    they work unchanged for a mall (Level > Zone) or a hospital (Wing > Floor
-    > Room, one level deeper than hotel/mall) as long as the CALLER passes
-    the room's full container path joined into one string (e.g. "Wing A ·
-    Floor 3" for a hospital room, from Structure.rooms()'s own `path`, minus
-    the project name at path[0]) -- this label is only the column header text,
-    picked from the project's structure kind (LOCATION_LABEL below), the same
-    way siteprogress.js already picks "Room" vs "Zone" from structure.kind."""
+def build_workbook(days):
+    """days: [(date_str, rolled_up), ...] -- rollup_across_floors()'s output
+    for that date, in the order dates should stack. One sheet, one block per
+    day, the SAME five columns the site team's own template already uses
+    (FLOOR, ACTIVITY, ITEM, QTY EXECUTED, REMARKS) -- unchanged headers, on
+    purpose: the fix the site engineer/PM actually asked for is fewer rows,
+    not a new format to learn. ONE row per (activity, item): FLOOR shows the
+    real floor name when only one was touched that day (identical to the
+    original per-floor behaviour for the common case), or a short "N
+    Floors" summary when the same activity+item spans several -- which is
+    exactly the case that used to produce that many near-duplicate rows."""
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "DPR"
     ws.sheet_view.showGridLines = False
-    # column 1's width must fit the LONGEST location string that will
-    # actually appear -- "13TH" (hotel) and "Wing A · Floor 3" (hospital)
-    # need very different widths; sizing to a fixed 9 clipped the hospital
-    # case. Widened to whichever is longer: the header label or any day's
-    # actual location values.
-    longest = len(location_label)
-    for _, grouped in days:
-        for rows in grouped.values():
-            for floor, *_rest in rows:
-                longest = max(longest, len(floor))
-    widths = {1: max(9, longest + 2), 2: 40, 3: 26, 4: 16, 5: 30}
+    widths = {1: 14, 2: 30, 3: 34, 4: 16, 5: 30}
     for c, w in widths.items():
         ws.column_dimensions[get_column_letter(c)].width = w
 
     row = 1
     for date_str, grouped in days:
-        row = _write_day_block(ws, row, date_str, grouped, location_label)
+        row = _write_day_block(ws, row, date_str, grouped)
         row += 1   # blank row between day blocks
     return wb
 
@@ -408,8 +456,6 @@ def build_summary_sheet(wb, date_label, project_totals, by_service, generated_at
     ws.merge_cells(start_row=row + 1, start_column=1, end_row=row + 2, end_column=7)
     ws.row_dimensions[row + 1].height = 28
     return ws
-
-
 def _inr(v):
     if v is None:
         return "—"
@@ -574,14 +620,19 @@ def build_full_export(date_label, project_totals, by_service, item_rows, days, l
     """The complete DPR: Summary (first, MD-facing) + Activity completion
     (real Room-Detail tick data, when supplied) + Item detail (the site
     team's own existing template, mapped items only) + the day-by-day
-    narrative log."""
+    narrative log -- now the CONCISE, rolled-up-across-floors version (see
+    build_workbook's own docstring), same column headers as before.
+
+    days: [(date_str, rollup_across_floors_output), ...] -- already rolled
+    up by the caller (export_dpr() in siteprogress.py), same real entries
+    the old floor-by-floor version used, just aggregated one level higher."""
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
     build_summary_sheet(wb, date_label, project_totals, by_service, generated_at=generated_at)
     if completion:
         build_activity_completion_sheet(wb, completion, completion_by_floor=completion_by_floor)
     build_item_detail_sheet(wb, item_rows)
-    narrative = build_workbook(days, location_label=location_label)
+    narrative = build_workbook(days)
     src = narrative.active
     dst = wb.create_sheet("Daily updates")
     import copy

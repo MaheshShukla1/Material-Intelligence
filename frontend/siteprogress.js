@@ -1369,11 +1369,54 @@
         const hint = !widen ? `<button type="button" class="linkbtn" id="sp-quickwiden" style="display:block;margin-top:8px">Search other services too</button>` : "";
         return `<p class="sub" style="padding:10px 2px">${esc(msg)}</p>${hint}`;
       }
-      return list.map((m) => `<div class="sp-maprow" data-mat="${esc(m.name)}">
-        <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(m.name)}${m.other_service ? ` <span class="sub">· from ${esc(m.other_service)}</span>` : ""}</span>
-        <span class="sub" style="white-space:nowrap">${esc(m.unit || "")}</span>
-        <button type="button" class="linkbtn" data-quickpick="${esc(m.name)}" style="white-space:nowrap">${m.already ? "✓ added" : "+ Add"}</button>
-      </div>`).join("");
+      // batch_siblings (linkage.batch_siblings on the backend): real other
+      // register rows that are very likely the SAME material, differing
+      // only in a batch/coil/roll size ("...BLACK (90 MTR/COIL)" vs
+      // "...(270 MTR/COIL)") -- the actual reported case. GROUPED into ONE
+      // row here (not repeated once per batch, which was confusing on its
+      // own and made it easy to click "+ Add" on each batch separately by
+      // habit -- the actual reported outcome: the same material landing as
+      // 3 separate items instead of one). Every batch in the group is
+      // pre-ticked -- the detector is already a safe, exact-match check
+      // (colour/grade/diameter never group together, see linkage.py), so
+      // starting from "all in, untick what you don't want" is one click for
+      // the common case instead of three, while still leaving the decision
+      // to the engineer. A group only renders grouped while NONE of its
+      // batches has been added yet -- once even one has, combining stops
+      // being a single clean "add" action, so each remaining one is shown
+      // on its own instead of a confusing half-combined state.
+      const byName = {}; list.forEach((m) => { byName[m.name] = m; });
+      const rendered = new Set();
+      const rows = [];
+      for (const m of list) {
+        if (rendered.has(m.name)) continue;
+        rendered.add(m.name);
+        const sibs = (m.batch_siblings || []).filter((s) => byName[s] && !rendered.has(s));
+        const groupMembers = [m, ...sibs.map((s) => byName[s])];
+        const anyAlready = groupMembers.some((gm) => gm.already);
+        if (sibs.length && !anyAlready) {
+          sibs.forEach((s) => rendered.add(s));
+          const base = m.name.replace(/\(.*\)\s*$/, "").trim() || m.name;
+          const tagFor = (n) => n.replace(base, "").trim() || n;
+          const chips = groupMembers.map((gm) =>
+            `<label class="sp-sibchip"><input type="checkbox" class="sp-groupcb" value="${esc(gm.name)}" checked> ${esc(tagFor(gm.name))}</label>`).join("");
+          rows.push(`<div class="sp-maprow" data-mat="${esc(m.name)}">
+            <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(base)} <span class="sub">· ${groupMembers.length} batches</span></span>
+            <span class="sub" style="white-space:nowrap">${esc(m.unit || "")}</span>
+            <button type="button" class="linkbtn" data-quickpick-group="${esc(m.name)}" style="white-space:nowrap">+ Add</button>
+          </div>
+          <div class="sp-siblingrow" data-primary="${esc(m.name)}">
+            <span class="sub">Untick any batch that isn't really the same —</span>${chips}
+          </div>`);
+        } else {
+          rows.push(`<div class="sp-maprow" data-mat="${esc(m.name)}">
+            <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(m.name)}${m.other_service ? ` <span class="sub">· from ${esc(m.other_service)}</span>` : ""}</span>
+            <span class="sub" style="white-space:nowrap">${esc(m.unit || "")}</span>
+            <button type="button" class="linkbtn" data-quickpick="${esc(m.name)}" style="white-space:nowrap">${m.already ? "✓ added" : "+ Add"}</button>
+          </div>`);
+        }
+      }
+      return rows.join("");
     };
     const wireList = () => {
       document.querySelectorAll("[data-quickpick]").forEach((b) => b.addEventListener("click", async () => {
@@ -1390,7 +1433,30 @@
           S.svc = await jpost(api("/" + S.slug + "/quick-item" + roomQ()), { service: S.service, activity, material });
           b.textContent = "✓ added"; b.disabled = false;
           const row = b.closest("[data-mat]"); if (row) row.style.opacity = ".55";
-          toast(`Added "${short(material, 34)}".`);
+          toast(`Added "${short(material, 34)}". Same material in another batch/coil size? Use 🔗 linked · edit on this item to add it too.`);
+        } catch (e) { b.disabled = false; b.textContent = "+ Add"; toast("Failed: " + briefErr(e)); }
+      }));
+      // Grouped row's single Add -- every TICKED batch in its own sibling-row
+      // goes in as ONE combined item, one click, no separate trip to the
+      // link editor (see renderList's own note on why this is grouped, not
+      // repeated per batch). Untick a batch first to leave it out.
+      document.querySelectorAll("[data-quickpick-group]").forEach((b) => b.addEventListener("click", async () => {
+        const primary = b.dataset.quickpickGroup;
+        const row = b.closest("[data-mat]");
+        const sibRow = row ? row.nextElementSibling : null;
+        const materials = (sibRow && sibRow.classList.contains("sp-siblingrow"))
+          ? [...sibRow.querySelectorAll(".sp-groupcb:checked")].map((cb) => cb.value)
+          : [primary];
+        if (!materials.length) { toast("Tick at least one batch to add."); return; }
+        b.disabled = true; b.textContent = "…";
+        try {
+          S.svc = await jpost(api("/" + S.slug + "/quick-item" + roomQ()), { service: S.service, activity, materials });
+          b.textContent = "✓ added"; b.disabled = false;
+          if (row) row.style.opacity = ".55";
+          if (sibRow) sibRow.style.display = "none";
+          toast(materials.length > 1
+            ? `Added, combined across ${materials.length} batches.`
+            : `Added "${short(materials[0], 34)}".`);
         } catch (e) { b.disabled = false; b.textContent = "+ Add"; toast("Failed: " + briefErr(e)); }
       }));
       const wb = $("sp-quickwiden");
@@ -1407,7 +1473,7 @@
     };
 
     modal(`Add item from stock → ${esc(activity)}`,
-      `Pick a material straight from the ${esc(S.service)} stock register — no BOQ line needed. It's added to this activity at 0 planned quantity (set that with ✎ afterwards, like any item) and linked to that exact stock material immediately.`,
+      `Pick a material straight from the ${esc(S.service)} stock register — no BOQ line needed. It's added to this activity at 0 planned quantity (set that with ✎ afterwards, like any item) and linked to that exact stock material immediately. If the same wire/pipe shows up as several rows purely because it arrived in different coil or batch sizes, add one now, then use its own 🔗 linked · edit to add the others — one item, stock combined.`,
       `<input class="ctl" id="sp-quicksearch" placeholder="Search stock materials…" style="width:100%;margin-bottom:10px">
        <div id="sp-quicklist" class="sp-maplist">${renderList("")}</div>
        <div id="sp-quickwidewrap"></div>`,
@@ -1616,7 +1682,49 @@
     const it = S._byCode[code]; const rl = realOf(code);
     let stockHTML = "";
     if (rl && rl.links && rl.links.length) {
-      stockHTML = rl.links.map((L) => {
+      // Group linked materials by their real base name (same "strip the
+      // trailing batch/coil/bag size" rule the picker itself uses) -- e.g.
+      // "...WIRE BLACK (90 MTR/COIL)" and "...(270 MTR/COIL)" collapse to
+      // ONE combined row, while a genuinely different material also linked
+      // to this item (wire + conduit, per the Link stock modal's own
+      // example) still gets its own separate row, never wrongly summed
+      // into the wire's total.
+      //
+      // Reported directly: a "total" box ADDED on top of the existing
+      // per-batch breakdown was itself more confusing, not less -- a site
+      // engineer now had to read FOUR blocks of numbers instead of one to
+      // find the real total. The fix is to make this look like every other
+      // item's stock line -- ONE row, in the SAME format an unlinked-batch
+      // item already uses -- not a new shape bolted on top of the old one.
+      const stripBatch = (n) => String(n).replace(/\(.*\)\s*$/, "").trim() || String(n);
+      const groups = {}; const order = [];
+      for (const L of rl.links) {
+        const base = stripBatch(L.material);
+        if (!groups[base]) { groups[base] = []; order.push(base); }
+        groups[base].push(L);
+      }
+      const rows = order.map((base) => {
+        const members = groups[base];
+        if (members.length === 1) return members[0];   // unchanged single-material case
+        // Combined stand-in for the whole batch group, same shape a real L
+        // has -- so it renders through the exact same template below with
+        // no separate code path or visual style.
+        let onHand = null, issued = null, recv = null, rate = null;
+        for (const L of members) {
+          if (L.on_hand != null) onHand = (onHand || 0) + L.on_hand;
+          if (L.total_consumed != null) issued = (issued || 0) + L.total_consumed;
+          if (L.received != null) recv = (recv || 0) + L.received;
+          if (L.rate_per_day != null) rate = (rate || 0) + L.rate_per_day;
+        }
+        return {
+          material: base, unit: members[0].unit,
+          on_hand: onHand, total_consumed: issued, received: recv, rate_per_day: rate,
+          engine_days_left: (onHand != null && rate) ? onHand / rate : null,
+          units_match: members[0].units_match, factor: members[0].factor,
+          verdict: rl.verdict,   // the ITEM's own verdict already accounts for the combined total
+        };
+      });
+      stockHTML = rows.map((L) => {
         const recv = L.received == null ? "" : ` · <b class="sp-recv">${qf(L.received)}</b> received to date`;
         const cons = L.rate_per_day == null ? "" : ` · ≈${qf(L.rate_per_day)}/day`;
         // Cross-check THIS material's own issued-vs-used gap -- per

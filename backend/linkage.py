@@ -35,6 +35,67 @@ def _norm(s):
                   re.sub(r"[^A-Z0-9 ./]+", " ", str(s).upper())).strip()
 
 
+# A store's own register often splits one real material into several rows
+# purely because it arrived in different batch/coil/roll sizes -- "2.5 SQMM
+# FLEXIBLE WIRE BLACK (90 MTR/COIL)" and "...(270 MTR/COIL)" are the SAME
+# wire, not two materials -- and the exact same shape shows up for cement
+# bags ("OPC 53 GRADE CEMENT (50 KG/BAG)" vs "(25 KG/BAG)"), pipe lengths
+# ("4 INCH PVC PIPE (6 MTR/PIPE)" vs "(3 MTR/PIPE)"), paint drums, and any
+# other material a register happens to split by container size -- this is
+# never wire-specific, only the SHAPE of a trailing parenthesised qualifier
+# matters, never the words inside it.
+#
+# This strips ONLY that trailing "(qty unit[/word])" batch-size qualifier --
+# a narrow, deterministic pattern, not general fuzzy matching -- so
+# "...WIRE BLACK (...)" and "...WIRE RED (...)" still land on different base
+# names (colour is a real difference; batch size isn't), and "1.5 SQMM..."
+# vs "2.5 SQMM..." (a genuinely different product) are untouched since the
+# differing number sits BEFORE the material name, not inside a trailing
+# parenthesised qualifier. Exact-match on the stripped base is intentionally
+# much stricter than match()'s own scored fuzzy matching below: the only
+# thing this needs to recognise is "same name, different parenthesised
+# batch/container size", so an exact match on everything else is the safe,
+# low-false-positive way to do it -- never a guess at whether two
+# DIFFERENT-looking names are "close enough".
+#
+# KNOWN LIMIT, deliberately not covered: a batch/container size written
+# WITHOUT parentheses ("50 KG CEMENT BAG", "GI WIRE 25 KG COIL") is not
+# detected. Broadening to catch a bare trailing number+unit would risk
+# stripping a genuine size spec that isn't a batch qualifier at all (many
+# real material names end in exactly that shape on purpose) -- unlike the
+# parenthesised case, there's no reliable punctuation signalling "this part
+# is a container note, not the product's own identity". Left alone rather
+# than guessed at; a real register sample showing this pattern would be
+# needed to extend it safely.
+_BATCH_SUFFIX_RE = re.compile(
+    r"\s*\(\s*\d+(?:\.\d+)?\s*[A-Za-z]+\s*(?:/\s*[A-Za-z]+\s*)?\)\s*$")
+
+
+def batch_base_name(name):
+    """Strip a trailing batch/coil/roll/box-size qualifier, if the name ends
+    with one -- e.g. "2.5 SQMM FLEXIBLE WIRE BLACK (270 MTR/COIL)" ->
+    "2.5 SQMM FLEXIBLE WIRE BLACK". Returns the name unchanged (not upper-
+    cased or otherwise normalised -- this is for grouping candidate NAMES
+    for a human to confirm, not for matching/scoring) when there's no such
+    suffix to strip."""
+    return _BATCH_SUFFIX_RE.sub("", str(name)).strip()
+
+
+def batch_siblings(name, pool_names):
+    """Every OTHER name in `pool_names` that is very likely the SAME real
+    material as `name`, differing only in a batch/coil/roll size -- see
+    batch_base_name()'s own docstring for why this is a narrow, exact-match
+    check rather than fuzzy scoring. Returns real names from the pool, never
+    invents one; empty when `name` itself has no batch-size suffix to begin
+    with (nothing to safely generalise from) or nothing else shares its
+    base."""
+    base = batch_base_name(name)
+    if base == str(name).strip():
+        return []   # `name` itself has no batch-size qualifier -- nothing to group by
+    return [n for n in pool_names
+           if str(n).strip() != str(name).strip() and batch_base_name(n) == base]
+
+
 _SIZE_PATTERNS = [
     # value + unit  (e.g. 1.5 SQMM, 25 MM, 4 INCH, 6 A, 2 C, 100 MM)
     (re.compile(r"(\d+(?:\.\d+)?)\s*SQ\.?\s*MM"), r"\1SQMM"),

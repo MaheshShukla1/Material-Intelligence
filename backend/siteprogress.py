@@ -1473,6 +1473,7 @@ def export_dpr(slug: str, start: str, end: str = None):
     if not struct:
         raise HTTPException(400, "no structure yet")
     location_label = _location_label(d)
+    leaf_label = _leaf_label(d)
 
     boqdf = _load_boq(d)
     services = sorted(boqdf.service.unique().tolist()) if not boqdf.empty else []
@@ -1530,7 +1531,7 @@ def export_dpr(slug: str, start: str, end: str = None):
     # many near-duplicate lines in this exact sheet). Same real entries as
     # before, aggregated one level higher; nothing about what actually
     # happened is lost, see dpr.rollup_across_floors's own docstring.
-    days = [(ds, dpr.rollup_across_floors(by_date.get(ds, []), services)) for ds in date_list]
+    days = [(ds, dpr.rollup_across_floors(by_date.get(ds, []), services, leaf_label=leaf_label)) for ds in date_list]
 
     date_label = start if start == end else f"{start} to {end}"
     prog = _load_progress(d).df
@@ -2014,14 +2015,23 @@ def quick_item_candidates(slug: str, service: str, all_services: bool = False):
     store = _read_json(d / "quick_items.json", {}) or {}
     already = {it["material"] for it in (store.get(service) or {}).get("items", [])}
     seen, materials = set(), []
+    all_names = [n for n, _s in names_with_service]
     for n, svc_label in names_with_service:
         if n in seen:
             continue
         seen.add(n)
         row = rows.get(linkage._norm(n)) or {}
         cross = bool(svc_label) and svc_label != _forecast_service(service)
+        # Real register rows that are very likely the SAME material as `n`,
+        # differing only in a batch/coil/roll size (see
+        # linkage.batch_siblings' own docstring) -- lets the picker offer
+        # "also add these N batches?" right where the engineer already is,
+        # instead of a separate trip to the link editor's own search box to
+        # hunt for each one by hand. Purely a SUGGESTION the engineer still
+        # has to tick -- nothing here merges anything on its own.
         materials.append({"name": n, "unit": row.get("unit"), "already": n in already,
-                          "other_service": svc_label if cross else None})
+                          "other_service": svc_label if cross else None,
+                          "batch_siblings": linkage.batch_siblings(n, all_names)})
     materials.sort(key=lambda m: (m["already"], bool(m["other_service"]), m["name"]))
     return {"available": True, "run": run_name, "materials": materials}
 
@@ -2033,14 +2043,29 @@ def add_quick_item(slug: str, payload: dict, room: str = None):
     plan it under an activity without it first existing as a BOQ line. The
     material comes from THIS service's own latest forecast run, so there is
     no fuzzy-match step — the stock link is created immediately and exactly.
-    Body: {"service","activity","material"}. Planned qty starts at 0; the
-    engineer sets it afterwards via the same ✎ every other item uses."""
+    Body: {"service","activity","material"} for the common single-material
+    case, OR {"service","activity","materials":[...]} to combine several
+    register rows into ONE plannable item and ONE link from the start --
+    the real, reported case being the SAME physical material split into
+    several register lines purely because it arrived in different coil
+    sizes ("2.5 SQMM WIRE BLACK (90 MTR/COIL)" and "...(270 MTR/COIL)" are
+    the same wire, not two materials). This never auto-detects or merges
+    that on its own -- see realtime.combine_item()'s own "never invent"
+    stance -- the engineer explicitly ticks which register rows are really
+    the same material, in the picker, before this runs; nothing here
+    guesses that on its own. Planned qty starts at 0; the engineer sets it
+    afterwards via the same ✎ every other item uses, ONCE, not once per
+    coil batch."""
     d = _need(slug)
     svc = payload.get("service")
     act = payload.get("activity")
-    material = (payload.get("material") or "").strip()
-    if not svc or not act or not material:
-        raise HTTPException(400, "service, activity and material are required")
+    materials = payload.get("materials")
+    if not materials:
+        single = (payload.get("material") or "").strip()
+        materials = [single] if single else []
+    materials = [m.strip() for m in materials if m and m.strip()]
+    if not svc or not act or not materials:
+        raise HTTPException(400, "service, activity and at least one material are required")
     known_acts = (_read_json(d / "activities.json", {}) or {}).get(svc, [])
     if act not in known_acts:
         raise HTTPException(400, f"activity '{act}' does not exist yet — create it first")
@@ -2049,20 +2074,37 @@ def add_quick_item(slug: str, payload: dict, room: str = None):
     if run is None:
         raise HTTPException(400, "no forecast run for this project yet — upload "
                                  "the stock register on the Forecast tab first")
-    row = rows.get(linkage._norm(material))
-    if row is None:
-        # not in this service's own scoped pool -- the engineer may have
-        # picked it via the picker's explicit "search other services"
-        # option (e.g. PVC piping the register keeps under Electrical but
-        # is genuinely used for an HVAC activity). Check the FULL run as a
-        # fallback, only ever adding a real row that actually exists there
-        # -- never inventing one. (Same lookup _full_run_rows() gives the
-        # drawer/link-modal, so a quick item linked this way is resolvable
-        # everywhere it's shown, not just here at creation time.)
-        row = _full_run_rows(slug).get(linkage._norm(material))
-    if row is None:
-        raise HTTPException(404, f"'{material}' is not in the stock register")
-    unit = row.get("unit") or "Nos"
+    full_rows = None
+    resolved = []   # [(material, row), ...] -- every pick verified against a real register row
+    for material in materials:
+        row = rows.get(linkage._norm(material))
+        if row is None:
+            # not in this service's own scoped pool -- the engineer may have
+            # picked it via the picker's explicit "search other services"
+            # option (e.g. PVC piping the register keeps under Electrical but
+            # is genuinely used for an HVAC activity). Check the FULL run as a
+            # fallback, only ever adding a real row that actually exists there
+            # -- never inventing one. (Same lookup _full_run_rows() gives the
+            # drawer/link-modal, so a quick item linked this way is resolvable
+            # everywhere it's shown, not just here at creation time.)
+            if full_rows is None:
+                full_rows = _full_run_rows(slug)
+            row = full_rows.get(linkage._norm(material))
+        if row is None:
+            raise HTTPException(404, f"'{material}' is not in the stock register")
+        resolved.append((material, row))
+    # unit comes from the FIRST material -- when combining several coil-batch
+    # rows of the same wire, they always share one real unit (MTR); a
+    # genuine unit mismatch across ticked rows is a sign they are NOT the
+    # same material after all, so this is flagged rather than silently
+    # picking one arbitrarily.
+    unit = resolved[0][1].get("unit") or "Nos"
+    units_seen = {(r.get("unit") or "").strip().upper() for _m, r in resolved}
+    if len(units_seen) > 1:
+        raise HTTPException(400, "the selected materials don't share the same unit — "
+                                 "they're probably not the same material; combine only "
+                                 "rows that genuinely are")
+    description = resolved[0][0]   # the first pick's own real name, never invented
 
     store = _read_json(d / "quick_items.json", {}) or {}
     svc_store = store.setdefault(svc, {"_seq": 0, "items": []})
@@ -2078,15 +2120,15 @@ def add_quick_item(slug: str, payload: dict, room: str = None):
     # ITEM -- that stays true here, this fix just stops treating two
     # different activities' picks of the same material as one item).
     existing = next((it for it in svc_store["items"]
-                     if it["material"] == material
+                     if it["material"] == description
                      and it["item_code"] in m.get(svc, act)), None)
     if existing:
         code = existing["item_code"]           # re-picking for the SAME activity reuses its line
     else:
         svc_store["_seq"] += 1
         code = f"QI{svc_store['_seq']}"
-        svc_store["items"].append({"item_code": code, "description": material,
-                                   "unit": unit, "material": material})
+        svc_store["items"].append({"item_code": code, "description": description,
+                                   "unit": unit, "material": description})
     (d / "quick_items.json").write_text(json.dumps(store, ensure_ascii=False))
 
     if code not in m.get(svc, act):             # don't let a re-pick toggle it back OUT
@@ -2094,7 +2136,10 @@ def add_quick_item(slug: str, payload: dict, room: str = None):
     (d / "mapping.json").write_text(json.dumps(m.to_dict(), ensure_ascii=False))
 
     links = _load_links(d)
-    links.setdefault(svc, {})[code] = [material]   # exact — we picked it from the register itself
+    # exact -- every material here was picked straight from the register
+    # itself (or explicitly ticked by the engineer as "this is the same
+    # material"), never a fuzzy guess.
+    links.setdefault(svc, {})[code] = [m for m, _r in resolved]
     (d / "links.json").write_text(json.dumps(links, ensure_ascii=False))
 
     return _service_view(d, svc, room=room)

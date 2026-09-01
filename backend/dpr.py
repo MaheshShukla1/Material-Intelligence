@@ -210,7 +210,7 @@ def rollup_across_floors(entries, all_services, leaf_label="ROOM"):
             qty = round(slot["qty"], 3) if slot["has_qty"] else None
             if key[0] == "room":
                 floor_label = slot["floor"]
-                activity_display = (f"{slot['activity'].upper()} IN {leaf_label} NO {','.join(slot['rooms'])}"
+                activity_display = (f"{slot['activity'].upper()} IN {leaf_label} NO {_room_list_label(slot['rooms'])}"
                                     if slot["rooms"] else slot["activity"].upper())
             else:
                 floors = sorted(slot["floors"])
@@ -222,6 +222,28 @@ def rollup_across_floors(entries, all_services, leaf_label="ROOM"):
             rows.append((activity_display, slot["item"], slot["item_code"], qty, slot["unit"], floor_label))
         out[svc] = rows
     return out
+
+
+_ROOM_LIST_CAP = 8
+
+
+def _room_list_label(rooms):
+    """The room-list text for one (floor, activity, item) row -- every real
+    room name when there are few (the common case: an engineer touched a
+    handful of specific rooms, and each one is genuinely useful information
+    right there in the cell). Once a bulk update genuinely spans most/all of
+    a floor's rooms in one day, listing every single one blows the cell up
+    just as badly as the original per-floor duplication did -- a real
+    reported case, 20+ room names in one cell -- so past _ROOM_LIST_CAP this
+    leads with the real count, then the first few real names, then "+N
+    more" rather than either the full list (too large again) or a bare
+    count (loses the "which rooms" traceability the room-list exists for in
+    the first place)."""
+    if len(rooms) <= _ROOM_LIST_CAP:
+        return ",".join(rooms)
+    shown = rooms[:_ROOM_LIST_CAP]
+    more = len(rooms) - _ROOM_LIST_CAP
+    return f"{len(rooms)} rooms: {','.join(shown)} +{more} more"
 
 
 # --------------------------------------------------------------------------

@@ -146,32 +146,32 @@ def group_for_export(day_entries, all_services, leaf_label="ROOM"):
     return out
 
 
-def rollup_across_floors(entries, all_services):
-    """The SAME real entries group_for_export() uses, aggregated one level
-    higher: by (activity, item) only, qty SUMMED across every floor/room --
-    "Wall Piping, 25MM PVC Bend, 396 NOS total", not six separate per-floor
-    lines for the same activity+item. Floors are disjoint room sets, so
-    summing their already-deduplicated per-floor quantities across floors
-    never double-counts (group_for_export's own per-floor sum already
-    guarantees that within one floor).
+def rollup_across_floors(entries, all_services, leaf_label="ROOM"):
+    """Consolidates ONLY what actually caused the reported "bahut bada" (too
+    large) complaint: an item's OVERALL '*' slider (no specific room known --
+    see _log_dpr_change's own docstring) fans out to one entry PER applicable
+    floor, so touching, say, 6 floors used to write 6 near-identical rows for
+    the same activity+item. Those get merged into ONE row, floor names
+    comma-joined, qty summed across them (floors are disjoint room sets, so
+    summing already-deduplicated per-floor sums never double-counts).
 
-    Reported directly: a real site engineer/PM complaint that the DAILY
-    UPDATES sheet becomes "bahut bada" (very large) the moment one activity
-    touches several floors in a day -- this is the short version of the
-    exact same real numbers, not a different calculation.
+    A SPECIFIC room (a real room/zone name was captured) is NEVER merged
+    across floors -- that data was never the redundant part; each floor's
+    room list is genuinely different information, and losing it was a real
+    regression (caught by a real pre-existing test, not a guess). Those
+    entries keep group_for_export()'s own original shape: one row per floor,
+    the touched room names appended to the activity text ("...IN ROOM NO
+    5,6"), exactly as before. A specific-room fact and an overall-slider fact
+    for the same item on the same floor the same day stay as two distinct
+    rows -- the room-specific one is never blended into or overwritten by
+    the floor-only one.
 
-    Returns {service: [(activity, item, item_code, qty, unit, floor_label),
-    ...]} -- item_code (may be None for older, pre-item_code log entries)
-    lets a caller attach a real ₹ figure by BOQ rate lookup if it wants to;
-    floor_label is the SAME "FLOOR" column the site team's own template
-    already has: the real floor name when only one was touched (identical
-    to the un-rolled-up behaviour for the common case), or every real floor
-    name comma-joined when the same activity+item spans several -- NEVER a
-    synthetic "N Floors" count. A count sits in the exact column real floor
-    names normally appear in and reads as if it WERE one ("6 Floors" looks
-    like a floor that doesn't exist) -- reported directly, and it also
-    throws away the one thing a DPR exists to answer: which floors work
-    actually happened on today."""
+    Returns {service: [(activity_display, item, item_code, qty, unit,
+    floor_label), ...]} -- activity_display already carries any room-list
+    suffix for the room-specific case (do not upper()/reformat it again);
+    floor_label is the real floor name (single row) or several real floor
+    names comma-joined (only ever for the consolidated overall-slider case)
+    -- never a synthetic count."""
     by_service = {s: {} for s in all_services}
     order = {s: [] for s in all_services}
     for e in entries:
@@ -179,38 +179,47 @@ def rollup_across_floors(entries, all_services):
         if svc not in by_service:
             by_service[svc] = {}
             order[svc] = []
-        key = (e["activity"], e.get("item"))
+        has_room = bool(e.get("room"))
+        # room-specific: one row per (floor, activity, item), room list kept.
+        # overall-slider: one row per (activity, item), floors consolidated.
+        key = ("room", e["floor"], e["activity"], e.get("item")) if has_room \
+            else ("overall", e["activity"], e.get("item"))
         if key not in by_service[svc]:
             by_service[svc][key] = {"qty": 0.0, "unit": e.get("unit"), "has_qty": False,
-                                    "floors": set(), "item_code": e.get("item_code")}
-        slot = by_service[svc][key]
-        if key not in order[svc]:
+                                    "floors": set(), "rooms": [], "item_code": e.get("item_code"),
+                                    "activity": e["activity"], "item": e.get("item"),
+                                    "floor": e["floor"] if has_room else None}
             order[svc].append(key)
+        slot = by_service[svc][key]
         if e.get("qty") is not None:
             slot["qty"] += e["qty"]
             slot["has_qty"] = True
             slot["unit"] = e.get("unit") or slot["unit"]
         if e.get("floor"):
             slot["floors"].add(e["floor"])
+        if has_room and e["room"] not in slot["rooms"]:
+            slot["rooms"].append(e["room"])
         if e.get("item_code") and not slot["item_code"]:
             slot["item_code"] = e["item_code"]
 
     out = {}
     for svc in all_services:
         rows = []
-        for (activity, item) in order.get(svc, []):
-            slot = by_service[svc][(activity, item)]
+        for key in order.get(svc, []):
+            slot = by_service[svc][key]
             qty = round(slot["qty"], 3) if slot["has_qty"] else None
-            floors = sorted(slot["floors"])
-            # Real floor names, comma-joined -- NEVER a synthetic "N Floors"
-            # count. Reported directly: "6 Floors" sat in the exact column
-            # real floor names normally appear in, and read as if "6 Floors"
-            # were itself a floor -- there's no such floor, and losing WHICH
-            # floors were actually touched breaks the one thing a DPR is
-            # for (knowing where work happened). Same comma-join convention
-            # group_for_export() already uses for room lists, one level up.
-            floor_label = ",".join(floors) if floors else "—"
-            rows.append((activity, item, slot["item_code"], qty, slot["unit"], floor_label))
+            if key[0] == "room":
+                floor_label = slot["floor"]
+                activity_display = (f"{slot['activity'].upper()} IN {leaf_label} NO {','.join(slot['rooms'])}"
+                                    if slot["rooms"] else slot["activity"].upper())
+            else:
+                floors = sorted(slot["floors"])
+                # Real floor names, comma-joined -- NEVER a synthetic "N
+                # Floors" count. "6 Floors" sat in the exact column real
+                # floor names normally appear in and read as if it WERE one.
+                floor_label = ",".join(floors) if floors else "—"
+                activity_display = slot["activity"].upper()
+            rows.append((activity_display, slot["item"], slot["item_code"], qty, slot["unit"], floor_label))
         out[svc] = rows
     return out
 
@@ -280,7 +289,30 @@ def _write_day_block(ws, row, date_str, grouped, location_label="FLOOR"):
             row += 1
             continue
 
-        for activity, item, item_code, qty, unit, floor_label in items:
+        for row_tuple in items:
+            # Accepts BOTH real shapes this file has ever produced: the
+            # original group_for_export() 5-tuple (floor, activity_text,
+            # item, qty, unit -- activity_text already has "IN ROOM NO..."
+            # baked in, one row per floor) still used directly by other real
+            # callers/tests, and the newer rollup_across_floors() 6-tuple
+            # (activity, item, item_code, qty, unit, floor_label -- one row
+            # per activity+item, floor names comma-joined). Detected by
+            # length, not by caller, so EITHER pairing keeps working without
+            # the caller having to know which shape it's feeding in.
+            if len(row_tuple) == 5:
+                floor_label, activity, item, qty, unit = row_tuple
+                activity_display = activity   # group_for_export() already built this
+                # as "ACTIVITY IN ROOM NO Room 2,Room 3" with the activity
+                # portion pre-uppercased and the room list left in its real
+                # case -- upper()-ing the whole string again would shout the
+                # room names too ("Zone 2" -> "ZONE 2"), which was never
+                # part of that function's own contract.
+            else:
+                activity, item, item_code, qty, unit, floor_label = row_tuple
+                activity_display = activity   # rollup_across_floors() already
+                # pre-formats this too (upper() + any "IN ROOM NO ..." suffix
+                # for its own room-specific rows) -- same reasoning as above,
+                # do not process it again here.
             fc = ws.cell(row, 1, floor_label)
             fc.font = Font(name=FONT, size=10)
             # Left-aligned + wrapped, not centered -- a single floor name
@@ -288,7 +320,7 @@ def _write_day_block(ws, row, date_str, grouped, location_label="FLOOR"):
             # list (the whole point of this fix) needs to wrap onto its own
             # lines rather than overflow as one long centered line.
             fc.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
-            ac = ws.cell(row, 2, activity.upper())
+            ac = ws.cell(row, 2, activity_display)
             ac.font = Font(name=FONT, size=10)
             ic = ws.cell(row, 3, item or "—")
             ic.font = Font(name=FONT, size=10, italic=(not item), color="9A9890" if not item else "000000")

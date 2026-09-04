@@ -472,7 +472,16 @@
   }
   function nodeHTML(node, depth) {
     const kids = node.children || [];
-    const isLeaf = node.type === "room" || (kids.length === 0 && node.type !== "project");
+    // Node type alone decides leaf-ness -- NEVER child-count. A freshly
+    // added floor/wing/level starts with zero children (nothing added
+    // under it yet), which the OLD "kids.length === 0" check wrongly read
+    // as "this must be a leaf/room" -- so a brand-new floor lost its own
+    // + (add area) button the instant it was created, while a
+    // template-generated floor (which already had rooms inside from the
+    // start) kept working. structure.py's own LEAF constant is exactly
+    // "room" -- matched here directly, so a container's + never depends on
+    // whether anything has been added under it yet.
+    const isLeaf = node.type === "room";
     const childType = node.type === "project" ? topChildType() : (node.type === "wing" ? "floor" : "room");
     const acts = node.type === "project" ? "" :
       `<span class="sp-treeact">

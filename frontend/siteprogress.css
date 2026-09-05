@@ -195,15 +195,7 @@
 .sp-entrysaved{font-size:10.5px;color:var(--green);opacity:0;transition:opacity .25s;position:absolute;
   right:-2px;top:-13px;white-space:nowrap;pointer-events:none}
 .sp-entrysaved.show{opacity:1}
-.sp-entrysub{display:flex;align-items:center;gap:7px}
-.sp-entrysub .sp-bslide{height:3px}
-.sp-entrysub .sp-bslide::-webkit-slider-thumb{width:11px;height:11px}
-.sp-entrysub .sp-bslide::-moz-range-thumb{width:11px;height:11px}
-.sp-entrysub .sp-bpct{width:32px;font-size:10.5px;font-weight:500;color:var(--ink3)}
-.sp-bslide{flex:1;-webkit-appearance:none;appearance:none;height:5px;border-radius:3px;background:var(--line2);outline:none}
-.sp-bslide::-webkit-slider-thumb{-webkit-appearance:none;width:15px;height:15px;border-radius:50%;
-  background:var(--ink);cursor:pointer;border:2px solid var(--panel);box-shadow:0 0 0 1px var(--line)}
-.sp-bslide::-moz-range-thumb{width:15px;height:15px;border-radius:50%;background:var(--ink);cursor:pointer;border:2px solid var(--panel)}
+.sp-entrysub{display:flex;align-items:center;gap:7px;justify-content:flex-end}
 .sp-bpct{font-size:12px;font-weight:600;width:38px;text-align:right;font-variant-numeric:tabular-nums}
 
 .sp-bmoney{grid-area:money;text-align:right}

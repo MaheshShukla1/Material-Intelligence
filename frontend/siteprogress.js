@@ -827,7 +827,6 @@
     let toOpen = S.openActivity ? acts_els.find((c) => c.dataset.a === S.openActivity) : null;
     if (!toOpen) toOpen = acts_els.find((c) => c.querySelector(".sp-brow")) || acts_els[0];
     if (toOpen) { toOpen.classList.add("open"); S.openActivity = toOpen.dataset.a; }
-    $("sp-acts").querySelectorAll(".sp-bslide").forEach(bindSlider);
     $("sp-acts").querySelectorAll(".sp-qty").forEach(bindEntry);
     $("sp-acts").querySelectorAll(".sp-labourrange").forEach(bindLabourSlider);
     $("sp-acts").querySelectorAll("[data-labouron]").forEach((b) => b.addEventListener("click", () => setLabourOnly(b.dataset.labouron, true)));
@@ -906,7 +905,6 @@
           <span class="sp-entrysaved" data-saved="${esc(it.code)}">✓ saved</span>
         </div>
         <div class="sp-entrysub">
-          <input class="sp-bslide" type="range" min="0" max="100" value="${Math.round(it.pct || 0)}" data-slide="${esc(it.code)}" aria-label="Quick drag (rough)">
           <span class="sp-bpct" data-bpct="${esc(it.code)}">${Math.round(it.pct || 0)}%</span>
         </div>
       </div>
@@ -1191,7 +1189,6 @@
     it.pct = pct; it.used = qty; it.remaining = Math.max((it.planned || 0) - qty, 0);
     if (it.rate != null) it.done_val = it.used * it.rate;
     const pe = sel(`[data-bpct="${cssA(code)}"]`); if (pe) pe.textContent = Math.round(pct) + "%";
-    const sld = sel(`[data-slide="${cssA(code)}"]`); if (sld) sld.value = Math.round(pct);
     const mo = sel(`[data-money="${cssA(code)}"]`); if (mo && it.rate != null) mo.innerHTML = `<b>${inr(it.done_val)}</b>`;
     localRoll();
   }
@@ -1208,9 +1205,12 @@
       await loadService();
     } catch (e) { toast("Save failed: " + briefErr(e)); }
   }
-  // primary control: type the real installed quantity, in the item's own
-  // unit. % is derived from this, never the other way round -- see the
-  // manual-entry-UX decision (Option A: tap the number, type, done).
+  // the only control for setting an item's progress: type the real
+  // installed quantity, in the item's own unit -- % is derived from this.
+  // A drag-slider ("quick, rough") used to sit alongside this as a
+  // shortcut; removed after a real reported mobile accident -- a slider is
+  // too easy to nudge by mistake (a stray touch/scroll on a phone), where a
+  // number field only ever changes on deliberate typed input.
   function bindEntry(inp) {
     const code = inp.dataset.qty;
     const commit = () => {
@@ -1227,23 +1227,12 @@
     inp.addEventListener("change", commit);
     inp.addEventListener("keydown", (e) => { if (e.key === "Enter") inp.blur(); });
   }
-  // secondary control: a quick rough drag. Kept in sync with the typed qty
-  // above in both directions, so neither one goes stale.
-  function bindSlider(s) {
-    const code = s.dataset.slide;
-    s.addEventListener("input", () => {
-      const it = S._byCode[code]; if (!it) return;
-      const pct = +s.value;
-      const qty = it.planned > 0 ? Math.round((it.planned * pct / 100) * 100) / 100 : 0;
-      applyLocalQty(code, qty, pct);
-      const qi = sel(`[data-qty="${cssA(code)}"]`); if (qi) qi.value = qty;
-    });
-    s.addEventListener("change", () => { const it = S._byCode[code]; if (it) saveFrac(code, it.pct); });
-  }
-  // labour-only activity progress -- same input/change split as bindSlider
-  // above (instant local feedback while dragging, one save on release), but
-  // updates the ACTIVITY's own bar/%/badge instead of an item's, since a
-  // labour-only activity has no item row of its own to update.
+  // labour-only activity progress -- same input/change split as the
+  // (removed) item-level slider used to have (instant local feedback while
+  // dragging, one save on release), updating the ACTIVITY's own bar/%/badge
+  // instead of an item's, since a labour-only activity has no item row of
+  // its own to update. Kept as a slider deliberately -- unlike the
+  // item-level control, this one was never reported as a problem.
   function applyLocalLabourPct(activity, pct) {
     const f = sel(`[data-fill="${cssA(activity)}"]`); if (f) f.style.width = pct + "%";
     const pc = sel(`[data-apct="${cssA(activity)}"]`); if (pc) pc.textContent = Math.round(pct) + "%";

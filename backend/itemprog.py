@@ -155,8 +155,21 @@ def compute(items_df, prog_svc, rooms_svc, all_room_ids, planned_over,
             # per-room qty. Real per-room groups should describe known
             # exceptions, not require covering every single room before
             # they're safe to use at all.)
-            base_appl = rooms_svc.get(code) or all_room_ids
-            base_appl = [r for r in base_appl if r in room_set] or all_room_ids
+            explicit_appl = rooms_svc.get(code)
+            if explicit_appl:
+                base_appl = [r for r in explicit_appl if r in room_set] or all_room_ids
+            else:
+                # No item_rooms.json restriction for this item -- when it has
+                # room_qty_groups, the groups ARE the only real applicability
+                # we know about. Falling back to every room in the project
+                # would silently charge rooms that were never part of any
+                # group at the item's raw per-room `qty` default (Issue: a
+                # 14-zone group at 535.7 Rmt/zone was inflating to 85,900
+                # because the other 7 zones in the project each picked up
+                # the item's own qty_per_room here). Fall back to the
+                # grouped rooms only -- never invent applicability beyond
+                # what's actually recorded for this item.
+                base_appl = list(group_appl)
             appl = list(dict.fromkeys(base_appl + group_appl))   # union, order-stable
             def _rq(r):
                 return room_qty.get(r, qty)
@@ -243,11 +256,20 @@ def room_buckets(item_code, prog_svc, rooms_svc, all_room_ids, room_qty_groups=N
     code = str(item_code)
     room_set = set(all_room_ids)
     _room_qty, group_appl = _room_qty_from_groups((room_qty_groups or {}).get(code), room_set)
-    base_appl = rooms_svc.get(code) or all_room_ids
-    base_appl = [r for r in base_appl if r in room_set] or all_room_ids
+    explicit_appl = rooms_svc.get(code)
+    if explicit_appl:
+        base_appl = [r for r in explicit_appl if r in room_set] or all_room_ids
+    elif group_appl is not None:
+        # No item_rooms.json restriction, but this item HAS room_qty_groups
+        # -- same fix as compute(): the groups are the only real
+        # applicability we know, so don't fall back to every room.
+        base_appl = list(group_appl)
+    else:
+        base_appl = all_room_ids
     # groups are exceptions on top of the item's normal applicability, same
     # rule as compute() -- a room outside every group still counts if it's
-    # applicable the ordinary way, it just has no group-specific qty.
+    # applicable the ordinary way (i.e. explicitly listed in item_rooms.json),
+    # it just has no group-specific qty.
     appl = list(dict.fromkeys(base_appl + group_appl)) if group_appl is not None else base_appl
     node = prog_svc.get(code, {})
     done = in_progress = not_started = 0
@@ -320,7 +342,13 @@ def project_room_status(services_data, all_room_ids):
             if code not in mapped_codes:
                 continue
             _rq, group_appl = _room_qty_from_groups(room_qty_groups.get(code), room_set)
-            base_appl = rooms_svc.get(code) or all_room_ids
+            explicit_appl = rooms_svc.get(code)
+            if explicit_appl:
+                base_appl = explicit_appl
+            elif group_appl is not None:
+                base_appl = list(group_appl)
+            else:
+                base_appl = all_room_ids
             appl = list(dict.fromkeys(list(base_appl) + group_appl)) if group_appl is not None else base_appl
             node = prog_svc.get(code, {})
             for r in appl:

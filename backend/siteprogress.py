@@ -291,8 +291,14 @@ def _applicable_rooms(d, service, item_code):
     room_qty, group_appl = itemprog._room_qty_from_groups(groups, room_set)
     rooms_svc = _item_rooms(d).get(service, {})
     if room_qty is not None:
-        base_appl = rooms_svc.get(code) or all_room_ids
-        base_appl = [r for r in base_appl if r in room_set] or all_room_ids
+        explicit_appl = rooms_svc.get(code)
+        if explicit_appl:
+            base_appl = [r for r in explicit_appl if r in room_set] or all_room_ids
+        else:
+            # mirrors itemprog.compute()'s own fix: no item_rooms.json entry
+            # + real room_qty_groups -> the groups are the only known
+            # applicability, don't fall back to every room in the project.
+            base_appl = list(group_appl)
         return list(dict.fromkeys(base_appl + group_appl))
     appl = rooms_svc.get(code) or all_room_ids
     return [r for r in appl if r in room_set] or all_room_ids

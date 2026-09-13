@@ -291,14 +291,8 @@ def _applicable_rooms(d, service, item_code):
     room_qty, group_appl = itemprog._room_qty_from_groups(groups, room_set)
     rooms_svc = _item_rooms(d).get(service, {})
     if room_qty is not None:
-        explicit_appl = rooms_svc.get(code)
-        if explicit_appl:
-            base_appl = [r for r in explicit_appl if r in room_set] or all_room_ids
-        else:
-            # mirrors itemprog.compute()'s own fix: no item_rooms.json entry
-            # + real room_qty_groups -> the groups are the only known
-            # applicability, don't fall back to every room in the project.
-            base_appl = list(group_appl)
+        base_appl = rooms_svc.get(code) or all_room_ids
+        base_appl = [r for r in base_appl if r in room_set] or all_room_ids
         return list(dict.fromkeys(base_appl + group_appl))
     appl = rooms_svc.get(code) or all_room_ids
     return [r for r in appl if r in room_set] or all_room_ids
@@ -556,23 +550,44 @@ def _service_view_core(d, service, items, used, prog, rooms_cfg, room_qty_groups
     # for a normal activity -- but a LABOUR-ONLY activity (no BOQ material at
     # all, e.g. Zari work, core-cutting, chasing, testing -- see
     # activity.is_labour_keyword()) has no items to average, so its % comes
-    # straight from its own directly-recorded value instead. Never both at
-    # once for the same activity: while `labour` is on for it, its item-based
+    # from its own recorded per-room fractions instead. Never both at once
+    # for the same activity: while `labour` is on for it, its item-based
     # `codes` are ignored here even if some happen to still be mapped (the
     # frontend hides the "add items" controls while labour-only is on, and
     # only offers the toggle in the first place when there are none).
+    #
+    # Room-tick-driven, not a single flat number: a labour activity's overall
+    # % is now the MEAN of itemprog.frac_for() over every room in the
+    # project -- the exact same room-averaging an item's own % already uses
+    # (compute()'s uniform path) -- reusing itemprog.frac_for()/room_buckets()
+    # completely unchanged, since they're generic on the dict key (activity
+    # name here instead of item_code). An activity that only ever had the
+    # old overall slider touched (no per-room ticks yet) still reads
+    # correctly: frac_for() falls back to "*" for every room with no
+    # per-room override, so the mean collapses to that one number -- a
+    # strict backward-compatible generalisation, not a behaviour change for
+    # existing data. A room-scoped view (`room` set) still shows just that
+    # one room's own fraction, same as before.
     pctmap = {str(r.item_code): (r.progress_pct if r.progress_pct == r.progress_pct else 0.0)
               for r in ip.itertuples()}
     labour = set(_labour_only(d).get(service) or [])
     aprog = _activity_prog(d).get(service, {})
-    act_pct, labour_pct = {}, {}
+    act_pct, labour_pct, labour_buckets = {}, {}, {}
     for a in acts:
         if a in labour:
             node = aprog.get(a, {})
-            val = node.get(room) if room and room in node else node.get("*")
-            pct = round(float(val) * 100, 1) if val is not None else 0.0
+            if room:
+                pct = round(itemprog.frac_for(node, room) * 100, 1)
+            elif all_rooms:
+                pct = round(100.0 * sum(itemprog.frac_for(node, r) for r in all_rooms)
+                           / len(all_rooms), 1)
+            else:
+                pct = round(float(node.get("*", 0.0)) * 100, 1)
             act_pct[a] = pct
             labour_pct[a] = pct
+            labour_buckets[a] = (itemprog.room_buckets(a, aprog, {}, all_rooms)
+                                 if all_rooms else
+                                 {"done": 0, "in_progress": 0, "not_started": 0, "total": 0})
         else:
             codes = [str(x) for x in m.get(service, a)]
             vals = [pctmap.get(c, 0.0) for c in codes if c in pctmap]
@@ -594,6 +609,8 @@ def _service_view_core(d, service, items, used, prog, rooms_cfg, room_qty_groups
         "item_rooms": rooms_cfg,
         "item_progress": prog,
         "item_room_qty": room_qty_groups,
+        "activity_progress": aprog,
+        "labour_buckets": labour_buckets,
         "unmapped": m.unmapped(service, items.item_code.dropna().astype(str).tolist()),
         "labour_only": {a: (a in labour) for a in acts},
         "labour_pct": labour_pct,
@@ -985,6 +1002,44 @@ def mark_rooms_done(slug: str, payload: dict, room: str = None):
     if done:   # an undo is not "work done today" -- never logged as one
         for rid in room_ids:
             _log_dpr_change(d, svc, rid, code, frac=1.0)
+    return _service_view(d, svc, room=room)
+
+
+@router.post("/{slug}/mark-activity-rooms-done")
+def mark_activity_rooms_done(slug: str, payload: dict, room: str = None):
+    """Labour-only companion to /mark-rooms-done above -- same exact
+    mechanism, but for a labour-only ACTIVITY (Zari work, core-cutting,
+    chasing, testing...) instead of a BOQ item. Body: {"service","activity",
+    "rooms":[room_id,...], "done": bool (default True)}.
+
+    Replaces the old "drag the overall % slider" way of recording labour
+    progress. That set the '*' fraction directly and, by
+    itemprog.set_progress()'s own documented behaviour, WIPED every
+    existing per-room override to keep the bar uniform -- the exact same
+    silent-flatten risk /mark-rooms-done was built to prevent for items,
+    just never fixed for labour-only activities until now. Each room here
+    gets its OWN per-room override (frac=1.0 or 0.0) via
+    itemprog.set_progress(..., room=room_id) -- called once per room,
+    never the room=None ("*") global path -- so marking a batch done can
+    never wipe any other room's recorded state, the same guarantee
+    /mark-rooms-done already gives items.
+
+    `done=False` is the direct undo, same as /mark-rooms-done -- the same
+    action with the opposite target value, not a special case."""
+    d = _need(slug)
+    svc = payload.get("service")
+    act = payload.get("activity")
+    room_ids = [str(r) for r in (payload.get("rooms") or [])]
+    done = payload.get("done", True)
+    if not svc or not act:
+        raise HTTPException(400, "service and activity are required")
+    if not room_ids:
+        raise HTTPException(400, "tick at least one room")
+    store = _activity_prog(d)
+    frac = 1.0 if done else 0.0
+    for rid in room_ids:
+        itemprog.set_progress(store, svc, act, frac, room=rid)
+    (d / "activity_progress.json").write_text(json.dumps(store, ensure_ascii=False))
     return _service_view(d, svc, room=room)
 
 

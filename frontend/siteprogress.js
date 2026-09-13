@@ -799,8 +799,7 @@
         <div class="sp-cbody">
           ${isLabour ? `
           <div class="sp-labourrow">
-            <input type="range" class="sp-labourrange" data-labourslide="${esc(a)}" min="0" max="100" value="${Math.round(p || 0)}" aria-label="${esc(a)} progress">
-            <span class="sp-labourpct" data-labourpctval="${esc(a)}">${Math.round(p || 0)}%</span>
+            <button class="sp-linkchip" data-actroomsedit="${esc(a)}">🏠 ${esc(activityRoomsChipLabel(a))}</button>
           </div>` : `
           ${items.map((it) => rowHTML(it, a)).join("")}
           <div style="padding-top:12px"><button class="btn" data-map="${esc(a)}">+ Add BOQ items</button>
@@ -828,7 +827,7 @@
     if (!toOpen) toOpen = acts_els.find((c) => c.querySelector(".sp-brow")) || acts_els[0];
     if (toOpen) { toOpen.classList.add("open"); S.openActivity = toOpen.dataset.a; }
     $("sp-acts").querySelectorAll(".sp-qty").forEach(bindEntry);
-    $("sp-acts").querySelectorAll(".sp-labourrange").forEach(bindLabourSlider);
+    $("sp-acts").querySelectorAll("[data-actroomsedit]").forEach((b) => b.addEventListener("click", () => openActivityRoomsModal(b.dataset.actroomsedit)));
     $("sp-acts").querySelectorAll("[data-labouron]").forEach((b) => b.addEventListener("click", () => setLabourOnly(b.dataset.labouron, true)));
     $("sp-acts").querySelectorAll("[data-labouroff]").forEach((b) => b.addEventListener("click", (e) => { e.stopPropagation(); setLabourOnly(b.dataset.labouroff, false); }));
     $("sp-acts").querySelectorAll("[data-map]").forEach((b) => b.addEventListener("click", () => openMapModal(b.dataset.map)));
@@ -1227,28 +1226,78 @@
     inp.addEventListener("change", commit);
     inp.addEventListener("keydown", (e) => { if (e.key === "Enter") inp.blur(); });
   }
-  // labour-only activity progress -- same input/change split as the
-  // (removed) item-level slider used to have (instant local feedback while
-  // dragging, one save on release), updating the ACTIVITY's own bar/%/badge
-  // instead of an item's, since a labour-only activity has no item row of
-  // its own to update. Kept as a slider deliberately -- unlike the
-  // item-level control, this one was never reported as a problem.
-  function applyLocalLabourPct(activity, pct) {
-    const f = sel(`[data-fill="${cssA(activity)}"]`); if (f) f.style.width = pct + "%";
-    const pc = sel(`[data-apct="${cssA(activity)}"]`); if (pc) pc.textContent = Math.round(pct) + "%";
-    const lp = sel(`[data-labourpctval="${cssA(activity)}"]`); if (lp) lp.textContent = Math.round(pct) + "%";
+  // Issue 4: labour-only activities are room/zone-tickable now, same as a
+  // material item's Rooms chip -- no more single overall-% slider (that
+  // control wrote to the activity's '*' fraction and, by
+  // itemprog.set_progress()'s own documented behaviour, wiped every
+  // per-room tick the moment it was touched; the whole point of this
+  // change is per-room ticks that can never be silently flattened again).
+  function activityRoomsChipLabel(activity) {
+    const node = (S.svc.activity_progress || {})[activity] || {};
+    const total = allRoomsList().length;
+    const done = allRoomsList().filter((r) => {
+      const v = r.id in node ? node[r.id] : node["*"];
+      return (v || 0) >= 1;
+    }).length;
+    return `${done} of ${total} ${curLeafPluralLower(total)} done`;
   }
-  async function saveLabourFrac(activity, pct) {
-    try {
-      await jpost(api("/" + S.slug + "/progress/activity"),
-        { service: S.service, activity, frac: pct / 100, room: S.room || undefined });
-      await loadService();
-    } catch (e) { toast("Save failed: " + briefErr(e)); }
-  }
-  function bindLabourSlider(s) {
-    const activity = s.dataset.labourslide;
-    s.addEventListener("input", () => applyLocalLabourPct(activity, +s.value));
-    s.addEventListener("change", () => saveLabourFrac(activity, +s.value));
+  function openActivityRoomsModal(activity) {
+    const rooms = allRoomsList();
+    if (!rooms.length) return toast(`No ${curLeafPluralLower(2)} in the structure yet.`);
+    const progNode = (S.svc.activity_progress || {})[activity] || {};
+    const isDone = (roomId) => {
+      const v = roomId in progNode ? progNode[roomId] : progNode["*"];
+      return (v || 0) >= 1;
+    };
+
+    const groups = {};
+    rooms.forEach((r) => { (groups[r.path] = groups[r.path] || []).push(r); });
+    const groupEntries = Object.entries(groups);
+
+    const body = `
+      <div style="margin:0 0 12px"><button class="btn" id="sp-actrooms-all">Select all</button>
+      <button class="btn" id="sp-actrooms-none" style="margin-left:8px">Clear all</button></div>
+      ${groupEntries.map(([path, rs], gi) => `
+        <div class="sp-roomgroup" data-g="${gi}" style="margin-bottom:14px">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+            <b style="font-size:12.5px">${esc(path)}</b>
+            <button type="button" class="linkbtn" data-gall="${gi}" style="font-size:11px">select all</button>
+            <button type="button" class="linkbtn" data-gnone="${gi}" style="font-size:11px">clear</button>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:5px">
+          ${rs.map((r) => `<label style="display:flex;align-items:center;gap:5px;font-size:12.5px;cursor:pointer" class="${isDone(r.id) ? "sp-roomdone" : ""}"><input type="checkbox" data-actroom="${esc(r.id)}">${esc(r.name)}${isDone(r.id) ? ' <span class="sp-doneck" title="Already marked done">✓</span>' : ""}</label>`).join("")}
+          </div>
+        </div>`).join("")}`;
+
+    const footerButtons = `
+      <button type="button" class="btn" id="sp-act-mark-done" style="border-color:var(--green);color:var(--green)">Mark ticked as done</button>
+      <button type="button" class="btn" id="sp-act-unmark-done">Undo done</button>`;
+
+    modal(`${curLeafPlural(2)} → ${esc(activity)}`,
+      `${esc(activity)} — labour-only, tracked by ${curLeafPluralLower(2)} instead of a single overall %. Nothing is ticked by default (✓ marks ${curLeafPluralLower(2)} already done, for reference). Tick the ${curLeafPluralLower(2)} that are actually finished, then hit "Mark ticked as done" below.`,
+      body, async () => { closeModal(); }, "Close", "min(600px,94vw)", footerButtons);
+
+    $("sp-actrooms-all").onclick = () => document.querySelectorAll("#sp-modal input[data-actroom]").forEach((c) => { c.checked = true; });
+    $("sp-actrooms-none").onclick = () => document.querySelectorAll("#sp-modal input[data-actroom]").forEach((c) => { c.checked = false; });
+    async function markActivityRoomsDone(done) {
+      const ids = [...document.querySelectorAll("#sp-modal input[data-actroom]")].filter((c) => c.checked).map((c) => c.dataset.actroom);
+      if (!ids.length) return toast(`Tick at least one ${curLeafLower()} to ${done ? "mark done" : "undo"}.`);
+      try {
+        S.svc = await jpost(api("/" + S.slug + "/mark-activity-rooms-done" + roomQ()), { service: S.service, activity, rooms: ids, done });
+        closeModal();
+        await afterSvc();
+        toast(done ? `Marked ${ids.length} ${curLeafPluralLower(ids.length)} done for ${activity}.`
+                   : `Undid done for ${ids.length} ${curLeafPluralLower(ids.length)} on ${activity}.`);
+      } catch (e) { toast("Failed: " + briefErr(e)); }
+    }
+    $("sp-act-mark-done").onclick = () => markActivityRoomsDone(true);
+    $("sp-act-unmark-done").onclick = () => markActivityRoomsDone(false);
+    document.querySelectorAll("[data-gall]").forEach((b) => b.addEventListener("click", () => {
+      document.querySelector(`.sp-roomgroup[data-g="${cssA(b.dataset.gall)}"]`).querySelectorAll("input[data-actroom]").forEach((c) => { c.checked = true; });
+    }));
+    document.querySelectorAll("[data-gnone]").forEach((b) => b.addEventListener("click", () => {
+      document.querySelector(`.sp-roomgroup[data-g="${cssA(b.dataset.gnone)}"]`).querySelectorAll("input[data-actroom]").forEach((c) => { c.checked = false; });
+    }));
   }
   // toggle an activity between item-tracked and labour-only (%-only, no BOQ
   // material -- Zari work, core-cutting, chasing, testing...). Turning OFF

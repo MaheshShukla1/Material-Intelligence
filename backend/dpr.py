@@ -82,6 +82,50 @@ def entries_for_range(log, start_date, end_date=None):
     return out
 
 
+def filter_by_area(entries, floors=None, rooms=None):
+    """The area half of Issue 2's export scope -- structure-agnostic:
+    `floors` is a set of whichever labels this project's structure uses at
+    the container level (Floor/Level/Wing names, e.g. {"13th Floor"} or
+    {"B3"} -- a set, not one name, since the picker lets an engineer tick
+    rooms spanning more than one floor at once). `rooms` is an optional set
+    of leaf names (Room/Zone/Corridor, e.g. {"Room 5"}) narrowing further
+    within those floors. Works identically for hotel/mall/hospital
+    structures since it only ever matches the real floor/room strings
+    dpr_log.json already carries -- never invents which floor/room an entry
+    belongs to.
+
+    floors=None                          -> no area filter at all (today's
+                                            whole-project export, unchanged).
+    floors={"13th Floor"}, rooms=None     -> the WHOLE floor: every entry
+                                            logged under it, room-specific
+                                            or not.
+    floors={"13th Floor"}, rooms={"Room 5"} -> Room 5's own room-specific
+                                            entries, PLUS that floor's
+                                            floor-wide ("overall", no
+                                            specific room known) entries --
+                                            those weren't captured against
+                                            one room, so excluding them
+                                            outright would silently hide
+                                            real logged work. The caller
+                                            (see the area-export mockup) is
+                                            responsible for flagging those
+                                            in the REMARKS column -- this
+                                            function only filters, it does
+                                            not annotate.
+    A room selection spanning several floors just passes all of those
+    floors' names in `floors` -- each floor's own rooms are matched
+    independently, exactly as if filtered one floor at a time.
+    """
+    if not floors:
+        return list(entries)
+    floor_set = set(floors)
+    out = [e for e in entries if e.get("floor") in floor_set]
+    if rooms:
+        room_set = set(rooms)
+        out = [e for e in out if e.get("room") in room_set or e.get("room") is None]
+    return out
+
+
 # --------------------------------------------------------------------------
 # Grouping — the exact shape the sheet needs: per service, per floor, in the
 # order floors first appear in the log (which is the order the engineer
@@ -267,47 +311,50 @@ SECTION_FILL = {  # cycle through these for services beyond the first 4, so a
 
 
 def _write_day_block(ws, row, date_str, grouped, location_label="FLOOR"):
-    ws.cell(row, 1, "DATE:").font = Font(name=FONT, bold=True, size=11)
+    ws.cell(row, 1, "DATE:").font = Font(name=FONT, bold=True, size=11, color=HEADER_FILL)
     ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=5)
-    ws.cell(row, 2, date_str).font = Font(name=FONT, size=11)
+    dc = ws.cell(row, 2, date_str)
+    dc.font = Font(name=FONT, bold=True, size=11, color=HEADER_FILL)
     for c in range(1, 6):
-        ws.cell(row, c).border = BORDER
+        ws.cell(row, c).fill = PatternFill("solid", fgColor=HERO_FILL)
+        ws.cell(row, c).border = GRID_BORDER
+    ws.row_dimensions[row].height = 20
     row += 1
 
     ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=5)
     t = ws.cell(row, 1, "DAILY WORK UPDATES")
-    t.font = Font(name=FONT, bold=True, size=11)
+    t.font = Font(name=FONT, bold=True, size=10.5, color="5F5E5A")
     t.alignment = Alignment(horizontal="center")
     for c in range(1, 6):
-        ws.cell(row, c).border = BORDER
+        ws.cell(row, c).fill = PatternFill("solid", fgColor=HERO_FILL)
+        ws.cell(row, c).border = GRID_BORDER
     row += 1
 
     for i, (service, items) in enumerate(grouped.items()):
-        fill = PatternFill("solid", fgColor=SECTION_FILL[i % len(SECTION_FILL)])
         ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=5)
         s = ws.cell(row, 1, service.upper())
-        s.font = Font(name=FONT, bold=True, size=11)
-        s.alignment = Alignment(horizontal="center")
+        s.font = Font(name=FONT, bold=True, size=10.5, color=HEADER_FONT_COLOR)
+        s.alignment = Alignment(horizontal="left", indent=1)
         for c in range(1, 6):
-            ws.cell(row, c).fill = fill
-            ws.cell(row, c).border = BORDER
+            ws.cell(row, c).fill = PatternFill("solid", fgColor=HEADER_FILL)
+            ws.cell(row, c).border = GRID_BORDER
+        ws.row_dimensions[row].height = 18
+        ws.row_dimensions[row].outline_level = 1
         row += 1
 
         headers = [location_label, "ACTIVITY", "ITEM", "QTY EXECUTED", "REMARKS"]
-        for c, h in zip(range(1, 6), headers):
-            hc = ws.cell(row, c, h)
-            hc.font = Font(name=FONT, bold=True, size=10)
-            hc.alignment = Alignment(horizontal="center")
-            hc.border = BORDER
+        _header_row(ws, row, headers)
+        ws.row_dimensions[row].outline_level = 1
         row += 1
 
         if not items:
             ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=5)
             na = ws.cell(row, 1, "NO ACTIVITY")
-            na.font = Font(name=FONT, size=10)
+            na.font = Font(name=FONT, size=10, italic=True, color="9A9890")
             na.alignment = Alignment(horizontal="center")
             for c in range(1, 6):
-                ws.cell(row, c).border = BORDER
+                ws.cell(row, c).border = GRID_BORDER
+            ws.row_dimensions[row].outline_level = 1
             row += 1
             continue
 
@@ -354,8 +401,15 @@ def _write_day_block(ws, row, date_str, grouped, location_label="FLOOR"):
                 qc = ws.cell(row, 4, "—")
                 qc.font = Font(name=FONT, size=10, italic=True, color="9A9890")
             for c in range(1, 6):
-                ws.cell(row, c).border = BORDER
+                ws.cell(row, c).border = GRID_BORDER
+            _zebra(ws, row, 5)
+            ws.row_dimensions[row].outline_level = 1
             row += 1
+    # collapsible: click the sheet's own [-] outline button (top-left of the
+    # row gutter) to fold this whole day's rows away, same real Excel
+    # grouping the Activity completion sheet already uses elsewhere in this
+    # module -- a multi-week export stops being one giant scroll.
+    ws.sheet_properties.outlinePr.summaryBelow = False
     return row
 
 

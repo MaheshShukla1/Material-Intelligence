@@ -173,25 +173,92 @@
 
   function openDprModal() {
     const today = new Date().toISOString().slice(0, 10);
+    const rooms = allRoomsList();
+    const groups = {};
+    rooms.forEach((r) => { (groups[r.path] = groups[r.path] || []).push(r); });
+    const groupEntries = Object.entries(groups);
+    const svcOptions = (S.state.services || [])
+      .map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join("");
+
     modal("Export daily update",
-      "Auto-captured from today's progress updates — pick a single date or a range.",
-      `<div style="display:flex;gap:8px;align-items:center;font-size:13px;padding:10px 0">
+      "Auto-captured from progress updates. Pick a date range and, optionally, a service and/or an area.",
+      `<div style="display:flex;gap:8px;align-items:center;font-size:13px;padding:10px 0 6px">
          <span style="color:var(--ink3)">Date range</span>
          <input class="ctl" id="sp-dpr-start" type="date" value="${today}" style="width:150px">
          <span style="color:var(--ink3)">to</span>
          <input class="ctl" id="sp-dpr-end" type="date" value="${today}" style="width:150px">
+       </div>
+       <div style="padding:6px 0">
+         <label style="font-size:13px;color:var(--ink3);display:block;margin-bottom:4px">Service <span style="color:var(--ink4)">(optional — all services if left blank)</span></label>
+         <select class="ctl" id="sp-dpr-service" style="width:100%">
+           <option value="">All services</option>${svcOptions}
+         </select>
+       </div>
+       <div style="padding:6px 0">
+         <label style="font-size:13px;color:var(--ink3);display:block;margin-bottom:6px">Area <span style="color:var(--ink4)">(optional — whole project if left blank)</span></label>
+         ${rooms.length ? `
+         <div style="margin:0 0 8px"><button class="btn" id="sp-dprarea-all" type="button">Select all</button>
+         <button class="btn" id="sp-dprarea-none" type="button" style="margin-left:8px">Clear all</button></div>
+         <div style="border:1px solid var(--line2);border-radius:8px;padding:8px;max-height:200px;overflow-y:auto">
+           ${groupEntries.map(([path, rs], gi) => `
+             <div style="margin-bottom:10px">
+               <div style="display:flex;align-items:center;gap:8px;margin-bottom:5px">
+                 <b style="font-size:12.5px">${esc(path)}</b>
+                 <button type="button" class="linkbtn" data-dprgall="${gi}" style="font-size:11px">select all</button>
+                 <button type="button" class="linkbtn" data-dprgnone="${gi}" style="font-size:11px">clear</button>
+               </div>
+               <div class="sp-roomgroup" data-g="${gi}" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:5px">
+                 ${rs.map((r) => `<label style="display:flex;align-items:center;gap:5px;font-size:12.5px;cursor:pointer"><input type="checkbox" data-dprroom="${esc(r.id)}">${esc(r.name)}</label>`).join("")}
+               </div>
+             </div>`).join("")}
+         </div>
+         <p style="font-size:12.5px;color:var(--violet);margin:8px 0 0" id="sp-dpr-scope">Whole project</p>` :
+        `<p style="font-size:12.5px;color:var(--ink3)">No ${curLeafPluralLower(2)} in the structure yet.</p>`}
        </div>`,
       async () => {
         const start = $("sp-dpr-start").value;
         const end = $("sp-dpr-end").value;
         if (!start) return toast("Pick a start date");
-        const q = "?start=" + encodeURIComponent(start) +
-                  (end && end !== start ? "&end=" + encodeURIComponent(end) : "");
+        const service = $("sp-dpr-service") ? $("sp-dpr-service").value : "";
+        const ticked = [...document.querySelectorAll("#sp-modal input[data-dprroom]")]
+          .filter((c) => c.checked).map((c) => c.dataset.dprroom);
+        const q = new URLSearchParams();
+        q.set("start", start);
+        if (end && end !== start) q.set("end", end);
+        if (service) q.set("service", service);
+        ticked.forEach((rid) => q.append("rooms", rid));
         const a = document.createElement("a");
-        a.href = api("/" + S.slug + "/export-dpr" + q);
+        a.href = api("/" + S.slug + "/export-dpr?" + q.toString());
         a.click();
         closeModal();
-      }, "Export DPR", "min(420px,92vw)");
+      }, "Export DPR", "min(460px,92vw)");
+
+    if (!rooms.length) return;
+    function scopeLabel() {
+      const ticked = [...document.querySelectorAll("#sp-modal input[data-dprroom]")].filter((c) => c.checked);
+      if (!ticked.length) return "Whole project";
+      const byGroup = {};
+      ticked.forEach((c) => {
+        const r = rooms.find((x) => x.id === c.dataset.dprroom);
+        if (r) (byGroup[r.path] = byGroup[r.path] || []).push(r.name);
+      });
+      return Object.entries(byGroup).map(([path, names]) => {
+        const total = groups[path].length;
+        return names.length === total ? path : `${path} \u2192 ${names.join(", ")}`;
+      }).join(" \u00b7 ");
+    }
+    function refreshScopeLine() { const el = $("sp-dpr-scope"); if (el) el.textContent = scopeLabel(); }
+    document.querySelectorAll("#sp-modal input[data-dprroom]").forEach((c) => c.addEventListener("change", refreshScopeLine));
+    $("sp-dprarea-all").onclick = () => { document.querySelectorAll("#sp-modal input[data-dprroom]").forEach((c) => { c.checked = true; }); refreshScopeLine(); };
+    $("sp-dprarea-none").onclick = () => { document.querySelectorAll("#sp-modal input[data-dprroom]").forEach((c) => { c.checked = false; }); refreshScopeLine(); };
+    document.querySelectorAll("[data-dprgall]").forEach((b) => b.addEventListener("click", () => {
+      document.querySelector(`.sp-roomgroup[data-g="${cssA(b.dataset.dprgall)}"]`).querySelectorAll("input[data-dprroom]").forEach((c) => { c.checked = true; });
+      refreshScopeLine();
+    }));
+    document.querySelectorAll("[data-dprgnone]").forEach((b) => b.addEventListener("click", () => {
+      document.querySelector(`.sp-roomgroup[data-g="${cssA(b.dataset.dprgnone)}"]`).querySelectorAll("input[data-dprroom]").forEach((c) => { c.checked = false; });
+      refreshScopeLine();
+    }));
   }
 
   async function loadState(fromOpen) {

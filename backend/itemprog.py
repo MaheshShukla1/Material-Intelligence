@@ -91,7 +91,7 @@ def _room_qty_from_groups(groups, room_set):
 
 
 def compute(items_df, prog_svc, rooms_svc, all_room_ids, planned_over,
-            room=None, room_qty_groups=None):
+            room=None, room_qty_groups=None, rooms=None):
     """Return a used/planned/% DataFrame, one row per BOQ item.
 
     prog_svc        : item_progress for this service {code: {"*":f, room:f}}
@@ -99,6 +99,16 @@ def compute(items_df, prog_svc, rooms_svc, all_room_ids, planned_over,
     all_room_ids    : every room id in the structure
     planned_over    : {code: planned_qty} engineer overrides
     room            : if given, compute for that single room only (drill-down).
+    rooms           : if given (an iterable of room ids), compute the SUM
+                      over just those rooms -- the multi-room counterpart of
+                      `room`, for an area export scoped to more than one
+                      room/zone at once (e.g. "13th Floor" as a whole, or an
+                      arbitrary hand-picked set). Ignored when `room` is also
+                      given (room wins -- the two are never meant to be
+                      combined). None (the default, same as an empty/absent
+                      value) means "every room in the project", same as
+                      always -- zero behaviour change for every existing
+                      caller that never passes it.
     room_qty_groups : optional {code: [{"rooms":[...], "qty":X}, ...]} --
                       see this module's own docstring. Omitted or empty for
                       an item -> behaves exactly as before this existed.
@@ -118,6 +128,14 @@ def compute(items_df, prog_svc, rooms_svc, all_room_ids, planned_over,
     item's normal applicability, not a full replacement that requires
     covering every room before they're safe to use at all.
 
+    `planned_over` note for the `rooms` (multi-room) path: same caveat that
+    already applies to the single-`room` path above -- a manual override is
+    one flat number for the WHOLE item (there is no way to know what share
+    of it belongs to any subset of rooms), so it is used as-is rather than
+    divided. This is not a new judgement call introduced by `rooms`; it is
+    the exact same pre-existing behaviour `room` already had, just applied
+    consistently rather than only for a single room.
+
     Performance note: was iterrows() + `r in all_room_ids` (a list, so an
     O(n) scan) per applicable room per item -- O(items x rooms²) worst case.
     On a 100+ item, 100+ room project that's the real reason a service view
@@ -130,6 +148,7 @@ def compute(items_df, prog_svc, rooms_svc, all_room_ids, planned_over,
     planned_over = planned_over or {}
     room_qty_groups = room_qty_groups or {}
     room_set = set(all_room_ids)
+    rooms_target = set(rooms) if (room is None and rooms is not None) else None
     recs = []
     for it in items_df.itertuples():
         code = str(it.item_code)
@@ -179,6 +198,10 @@ def compute(items_df, prog_svc, rooms_svc, all_room_ids, planned_over,
                 fr = frac_for(node, room) if in_room else 0.0
                 planned = q if in_room else 0.0
                 used = q * fr
+            elif rooms_target is not None:
+                target = [r for r in appl if r in rooms_target]
+                planned = sum(_rq(r) for r in target)
+                used = sum(_rq(r) * frac_for(node, r) for r in target)
             else:
                 planned = sum(_rq(r) for r in appl)
                 used = sum(_rq(r) * frac_for(node, r) for r in appl)
@@ -193,6 +216,10 @@ def compute(items_df, prog_svc, rooms_svc, all_room_ids, planned_over,
                 fr = frac_for(node, room) if in_room else 0.0
                 n = 1 if in_room else 0
                 frac_sum = fr
+            elif rooms_target is not None:
+                target = [r for r in appl if r in rooms_target]
+                n = len(target)
+                frac_sum = sum(frac_for(node, r) for r in target)
             else:
                 n = len(appl)
                 frac_sum = sum(frac_for(node, r) for r in appl)
@@ -210,14 +237,19 @@ def compute(items_df, prog_svc, rooms_svc, all_room_ids, planned_over,
             used = planned * (frac_sum / n) if n else 0.0
             pct = (100.0 * frac_sum / n) if n else 0.0
 
+        target_room_count = (
+            (1 if room in appl else 0) if room is not None else
+            (len([r for r in appl if r in rooms_target]) if rooms_target is not None else
+             len(appl)))
         recs.append({
             "item_code": code, "description": getattr(it, "description", ""),
             "unit": getattr(it, "unit", ""), "qty_per_room": qty,
-            "rooms": (len(appl) if room is None else (1 if room in appl else 0)),
+            "rooms": target_room_count,
             "planned_total": round(planned, 3), "used": round(used, 3),
             "remaining": round(max(planned - used, 0.0), 3),
             "progress_pct": round(pct, 1),
-            "in_room": (room is None or room in appl),
+            "in_room": (room is None or room in appl) if rooms_target is None
+                      else target_room_count > 0,
             "has_room_groups": room_qty is not None,
         })
     return pd.DataFrame(recs)
@@ -233,7 +265,7 @@ def compute(items_df, prog_svc, rooms_svc, all_room_ids, planned_over,
 _DONE_TOL = 1e-6
 
 
-def room_buckets(item_code, prog_svc, rooms_svc, all_room_ids, room_qty_groups=None):
+def room_buckets(item_code, prog_svc, rooms_svc, all_room_ids, room_qty_groups=None, rooms=None):
     """One item's applicable rooms, bucketed by that room's own completion
     fraction: >=1.0 (within tolerance) -> done, 0<frac<1 -> in_progress,
     ==0 -> not_started. Mirrors compute()'s applicability resolution
@@ -242,6 +274,12 @@ def room_buckets(item_code, prog_svc, rooms_svc, all_room_ids, room_qty_groups=N
     used/planned/% numbers already shown for the item -- it is the same
     progress store, just grouped into buckets instead of summed into one
     total.
+
+    rooms : optional iterable of room ids -- when given, buckets only the
+            applicable rooms that are ALSO in this set (the multi-room
+            counterpart of compute()'s own `rooms` param, for an area-scoped
+            DPR export's Item-detail Done/In progress/Pending columns).
+            None (default) means every applicable room, same as always.
 
     Returns {"done", "in_progress", "not_started", "total"}.
 
@@ -271,6 +309,9 @@ def room_buckets(item_code, prog_svc, rooms_svc, all_room_ids, room_qty_groups=N
     # applicable the ordinary way (i.e. explicitly listed in item_rooms.json),
     # it just has no group-specific qty.
     appl = list(dict.fromkeys(base_appl + group_appl)) if group_appl is not None else base_appl
+    if rooms is not None:
+        rooms_target = set(rooms)
+        appl = [r for r in appl if r in rooms_target]
     node = prog_svc.get(code, {})
     done = in_progress = not_started = 0
     for r in appl:

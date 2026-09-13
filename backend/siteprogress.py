@@ -33,7 +33,7 @@ import functools
 from pathlib import Path
 
 import pandas as pd
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile, Response
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile, Response, Query
 
 from . import structure, boq, activity, progress, pnl, linkage, schema, subcat, realtime, itemprog, dpr, shortage_history
 
@@ -1523,11 +1523,28 @@ def dpr_today(slug: str):
 
 
 @router.get("/{slug}/export-dpr")
-def export_dpr(slug: str, start: str, end: str = None):
+def export_dpr(slug: str, start: str, end: str = None, service: str = None,
+               rooms: list[str] = Query(None)):
     """The full DPR -- Summary + Item detail + Daily updates -- for one date
     (end omitted) or a range (inclusive). Reuses the exact same pnl.py /
     itemprog.py / dpr.py functions every other route here already calls;
-    nothing new is computed, only assembled and formatted."""
+    nothing new is computed, only assembled and formatted.
+
+    service : optional -- restrict every sheet to just this one service.
+    rooms   : optional -- structure NODE ids (the picker's tree, same ids
+              item_rooms.json/item_progress.json already key by), scoping
+              ALL THREE sheets together to just this area: Summary and Item
+              detail via itemprog.compute()/room_buckets()'s own `rooms`
+              param (summed over just these rooms, real numbers, no new
+              engine), and Daily updates via dpr.filter_by_area() (which
+              works in floor/room NAME space -- translated via the
+              already-existing _room_location_map(), the SAME lookup
+              _log_dpr_change() itself uses to write dpr_log.json in the
+              first place, so the two can never disagree -- including the
+              hospital case, where "floor" is really a joined "Wing ·
+              Floor" location string, not a single level). Neither param
+              changes a single number for a caller that never passes them
+              -- today's whole-project export, byte-for-byte."""
     d = _need(slug)
     end = end or start
     struct = _read_json(d / "structure.json", None)
@@ -1537,9 +1554,25 @@ def export_dpr(slug: str, start: str, end: str = None):
     leaf_label = _leaf_label(d)
 
     boqdf = _load_boq(d)
-    services = sorted(boqdf.service.unique().tolist()) if not boqdf.empty else []
+    all_services = sorted(boqdf.service.unique().tolist()) if not boqdf.empty else []
+    services = [service] if service else all_services
+    if service and service not in all_services:
+        raise HTTPException(400, f"unknown service: {service}")
     m = _load_mapping(d)
     all_rooms = _all_room_ids(d)
+
+    # Translate the picker's room ids into the name-space dpr_log.json
+    # itself logs in, via the SAME lookup _log_dpr_change() uses to write
+    # that log -- never a second, possibly-diverging translation. rooms_set
+    # stays in ID-space for itemprog (compute()/room_buckets() already key
+    # by structure ids); floor_names/room_names are name-space, for
+    # dpr.filter_by_area() only.
+    rooms_set = set(rooms) if rooms else None
+    floor_names = room_names = None
+    if rooms_set:
+        lookup = _room_location_map(d)
+        room_names = {lookup[r]["name"] for r in rooms_set if r in lookup and lookup[r]["name"]}
+        floor_names = {lookup[r]["location"] for r in rooms_set if r in lookup and lookup[r]["location"]}
 
     rollups, item_rows = {}, []
     for svc in services:
@@ -1551,7 +1584,7 @@ def export_dpr(slug: str, start: str, end: str = None):
         room_qty_groups = _item_room_qty(d).get(svc, {})
         planned_over = _planned(d, svc)
         used = itemprog.compute(items, prog_svc, rooms_cfg, all_rooms, planned_over,
-                                room_qty_groups=room_qty_groups)
+                                room_qty_groups=room_qty_groups, rooms=rooms_set)
         ip = pnl.compute_item_pnl(used, rates=_rates(d, svc), install_pct=_install_pct(d, svc),
                                   default_install_pct=_settings(d).get("default_install_pct"))
         rp = pnl.rollup_pnl(ip, m, svc)
@@ -1561,7 +1594,8 @@ def export_dpr(slug: str, start: str, end: str = None):
             code = str(it.item_code)
             if code not in mapped_codes:
                 continue   # only items actually inside an activity -- not raw/unmapped BOQ noise
-            rb = itemprog.room_buckets(code, prog_svc, rooms_cfg, all_rooms, room_qty_groups=room_qty_groups)
+            rb = itemprog.room_buckets(code, prog_svc, rooms_cfg, all_rooms,
+                                       room_qty_groups=room_qty_groups, rooms=rooms_set)
             item_rows.append({
                 "service": svc, "item": it.description,
                 "planned": round(it.planned_total, 2) if it.planned_total is not None else None,
@@ -1582,7 +1616,10 @@ def export_dpr(slug: str, start: str, end: str = None):
         raise HTTPException(400, "start/end must be YYYY-MM-DD")
     if end_d < start_d:
         raise HTTPException(400, "end date is before start date")
-    by_date = dpr.entries_for_range(_dpr_log(d), start, end)
+    log = _dpr_log(d)
+    if floor_names:
+        log = dpr.filter_by_area(log, floors=floor_names, rooms=room_names)
+    by_date = dpr.entries_for_range(log, start, end)
     date_list, cur = [], start_d
     while cur <= end_d:
         date_list.append(cur.isoformat())
@@ -1595,6 +1632,18 @@ def export_dpr(slug: str, start: str, end: str = None):
     days = [(ds, dpr.rollup_across_floors(by_date.get(ds, []), services, leaf_label=leaf_label)) for ds in date_list]
 
     date_label = start if start == end else f"{start} to {end}"
+    if service:
+        date_label += f" \u2014 {service}"
+    if floor_names:
+        # A room selection that covers every one of its floor's real rooms
+        # (an engineer ticked the floor itself, or happened to tick all its
+        # rooms individually -- indistinguishable, and doesn't need to be
+        # distinguished) reads as that whole floor, not "N of M rooms".
+        floor_room_ids = {rid for rid, info in _room_location_map(d).items() if info["location"] in floor_names}
+        whole_floors = (rooms_set is not None and floor_room_ids <= rooms_set)
+        area_label = ", ".join(sorted(floor_names)) if whole_floors else \
+            ", ".join(sorted(floor_names)) + " \u2192 " + ", ".join(sorted(room_names))
+        date_label += f" \u2014 {area_label}"
     prog = _load_progress(d).df
     completion = progress.activity_completion(prog) if len(prog) else None
     completion_by_floor = progress.activity_completion(prog, by_floor=True) if len(prog) else None
@@ -1605,7 +1654,9 @@ def export_dpr(slug: str, start: str, end: str = None):
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
-    fname = f"DPR_{_slugify(slug)}_{start}" + (f"_to_{end}" if end != start else "") + ".xlsx"
+    scope_bits = [_slugify(slug), start] + ([f"to_{end}"] if end != start else []) + \
+        ([_slugify(service)] if service else []) + (["area"] if rooms_set else [])
+    fname = "DPR_" + "_".join(scope_bits) + ".xlsx"
     return Response(
         content=buf.read(),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

@@ -48,7 +48,23 @@
     if (Math.abs(n) >= 1e5) return "₹" + (n / 1e5).toFixed(2) + " L";
     return "₹" + n.toLocaleString("en-IN");
   }
-  const qf = (v) => (v == null ? "—" : (Math.round(v * 10) / 10).toLocaleString("en-IN"));
+  // Countable ("discrete") units -- one switch, one DB, one box is always a
+  // whole piece; there is no such thing as "0.12 of a switch". Continuous
+  // ("measured") units -- Mtr, Rmt, Sqmm, Kg, Ltr, Cum... -- genuinely need
+  // decimal precision (535.7 Rmt is a real, meaningful quantity). qf() and
+  // the editable qty input both key off this so a completion-weighted sum
+  // (e.g. 74.12 out of 204 NOS, mathematically real -- partial rooms done --
+  // but not a physically real "piece count") displays as a whole number
+  // without changing the underlying data or calculation at all.
+  const COUNT_UNITS = new Set(["NOS", "NO", "NOS.", "PCS", "PC", "PC.", "EACH",
+    "EA", "SET", "SETS", "POINT", "POINTS", "UNIT", "UNITS", "NUMBER", "NUMBERS",
+    "LOT", "LOTS"]);
+  const isCountUnit = (unit) => COUNT_UNITS.has(String(unit || "").trim().toUpperCase());
+  const qf = (v, unit) => {
+    if (v == null) return "—";
+    return isCountUnit(unit) ? Math.round(v).toLocaleString("en-IN")
+                             : (Math.round(v * 10) / 10).toLocaleString("en-IN");
+  };
   const briefErr = (e) => { try { return JSON.parse(e.body).detail || e.body; } catch (_) { return e.body || e.message || "error"; } };
   const sel = (s) => document.querySelector(s);
 
@@ -787,7 +803,7 @@
       const units = new Set(items.map((i) => i.unit));
       const sameUnit = units.size === 1;
       const actSub = sameUnit
-        ? `${items.length} items · <b class="sp-qtynum">${qf(items.reduce((s, i) => s + (i.used || 0), 0))}</b> of <b class="sp-qtynum">${qf(items.reduce((s, i) => s + (i.planned || 0), 0))}</b> ${esc(items[0].unit)}`
+        ? `${items.length} items · <b class="sp-qtynum">${qf(items.reduce((s, i) => s + (i.used || 0), 0), items[0].unit)}</b> of <b class="sp-qtynum">${qf(items.reduce((s, i) => s + (i.planned || 0), 0), items[0].unit)}</b> ${esc(items[0].unit)}`
         : `${items.length} items`;
       const rated = items.filter((i) => i.rate != null);
       const done = rated.length ? rated.reduce((s, i) => s + (i.done_val || 0), 0) : null;
@@ -813,8 +829,8 @@
   function ovItemRowHTML(it) {
     const rem = it.remaining || 0;
     const sub = rem > 0
-      ? `<b class="sp-qtynum">${qf(it.used)}</b> of <b class="sp-qtynum">${qf(it.planned)}</b> ${esc(it.unit)} done, <b class="sp-qtynum">${qf(rem)}</b> remaining`
-      : `<b class="sp-qtynum">${qf(it.used)}</b> of <b class="sp-qtynum">${qf(it.planned)}</b> ${esc(it.unit)} done`;
+      ? `<b class="sp-qtynum">${qf(it.used, it.unit)}</b> of <b class="sp-qtynum">${qf(it.planned, it.unit)}</b> ${esc(it.unit)} done, <b class="sp-qtynum">${qf(rem, it.unit)}</b> remaining`
+      : `<b class="sp-qtynum">${qf(it.used, it.unit)}</b> of <b class="sp-qtynum">${qf(it.planned, it.unit)}</b> ${esc(it.unit)} done`;
     return `<div class="sp-ovitemrow">
       <div style="min-width:0;flex:1"><div class="sp-ovitemname">${esc(short(it.desc))}</div><div class="sp-ovitemsub">${esc(it.code)} · ${sub}</div></div>
       <div class="sp-ovitemmoney done"><b>${inr(it.done_val)}</b><span>done</span></div>
@@ -921,7 +937,7 @@
     // whole-project view before opening the edit prompt, so whatever gets
     // typed is unambiguously the real whole-project number and can never
     // again silently overwrite it with a single room's share.
-    return `<button class="sp-planned" data-planned="${esc(it.code)}" title="Edit planned">${qf(it.planned)} ✎</button><span>${esc(it.unit)} planned${S.room ? " here" : ""}</span>`;
+    return `<button class="sp-planned" data-planned="${esc(it.code)}" title="Edit planned">${qf(it.planned, it.unit)} ✎</button><span>${esc(it.unit)} planned${S.room ? " here" : ""}</span>`;
   }
 
   // Sparse chip -- rendered ONLY when shortageOf(code) has real history (the
@@ -944,7 +960,8 @@
     const cpd = links.reduce((s, L) => s + (L.rate_per_day || 0), 0);
     const cons = cpd > 0 ? `<span class="sp-tag" title="consumption per day from the register">≈${Math.round(cpd)}/day</span>` : "";
     const linked = links.length > 0;
-    const qtyVal = Math.round((it.used || 0) * 100) / 100;
+    const qtyVal = isCountUnit(it.unit) ? Math.round(it.used || 0)
+                                        : Math.round((it.used || 0) * 100) / 100;
     const roomBadge = S.room ? `<span class="sp-tag" style="color:var(--violet)" title="This row shows only ${esc(S.roomName || "this " + curLeafLower())}'s own progress, not the whole project's">${esc(S.roomName || "this " + curLeafLower())} only</span>` : "";
     // The rooms-edit chip opens a picker across EVERY room (applicability +
     // quantity groups, openRoomsModal()) -- reported directly as confusing
@@ -996,7 +1013,7 @@
     if (groups && groups.length) {
       const covered = groups.reduce((s, g) => s + g.rooms.length, 0);
       return groups.length === 1
-        ? `${covered} ${curLeafPluralLower(covered)} @ ${qf(groups[0].qty)} ${esc(S._byCode[code] ? S._byCode[code].unit : "")}`.trim()
+        ? `${covered} ${curLeafPluralLower(covered)} @ ${qf(groups[0].qty, S._byCode[code] ? S._byCode[code].unit : "")} ${esc(S._byCode[code] ? S._byCode[code].unit : "")}`.trim()
         : `${covered} of ${total} ${curLeafPluralLower(total)} · ${groups.length} qty groups`;
     }
     if (!ids || !ids.length) return `all ${total} ${curLeafPluralLower(total)}`;
@@ -1064,7 +1081,7 @@
           <p class="lbl">Current quantity groups</p>
           ${existingGroups.map((g, gi) => {
             const doneN = g.rooms.filter(isDone).length;
-            return `<div class="row"><span>${g.rooms.length} ${curLeafPluralLower(g.rooms.length)}</span><b>${qf(g.qty)} ${esc(it.unit)}</b>${doneN ? `<span class="sp-donebadge">${doneN} done</span>` : ""}<button type="button" class="sp-qtygroup-rm" data-rmgroup="${gi}" title="Remove this group">Remove</button></div>`;
+            return `<div class="row"><span>${g.rooms.length} ${curLeafPluralLower(g.rooms.length)}</span><b>${qf(g.qty, it.unit)} ${esc(it.unit)}</b>${doneN ? `<span class="sp-donebadge">${doneN} done</span>` : ""}<button type="button" class="sp-qtygroup-rm" data-rmgroup="${gi}" title="Remove this group">Remove</button></div>`;
           }).join("")}
           <p class="hint">Ticking ${curLeafPluralLower(2)} below and saving with a quantity moves them into a new group (out of whichever group they're currently in).</p>
         </div>`
@@ -1141,7 +1158,7 @@
     document.querySelectorAll("[data-rmgroup]").forEach((b) => b.addEventListener("click", async () => {
       const g = existingGroups[Number(b.dataset.rmgroup)];
       if (!g) return;
-      if (!confirm(`Remove this group (${g.rooms.length} room${g.rooms.length === 1 ? "" : "s"} @ ${qf(g.qty)} ${it.unit})? Those rooms fall back to the item's normal quantity — progress already recorded for them is not affected.`)) return;
+      if (!confirm(`Remove this group (${g.rooms.length} room${g.rooms.length === 1 ? "" : "s"} @ ${qf(g.qty, it.unit)} ${it.unit})? Those rooms fall back to the item's normal quantity — progress already recorded for them is not affected.`)) return;
       S.svc = await jpost(api("/" + S.slug + "/item-room-qty" + roomQ()), { service: S.service, item_code: code, rooms: g.rooms, qty: null });
       closeModal();
       await afterSvc();
@@ -1438,7 +1455,7 @@
       host.innerHTML = items.length
         ? items.map((it) => `<label class="sp-maprow"><input type="checkbox" data-c="${esc(it.code)}" ${checked.has(it.code) ? "checked" : ""}>
             <span class="c">${esc(it.code)}</span><span>${esc(short(it.desc))}</span>
-            <span class="sub" style="margin-left:auto;white-space:nowrap">${qf(it.planned)} ${esc(it.unit)}</span>
+            <span class="sub" style="margin-left:auto;white-space:nowrap">${qf(it.planned, it.unit)} ${esc(it.unit)}</span>
             <span class="sp-tag">${esc(it.sub)}</span></label>`).join("")
         : `<p class="sp-empty" style="padding:24px;text-align:center">No items match “${esc(filter)}”.</p>`;
       host.querySelectorAll("input[data-c]").forEach((cb) => cb.addEventListener("change", () => {
@@ -1614,7 +1631,7 @@
         <input class="ctl sp-rateinput" data-code="${esc(it.code)}" type="number" min="0" placeholder="₹ / ${esc(it.unit)}" value="${it.rate != null ? it.rate : ""}" style="width:100px">
         <input class="ctl sp-installinput" data-code="${esc(it.code)}" data-had-override="${hasOwn ? "1" : "0"}" type="number" min="0" max="100"
           placeholder="${curDefault !== "" ? curDefault + "%" : "100%"}" value="${hasOwn ? it.install_pct_own : ""}" style="width:80px">
-        <span class="sub" style="width:68px;text-align:right">${qf(it.planned)} ${esc(it.unit)}</span></div>`;
+        <span class="sub" style="width:68px;text-align:right">${qf(it.planned, it.unit)} ${esc(it.unit)}</span></div>`;
     }).join("");
     const body = `
       <div class="sp-maprow" style="border-bottom:2px solid var(--line2);margin-bottom:2px">
@@ -1782,7 +1799,7 @@
     const outstanding = prog + pend;
     const w = (n) => (total ? (100 * n / total) : 0);
     const needRow = outstanding > 0
-      ? `<p class="sp-roomsneed"><span>To finish those ${outstanding} ${curLeafPluralLower(outstanding)}</span><b>≈${qf(it.remaining)} ${esc(it.unit)} more</b></p>`
+      ? `<p class="sp-roomsneed"><span>To finish those ${outstanding} ${curLeafPluralLower(outstanding)}</span><b>≈${qf(it.remaining, it.unit)} ${esc(it.unit)} more</b></p>`
       : `<p class="sp-roomsneed"><span>All ${total} ${curLeafPluralLower(total)} done for this item</span></p>`;
     return `<div class="sp-roomsblk">
       <p class="lbl">${curLeafPlural(2)} — this item</p>
@@ -1839,7 +1856,7 @@
         };
       });
       stockHTML = rows.map((L) => {
-        const recv = L.received == null ? "" : ` · <b class="sp-recv">${qf(L.received)}</b> received to date`;
+        const recv = L.received == null ? "" : ` · <b class="sp-recv">${qf(L.received, L.unit)}</b> received to date`;
         const cons = L.rate_per_day == null ? "" : ` · ≈${qf(L.rate_per_day)}/day`;
         // Cross-check THIS material's own issued-vs-used gap -- per
         // material, never pooled, because two materials linked to the same
@@ -1862,13 +1879,13 @@
         let issuedNote = "";
         if (L.total_consumed != null) {
           if (L.units_match || L.factor != null) {
-            issuedNote = `<div class="sp-drow sub"><span></span><span>${qf(L.total_consumed)} ${esc(L.unit || "")} issued to date</span></div>`;
+            issuedNote = `<div class="sp-drow sub"><span></span><span>${qf(L.total_consumed, L.unit)} ${esc(L.unit || "")} issued to date</span></div>`;
           } else {
-            issuedNote = `<div class="sp-drow sub"><span></span><span>${qf(L.total_consumed)} ${esc(L.unit || "")} issued — unit differs from ${esc(it.unit)}; set a conversion factor in Link stock to compare against work done</span></div>`;
+            issuedNote = `<div class="sp-drow sub"><span></span><span>${qf(L.total_consumed, L.unit)} ${esc(L.unit || "")} issued — unit differs from ${esc(it.unit)}; set a conversion factor in Link stock to compare against work done</span></div>`;
           }
         }
         return `<div class="sp-drow"><span>${esc(String(L.material).slice(0, 30))}</span>
-          <b>${L.on_hand == null ? "—" : qf(L.on_hand)} on hand · ${L.engine_days_left == null ? "?" : Math.round(L.engine_days_left) + "d"}${cons} ${L.verdict === "SHORTAGE" ? "⚠︎" : L.verdict === "UNKNOWN_FACTOR" ? "❓" : ""}</b></div>
+          <b>${L.on_hand == null ? "—" : qf(L.on_hand, L.unit)} on hand · ${L.engine_days_left == null ? "?" : Math.round(L.engine_days_left) + "d"}${cons} ${L.verdict === "SHORTAGE" ? "⚠︎" : L.verdict === "UNKNOWN_FACTOR" ? "❓" : ""}</b></div>
           ${issuedNote}
           ${recv ? `<div class="sp-drow sub"><span></span><span>${esc(String(L.material).slice(0, 22))}${recv}</span></div>` : ""}`;
       }).join("");
@@ -1896,9 +1913,9 @@
       : `Planned (${roomCount} ${curLeafPluralLower(roomCount)})`;
     const html = `<div class="sheet" id="sp-draw"><div class="sheetin">
       <div class="sheethd"><div><h2>${esc(it.code)} · ${esc(it.sub)}</h2><p>${esc(short(it.desc, 120))}</p></div><button class="btn" id="sp-draw-x">Close</button></div>
-      <div class="sp-drow"><span>${plannedLabel}</span><b>${qf(it.planned)} ${esc(it.unit)}</b></div>
-      <div class="sp-drow"><span>Used so far</span><b>${qf(it.used)} ${esc(it.unit)}</b></div>
-      <div class="sp-drow"><span>Remaining work</span><b>${qf(it.remaining)} ${esc(it.unit)}</b></div>
+      <div class="sp-drow"><span>${plannedLabel}</span><b>${qf(it.planned, it.unit)} ${esc(it.unit)}</b></div>
+      <div class="sp-drow"><span>Used so far</span><b>${qf(it.used, it.unit)} ${esc(it.unit)}</b></div>
+      <div class="sp-drow"><span>Remaining work</span><b>${qf(it.remaining, it.unit)} ${esc(it.unit)}</b></div>
       ${roomsBlockHTML(it)}
       <div class="sp-drow"><span>Rate</span><b>${it.rate != null ? inr(it.rate) + " /" + esc(it.unit) : "not set"}</b></div>
       ${it.rate != null ? `
@@ -1908,7 +1925,7 @@
       <div class="sp-dbar"><i style="width:${Math.round(it.pct || 0)}%"></i></div>
       <div style="text-align:right;font-size:11.5px;color:var(--ink3)">${Math.round(it.pct || 0)}% complete</div>
       ${stockHTML ? `<p class="sub" style="margin:16px 0 4px">Linked stock</p>${stockHTML}` : ""}
-      <div class="sp-dlink ${verdictCls}">${esc(msg)}${rl && rl.verdict === "SHORTAGE" ? ` <b>Order ~${qf(rl.order_qty)} ${esc(it.unit)}.</b>` : ""}</div>
+      <div class="sp-dlink ${verdictCls}">${esc(msg)}${rl && rl.verdict === "SHORTAGE" ? ` <b>Order ~${qf(rl.order_qty, it.unit)} ${esc(it.unit)}.</b>` : ""}</div>
       <p class="sp-demo">Rates are user-entered. Stock figures (on hand, received, consumption/day) come read-only from the Forecast run.</p></div></div>`;
     const d = document.createElement("div"); d.innerHTML = html; document.body.appendChild(d.firstChild);
     const close = () => { const x = $("sp-draw"); if (x) x.remove(); };

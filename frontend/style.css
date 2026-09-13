@@ -1,0 +1,365 @@
+[hidden]{display:none !important}
+
+:root{
+  --bg:#faf9f7; --panel:#fff; --line:#e7e5df; --line2:#f0eee9;
+  --ink:#1c1c1b; --ink2:#5f5e59; --ink3:#8b8983;
+  --red:#a02622; --redbg:#fbe7e6; --amber:#7d4c06; --amberbg:#fbf1da;
+  --green:#39631a; --greenbg:#e8f2e0; --violet:#453a9a; --violetbg:#ebe8fa;
+  --slate:#55544f; --slatebg:#efeee9;
+  --r:10px; --hdr:64px;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:14px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+h1,h2{margin:0;font-weight:600}
+main{max-width:1240px;margin:0 auto;padding:0 22px 72px}
+
+.top{position:sticky;top:0;z-index:30;background:var(--bg);
+  border-bottom:1px solid var(--line);display:flex;align-items:center;
+  justify-content:space-between;gap:18px;padding:13px 22px;margin-bottom:22px}
+.brand{display:flex;align-items:center;gap:11px;min-width:0}
+.mark{width:30px;height:30px;border-radius:7px;background:var(--ink);flex:none;
+  overflow:hidden;display:flex;align-items:center;justify-content:center}
+.mark img{width:100%;height:100%;object-fit:contain}
+.top h1{font-size:15px}
+.top p{margin:1px 0 0;font-size:12px;color:var(--ink3);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:52vw}
+.topact{display:flex;align-items:center;gap:9px;flex:none}
+.lead{font-size:12px;color:var(--ink2);display:flex;align-items:center;gap:6px}
+.lead input{width:52px}
+
+.ctl{font:inherit;font-size:13px;padding:7px 10px;border:1px solid var(--line);
+  border-radius:8px;background:var(--panel);color:var(--ink)}
+.ctl:focus{outline:none;border-color:var(--violet);
+  box-shadow:0 0 0 3px var(--violetbg)}
+
+.btn{font:inherit;font-size:13px;font-weight:500;padding:8px 15px;
+  border-radius:8px;border:1px solid var(--line);background:var(--panel);
+  color:var(--ink);cursor:pointer;text-decoration:none;display:inline-block}
+.btn:hover{border-color:#cfcdc6}
+.btn.primary{background:var(--ink);color:#fff;border-color:var(--ink)}
+.btn.primary:hover{background:#333330}
+.btn.danger{color:var(--red);border-color:#eec9c7}
+.btn.danger:hover{background:var(--redbg)}
+
+.drop{padding-top:14px;margin-top:14px}
+.dh{margin:0 0 6px;font-size:17px;font-weight:600}
+.ds{margin:0 auto 20px;color:var(--ink3);font-size:13px;max-width:400px}
+.dropform{display:flex;gap:9px;justify-content:center;flex-wrap:wrap}
+.dropform.col{flex-direction:column;align-items:stretch}
+.dropform .ctl{min-width:230px}
+
+.home-head{max-width:560px;margin:0 auto 28px;text-align:center}
+.home-head h2{font-size:25px;font-weight:600;margin:0 0 10px}
+.home-head p{margin:0;color:var(--ink3);font-size:14px;line-height:1.7}
+
+.homeseg{display:flex;justify-content:center;margin-bottom:26px}
+.homeseg-in{display:inline-flex;background:var(--slatebg);border-radius:11px;
+  padding:4px;gap:3px}
+.homeseg button{font:inherit;font-size:13.5px;font-weight:500;padding:9px 20px;
+  border:none;border-radius:8px;background:transparent;color:var(--ink3);
+  cursor:pointer}
+.homeseg button.on{background:var(--panel);color:var(--ink);
+  box-shadow:0 1px 2px rgba(28,28,27,.08)}
+.homeseg button:not(.on):hover{color:var(--ink)}
+
+.homecard{background:var(--panel);border:1px solid var(--line);
+  border-radius:18px;padding:46px 34px;text-align:center;max-width:520px;
+  margin:0 auto;transition:border-color .12s,background .12s}
+#drop.over .homecard{border-color:var(--violet);background:#f9f8fd}
+.homecard-icon{width:60px;height:60px;border-radius:16px;background:var(--violetbg);
+  display:flex;align-items:center;justify-content:center;margin:0 auto 18px}
+.homecard-icon svg{width:26px;height:26px;color:var(--violet)}
+.homecard .dh{font-size:18.5px}
+.homecard .ds{font-size:13.5px;max-width:400px;margin-bottom:24px}
+.homecard .ctl{font-size:14px;padding:10px 14px}
+.homecard .btn{font-size:14px;padding:10px 22px}
+
+.recent{max-width:520px;margin:30px auto 0}
+.recent-title{font-size:11.5px;font-weight:600;letter-spacing:.5px;
+  color:var(--ink3);text-transform:uppercase;margin-bottom:12px}
+.rp{border:1px solid var(--line);border-radius:14px;padding:16px 18px;
+  display:flex;justify-content:space-between;align-items:center;
+  gap:12px;margin-bottom:10px;cursor:pointer;transition:border-color .12s}
+.rp:last-child{margin-bottom:0}
+.rp:hover,.rp:focus-visible{border-color:var(--violet)}
+.rp:focus-visible{outline:2px solid var(--violet);outline-offset:1px}
+.rp-name{font-size:14.5px;font-weight:600;color:var(--ink)}
+.rp-meta{font-size:12.5px;color:var(--ink3);margin-top:3px}
+.rp-open{font-size:13px;color:var(--violet);font-weight:500;white-space:nowrap}
+
+.busy{text-align:center;padding:50px 0;color:var(--ink2)}
+
+.busy-ring{position:relative;width:132px;height:132px;margin:0 auto 4px}
+.busy-ring svg{transform:rotate(-90deg)}
+#busy-arc{transition:stroke-dashoffset .5s cubic-bezier(.4,0,.2,1)}
+.busy-ringtext{position:absolute;inset:0;display:flex;flex-direction:column;
+  align-items:center;justify-content:center}
+.busy-ringtext b{font-size:28px;font-weight:600;letter-spacing:-.5px;color:var(--ink);
+  font-variant-numeric:tabular-nums}
+.busy-ringtext span{font-size:11px;color:var(--ink3);margin-top:1px}
+.busy-stage{font-size:14.5px;font-weight:500;color:var(--ink);margin:4px 0 2px}
+.busy-eta{font-size:12px;color:var(--ink3);margin:0 0 22px}
+.busy-steps{max-width:360px;margin:0 auto;text-align:left;
+  border-top:1px solid var(--line2);padding-top:16px}
+.busy-steps:empty{display:none}
+.busy-step{display:flex;align-items:flex-start;gap:11px;padding:8px 0}
+.busy-stepicon{width:20px;height:20px;border-radius:50%;flex:none;margin-top:1px;
+  display:flex;align-items:center;justify-content:center;border:1.5px solid var(--line);
+  color:var(--ink3);font-size:11px;transition:.2s;background:transparent}
+.busy-stepicon.done{background:var(--green);border-color:var(--green);color:#fff}
+.busy-stepicon.current{background:var(--ink);border-color:var(--ink);color:#fff}
+.busy-steplabel{font-size:13.5px;color:var(--ink3);transition:.2s}
+.busy-steplabel.done,.busy-steplabel.current{color:var(--ink)}
+.busy-steplabel.current{font-weight:600}
+.busy-steplabel.done{font-weight:500}
+.busy-stepdetail{font-size:11.5px;color:var(--ink3);margin-top:1px;display:none}
+.busy-stepdetail.show{display:block}
+
+/* indeterminate mode -- switching to an already-loaded project has no real
+   "reading sheets / computing forecast" stages to narrate (nothing is being
+   re-parsed), so it gets a plain spinning ring instead of the staged
+   checklist, rather than fabricating stages that aren't actually happening. */
+.busy-ring.indeterminate svg{animation:busyspin 1s linear infinite}
+.busy-ring.indeterminate #busy-arc{stroke-dashoffset:273.3}
+@keyframes busyspin{from{transform:rotate(-90deg)}to{transform:rotate(270deg)}}
+
+.note{border-radius:12px;padding:13px 16px;margin-bottom:14px;font-size:13px}
+.note.block{background:var(--redbg);border:1px solid #f0cdcb;color:var(--red)}
+.note.warn{background:var(--amberbg);border:1px solid #ecd9a8;color:var(--amber)}
+.note b{display:block;margin-bottom:3px}
+.note ul{margin:4px 0 0;padding-left:17px}
+
+.mapbox{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+  margin-bottom:18px;font-size:13px}
+.mapbox summary{cursor:pointer;padding:11px 16px;font-weight:500;
+  list-style:none;display:flex;justify-content:space-between;gap:12px}
+.mapbox summary::-webkit-details-marker{display:none}
+.mapsum{color:var(--ink3);font-weight:400;font-size:12px}
+#mapbody{padding:0 16px 14px}
+.maprow{border-top:1px solid var(--line2);padding:10px 0}
+.maprow b{font-weight:600}
+.mapcols{margin-top:4px;font-size:12px;color:var(--ink2);
+  display:flex;gap:6px;flex-wrap:wrap}
+.chip{background:var(--slatebg);border-radius:6px;padding:2px 8px;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px}
+.mapskip{font-size:12px;color:var(--ink3);margin-top:10px}
+
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(166px,1fr));
+  gap:12px;margin-bottom:20px}
+.kpi{background:var(--panel);border:1px solid var(--line);
+  border-radius:var(--r);padding:14px 16px;cursor:pointer;
+  transition:border-color .12s,box-shadow .12s}
+.kpi:hover{border-color:#cfcdc6}
+.kpi:focus-visible{outline:2px solid #cfcdc6;outline-offset:2px}
+.kpi .l{font-size:12px;color:var(--ink3);margin:0}
+.kpi .v{font-size:27px;font-weight:600;margin:6px 0 2px;letter-spacing:-.5px}
+.kpi .h{font-size:11px;color:var(--ink3);margin:0}
+.kpi.hot{border-color:#eec9c7;background:#fffbfb}
+/* the card whose filter is currently applied to the table */
+.kpi.sel{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.kpi.sel .l{color:var(--ink2)}
+
+.showme{font-size:12px;color:var(--ink2);display:flex;align-items:center;gap:6px;
+  white-space:nowrap}
+
+.bar{display:flex;align-items:center;justify-content:space-between;gap:14px;
+  flex-wrap:wrap;margin-bottom:10px}
+.tabs{display:flex;gap:6px;flex-wrap:wrap}
+.tab{font-size:13px;padding:6px 13px;border-radius:20px;
+  border:1px solid var(--line);background:var(--panel);cursor:pointer;
+  color:var(--ink2)}
+.tab.on{background:var(--ink);color:#fff;border-color:var(--ink)}
+.right{display:flex;gap:8px}
+.right input{min-width:190px}
+.rule{margin:0 0 10px;font-size:12px;color:var(--ink3)}
+
+.tablewrap{background:var(--panel);border:1px solid var(--line);border-radius:12px}
+table{width:100%;border-collapse:separate;border-spacing:0}
+/* Fixed layout ONLY for the report table (it has a real <colgroup> driving
+   its widths) - NOT for the drawer's .mini table, which has no colgroup and
+   relies on auto layout's first-row content sizing for its 4 simple columns. */
+.tablewrap table{table-layout:fixed}
+th{position:sticky;top:var(--hdr);z-index:10;text-align:left;font-size:11.5px;
+  font-weight:600;color:var(--ink2);text-transform:uppercase;letter-spacing:.4px;
+  padding:11px 14px;background:#f6f4f0;white-space:nowrap;
+  border-bottom:1px solid var(--line)}
+thead tr:first-child th:first-child{border-top-left-radius:12px}
+thead tr:first-child th:last-child{border-top-right-radius:12px}
+td{padding:10px 14px;border-top:1px solid var(--line2);vertical-align:top;
+  font-size:13px}
+tbody tr{cursor:pointer}
+tbody tr:hover{background:#faf9f6}
+.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.mat{font-weight:500;overflow:hidden;text-overflow:ellipsis}
+.sub{font-size:11.5px;color:var(--ink3);margin-top:2px}
+.big{font-variant-numeric:tabular-nums}
+.dots{letter-spacing:2px;color:var(--ink2);font-size:12px}
+
+.act{display:inline-block;padding:3px 10px;border-radius:20px;font-size:11.5px;
+  font-weight:600;white-space:nowrap}
+.a-out{background:#3d1210;color:#fff}
+.a-late{background:var(--redbg);color:var(--red)}
+.a-soon{background:var(--amberbg);color:var(--amber)}
+.a-ok{background:var(--greenbg);color:var(--green)}
+.a-stop{background:var(--violetbg);color:var(--violet)}
+.a-none{background:var(--slatebg);color:var(--slate)}
+
+.empty{padding:34px;text-align:center;color:var(--ink3);font-size:13px;margin:0}
+.legend{margin:12px 2px 0;font-size:11.5px;color:var(--ink3);
+  display:flex;gap:18px;flex-wrap:wrap}
+.legend b{color:var(--ink2);letter-spacing:1px}
+
+.sheet{position:fixed;inset:0;background:rgba(28,28,27,.34);z-index:40;
+  display:flex;justify-content:flex-end}
+.sheet.mid{align-items:center;justify-content:center}
+.sheetin{width:min(560px,100%);background:var(--panel);height:100%;
+  overflow:auto;padding:22px 24px}
+.sheethd{display:flex;justify-content:space-between;gap:16px;margin-bottom:18px}
+.sheethd h2{font-size:16px}
+.sheethd p{margin:3px 0 0;font-size:12px;color:var(--ink3)}
+.mini th{position:static;background:none;border-bottom:1px solid var(--line)}
+.mini td{font-size:12.5px;padding:7px 10px}
+#spark{margin-bottom:18px}
+
+.card{background:var(--panel);border-radius:14px;padding:22px 24px;
+  width:min(430px,92vw)}
+.card h2{font-size:16px;margin-bottom:8px}
+.card p{font-size:13px;color:var(--ink2);margin:0 0 14px}
+.card .ctl{width:100%}
+.merr{color:var(--red);font-size:12.5px;margin:8px 0 0}
+.mact{display:flex;justify-content:flex-end;gap:9px;margin-top:16px}
+/* Split footer: a left-hand action group (e.g. Site Progress's Rooms modal --
+   quick-select + Mark done/Undo done) alongside the normal right-hand
+   Cancel/Save, both always visible without scrolling the modal body. Only
+   applied when modal() is called with extraFooterHTML - every other modal
+   keeps the plain .mact rule above, completely unaffected. */
+.mact-split{justify-content:space-between;flex-wrap:wrap;row-gap:10px}
+.mact-left{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.mact-right{display:flex;gap:9px;flex-shrink:0}
+@media(max-width:640px){
+  /* Four-plus buttons in one row doesn't fit a phone width - stack the two
+     groups, each group's own buttons still wrap/flow naturally within it. */
+  .mact-split{flex-direction:column;align-items:stretch}
+  .mact-right{justify-content:flex-end}
+}
+
+.card.wide{width:min(560px,92vw);max-height:82vh;overflow:auto}
+.mhd{display:flex;justify-content:space-between;align-items:center;gap:16px;
+  margin-bottom:4px}
+.mhd h2{margin-bottom:0}
+.msub{font-size:12.5px;color:var(--ink3);margin:2px 0 18px}
+.mempty{color:var(--ink3);font-size:13px;padding:24px 0;text-align:center;margin:0}
+
+.mproj{margin-bottom:16px}
+.mproj:last-child{margin-bottom:0}
+.mproj-hd{margin-bottom:8px}
+.mproj-name{font-size:13px;font-weight:600;color:var(--ink)}
+
+.mrun{display:flex;align-items:center;gap:11px;border:1px solid var(--line);
+  border-radius:10px;padding:11px 13px;margin-bottom:8px}
+.mrun-ic{width:34px;height:34px;border-radius:8px;background:var(--violetbg);
+  display:flex;align-items:center;justify-content:center;flex:none}
+.mrun-svg{width:16px;height:16px;color:var(--violet)}
+.mrun-info{flex:1;min-width:0}
+.mrun-toprow{display:flex;align-items:center;gap:7px}
+.mrun-file{font-size:12.5px;font-weight:500;color:var(--ink);overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.mrun-badge{font-size:10px;font-weight:600;padding:1px 7px;border-radius:20px;
+  background:var(--greenbg);color:var(--green);white-space:nowrap;flex:none}
+.mrun-meta{display:block;font-size:11px;color:var(--ink3);margin-top:1px}
+.mrun-del{width:30px;height:30px;border-radius:8px;border:1px solid var(--line);
+  background:var(--panel);color:var(--red);cursor:pointer;flex:none;
+  display:flex;align-items:center;justify-content:center}
+.mrun-del:hover{background:var(--redbg);border-color:#eec9c7}
+.mrun-del svg{width:15px;height:15px}
+
+.mshowmore{font-size:12px;font-weight:500;color:var(--violet);background:none;
+  border:none;cursor:pointer;padding:0 0 8px;margin:0;font:inherit}
+.mshowmore:hover{text-decoration:underline}
+
+.mdanger{background:var(--redbg);border:1px solid #eec9c7;border-radius:10px;
+  padding:13px 14px;margin-top:10px}
+.mdanger-title{font-size:11px;font-weight:600;letter-spacing:.3px;
+  text-transform:uppercase;color:var(--red);margin-bottom:9px}
+.mdanger-list{display:flex;flex-wrap:wrap;gap:8px}
+
+.btn.sm{padding:5px 11px;font-size:12px}
+
+.ctl.wide{min-width:100%;box-sizing:border-box}
+.dshint{margin:0 auto 16px;font-size:11.5px;color:var(--ink3);max-width:480px;
+  line-height:1.6}
+
+.invnote{margin:0 0 10px;font-size:12.5px;color:var(--ink2);
+  background:var(--slatebg);border:1px solid var(--line);border-radius:8px;
+  padding:8px 12px}
+
+.ppesummary{display:flex;align-items:baseline;gap:10px;margin:0 0 14px;
+  background:var(--panel);border:1px solid var(--line);border-radius:10px;
+  padding:13px 16px}
+.ppesummary b{font-size:27px;font-weight:700;letter-spacing:-.5px;color:var(--ink)}
+.ppesummary span{font-size:13px;color:var(--ink2)}
+
+.fresh{font-size:11.5px;color:var(--ink3);margin:2px 0 0}
+.linkbtn{background:none;border:none;color:var(--ink);text-decoration:underline;
+  cursor:pointer;font:inherit;padding:0}
+.staleflag{color:#9a6a00;font-weight:500}
+
+/* Real per-material lead time tag (leadtime.py, PO->GRN history). Violet to
+   match the other "this came from real linked data" indicators (sp-tag,
+   linkchip) elsewhere in the app - a deliberate, consistent color language
+   for "not the default, this is a real number". */
+.leadtag{display:inline-block;margin-top:4px;font-size:10.5px;font-weight:500;
+  color:var(--violet);background:var(--violetbg);border-radius:6px;
+  padding:2px 7px}
+.leadtag.thin{color:#8b8560;background:#f3f0e4;border:1px dashed #ddd5b0}
+
+/* "Total received" in the material drawer's sparkline card -- real,
+   register-derived (opening + every dated IN since), same violet language
+   as .leadtag above for "this is a real linked number, not a default". */
+.sp-totrecv{margin-top:6px !important}
+.sp-totrecv b{color:var(--violet);font-weight:700;font-size:14px;
+  font-variant-numeric:tabular-nums}
+
+/* ---------------------------------------------------------------- mobile */
+/* The app bar and Home screen were built desktop-first (fixed side-by-side
+   buttons, a 3-column dropform). Below these breakpoints they switch to a
+   stacked layout instead of clipping or forcing horizontal scroll -- same
+   approach already used for Site Progress in siteprogress.css. */
+@media(max-width:760px){
+  .top{flex-wrap:wrap;row-gap:10px;padding:12px 16px;margin-bottom:16px}
+  .brand p{max-width:66vw}
+  .topact{flex-wrap:wrap;row-gap:8px}
+  main{padding:0 16px 56px}
+  .kpis{grid-template-columns:repeat(auto-fit,minmax(140px,1fr))}
+  .card.wide{padding:18px}
+  /* Forecast tab's main table had no mobile handling at all -- its
+     percentage-width colgroup just shrinks with the viewport, crushing
+     five columns of real data (material name, action, stock, date, trust)
+     illegible on a phone. Scroll instead of crush: the wrapper scrolls
+     horizontally, the table itself refuses to shrink below a width where
+     its columns stay readable. Both are inert at desktop width -- no
+     min-width is exceeded there, so no scrollbar appears and nothing
+     changes above 760px. */
+  .tablewrap{overflow-x:auto}
+  .tablewrap table{min-width:640px}
+}
+@media(max-width:640px){
+  .home-head h2{font-size:21px}
+  .home-head p{font-size:13px}
+  .homeseg-in{width:100%}
+  .homeseg button{flex:1;padding:9px 8px;font-size:13px}
+  .homecard{padding:32px 20px}
+  .homecard-icon{width:52px;height:52px}
+  .homecard-icon svg{width:22px;height:22px}
+  .homecard .dh{font-size:17px}
+  .dropform{flex-direction:column;align-items:stretch}
+  .dropform .ctl{min-width:0;width:100%}
+  .homecard .btn{width:100%}
+  .rp{flex-direction:column;align-items:flex-start;gap:8px}
+  .rp-open{align-self:flex-end}
+}
+@media(max-width:420px){
+  .home-head h2{font-size:19px}
+  .homecard{padding:26px 16px}
+}

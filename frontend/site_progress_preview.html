@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Site Progress — Material Intelligence</title>
+<style>
+:root{
+  --bg:#faf9f7;--panel:#fff;--line:#e7e5df;--line2:#f0eee9;
+  --ink:#1c1c1b;--ink2:#5f5e59;--ink3:#8b8983;
+  --red:#a02622;--redbg:#fbe7e6;--amber:#7d4c06;--amberbg:#fbf1da;
+  --green:#39631a;--greenbg:#e8f2e0;--violet:#453a9a;--violetbg:#ebe8fa;
+  --slate:#55544f;--slatebg:#efeee9;--r:10px;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:14px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+h1,h2,h3{margin:0;font-weight:600}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+
+/* top bar + tabs */
+.top{position:sticky;top:0;z-index:30;background:var(--bg);border-bottom:1px solid var(--line);
+  display:flex;align-items:center;justify-content:space-between;gap:18px;padding:12px 22px}
+.brand{display:flex;align-items:center;gap:11px}
+.mark{width:30px;height:30px;border-radius:7px;background:var(--ink);color:#fff;
+  display:flex;align-items:center;justify-content:center;font-weight:700;font-size:15px;flex:none}
+.brand h1{font-size:15px}.brand p{margin:1px 0 0;font-size:12px;color:var(--ink3)}
+.tabs{display:flex;gap:4px;background:var(--slatebg);padding:4px;border-radius:11px}
+.tab{font-size:13px;font-weight:500;padding:7px 15px;border-radius:8px;border:none;background:none;
+  color:var(--ink2);cursor:pointer;transition:.15s}
+.tab.on{background:var(--panel);color:var(--ink);box-shadow:0 1px 2px rgba(0,0,0,.06)}
+.tab:not(.on):hover{color:var(--ink)}
+
+.layout{display:grid;grid-template-columns:236px 1fr;gap:22px;max-width:1240px;margin:22px auto;padding:0 22px 80px}
+@media(max-width:880px){.layout{grid-template-columns:1fr}.rail{display:none}}
+
+/* left rail tree */
+.rail{align-self:start;position:sticky;top:78px}
+.railhd{font-size:11.5px;text-transform:uppercase;letter-spacing:.5px;color:var(--ink3);
+  margin:2px 4px 10px;display:flex;justify-content:space-between}
+.tree{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:6px}
+.floor{border-radius:8px}
+.floorhd{display:flex;align-items:center;gap:8px;padding:9px 10px;cursor:pointer;border-radius:8px;font-size:13px}
+.floorhd:hover{background:var(--slatebg)}
+.chev{color:var(--ink3);font-size:10px;transition:.15s;display:inline-block;width:9px}
+.floor.exp .chev{transform:rotate(90deg)}
+.fpct{margin-left:auto;font-size:11.5px;color:var(--ink3);font-variant-numeric:tabular-nums}
+.rooms{display:none;padding:2px 0 6px 22px}
+.floor.exp .rooms{display:block}
+.room{padding:6px 10px;font-size:12.5px;color:var(--ink2);border-radius:7px;cursor:pointer}
+.room:hover{background:var(--slatebg)}.room.on{background:var(--ink);color:#fff}
+
+/* main pane */
+.pane-head{margin-bottom:18px}
+.crumb{font-size:12px;color:var(--ink3);margin-bottom:12px}
+.pills{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:20px}
+.pill{font-size:12.5px;padding:6px 14px;border-radius:20px;border:1px solid var(--line);
+  background:var(--panel);cursor:pointer;color:var(--ink2)}
+.pill.on{background:var(--ink);color:#fff;border-color:var(--ink)}
+.pill.ghost{opacity:.5;cursor:not-allowed}
+
+.hero{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:24px 26px;
+  display:grid;grid-template-columns:auto 1fr;gap:28px;align-items:center;margin-bottom:22px}
+@media(max-width:620px){.hero{grid-template-columns:1fr;gap:16px}}
+.ring{--p:0;width:132px;height:132px;border-radius:50%;flex:none;
+  background:conic-gradient(var(--green) calc(var(--p)*1%),var(--line2) 0);
+  display:flex;align-items:center;justify-content:center;transition:--p .5s}
+.ring i{width:104px;height:104px;border-radius:50%;background:var(--panel);
+  display:flex;flex-direction:column;align-items:center;justify-content:center;font-style:normal}
+.ring b{font-size:30px;font-weight:600;letter-spacing:-.5px;font-variant-numeric:tabular-nums}
+.ring span{font-size:11px;color:var(--ink3);margin-top:1px}
+.herostats{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+@media(max-width:520px){.herostats{grid-template-columns:1fr}}
+.stat{padding:2px 0}
+.stat .l{font-size:11.5px;color:var(--ink3);margin:0 0 4px}
+.stat .v{font-size:22px;font-weight:600;letter-spacing:-.3px;font-variant-numeric:tabular-nums}
+.stat .v.g{color:var(--green)}.stat .v.a{color:var(--amber)}.stat .v.r{color:var(--red)}
+.stat .h{font-size:11px;color:var(--ink3);margin:2px 0 0}
+
+.secttl{font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:var(--ink3);margin:0 2px 12px}
+
+/* activity cards */
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;margin-bottom:12px;
+  overflow:hidden;transition:border-color .15s,box-shadow .15s}
+.card:hover{border-color:#dad8d2}
+.card.open{box-shadow:0 3px 14px rgba(28,28,27,.05)}
+.chd{display:flex;align-items:center;gap:16px;padding:16px 20px;cursor:pointer}
+.cchev{color:var(--ink3);font-size:11px;transition:.2s;width:10px}.card.open .cchev{transform:rotate(90deg)}
+.cname{font-weight:600;font-size:14.5px;min-width:0}
+.cname .sub{font-size:11.5px;color:var(--ink3);font-weight:400;margin-top:2px}
+.cbar{margin-left:auto;width:132px;flex:none}
+.cbar .track{height:7px;border-radius:4px;background:var(--line2);overflow:hidden}
+.cbar .fill{height:100%;background:var(--green);border-radius:4px;transition:width .45s}
+.cbar .lab{display:flex;justify-content:space-between;margin-top:5px;font-size:11px;color:var(--ink3)}
+.cmoney{flex:none;text-align:right;min-width:96px}
+.cmoney b{font-size:14px;font-variant-numeric:tabular-nums;display:block}
+.cmoney span{font-size:11px;color:var(--ink3)}
+.cbody{display:none;border-top:1px solid var(--line2);padding:4px 20px 12px}
+.card.open .cbody{display:block}
+
+/* boq item rows */
+.brow{display:grid;grid-template-columns:1fr 84px 150px 92px 30px;gap:14px;align-items:center;
+  padding:13px 0;border-bottom:1px solid var(--line2)}
+.brow:last-child{border-bottom:none}
+@media(max-width:720px){.brow{grid-template-columns:1fr 60px 30px;row-gap:8px}.bslidewrap,.bmoney{grid-column:1/-1}}
+.bname{font-size:13px;min-width:0}
+.bname .code{color:var(--ink3);font-size:11px;font-family:ui-monospace,Menlo,monospace;margin-right:6px}
+.bmeta{font-size:11px;color:var(--ink3);margin-top:2px;display:flex;gap:6px;flex-wrap:wrap}
+.tag{background:var(--slatebg);border-radius:5px;padding:1px 7px;font-size:10.5px}
+.tag.waste{background:var(--redbg);color:var(--red)}
+.tag.save{background:var(--greenbg);color:var(--green)}
+.bqty{font-size:12px;color:var(--ink2);text-align:right;font-variant-numeric:tabular-nums}
+.bqty span{color:var(--ink3);font-size:10.5px;display:block}
+.bslidewrap{display:flex;align-items:center;gap:9px}
+.bslide{flex:1;-webkit-appearance:none;appearance:none;height:5px;border-radius:3px;
+  background:var(--line2);outline:none}
+.bslide::-webkit-slider-thumb{-webkit-appearance:none;width:15px;height:15px;border-radius:50%;
+  background:var(--ink);cursor:pointer;border:2px solid var(--panel);box-shadow:0 0 0 1px var(--line)}
+.bslide::-moz-range-thumb{width:15px;height:15px;border-radius:50%;background:var(--ink);cursor:pointer;border:2px solid var(--panel)}
+.bpct{font-size:12px;font-weight:600;width:38px;text-align:right;font-variant-numeric:tabular-nums}
+.bmoney{text-align:right}
+.bmoney b{font-size:12.5px;font-variant-numeric:tabular-nums}
+.bmoney.none{font-size:11px}
+.setrate{font-size:11px;color:var(--violet);text-decoration:underline;cursor:pointer;background:none;border:none;padding:0}
+.fx{width:26px;height:26px;border-radius:7px;border:1px solid var(--line);background:var(--panel);
+  cursor:pointer;color:var(--ink2);display:flex;align-items:center;justify-content:center;font-size:13px}
+.fx:hover{border-color:#cfcdc6}.fx.alert{color:var(--red);border-color:#eec9c7;background:#fffbfb}
+
+.unmapped{font-size:12px;color:var(--ink3);padding:10px 2px 2px}
+.unmapped b{color:var(--amber)}
+
+/* drawer */
+.scrim{position:fixed;inset:0;background:rgba(28,28,27,.34);z-index:40;display:none}
+.scrim.on{display:flex;justify-content:flex-end}
+.drawer{width:min(440px,100%);height:100%;background:var(--panel);overflow:auto;padding:22px 24px;
+  transform:translateX(20px);opacity:0;transition:.22s}
+.scrim.on .drawer{transform:none;opacity:1}
+.dhd{display:flex;justify-content:space-between;gap:14px;margin-bottom:6px}
+.dhd h2{font-size:15px}.dsub{font-size:12px;color:var(--ink3);margin:2px 0 18px}
+.x{border:none;background:none;font-size:20px;color:var(--ink3);cursor:pointer;line-height:1}
+.drow{display:flex;justify-content:space-between;padding:11px 0;border-bottom:1px solid var(--line2);font-size:13px}
+.drow span{color:var(--ink2)}.drow b{font-variant-numeric:tabular-nums}
+.dlink{margin:14px 0;padding:12px 14px;border-radius:10px;font-size:12.5px}
+.dlink.ok{background:var(--greenbg);color:var(--green)}
+.dlink.rev{background:var(--amberbg);color:var(--amber)}
+.dbar{height:9px;border-radius:5px;background:var(--line2);overflow:hidden;margin:18px 0 6px}
+.dbar i{display:block;height:100%;background:var(--green)}
+.dfore{margin-top:18px;padding:14px 16px;border-radius:10px;background:var(--slatebg);font-size:12.5px;color:var(--ink2)}
+.dfore b{color:var(--ink)}
+.demo{font-size:11px;color:var(--ink3);text-align:center;padding:14px;margin-top:8px}
+</style></head>
+<body>
+
+<header class="top">
+  <div class="brand"><span class="mark">M</span>
+    <div><h1>Material Intelligence</h1><p id="proj">Loading…</p></div></div>
+  <nav class="tabs">
+    <button class="tab">Forecast</button>
+    <button class="tab on">Site Progress</button>
+    <button class="tab">Inventory</button>
+  </nav>
+</header>
+
+<div class="layout">
+  <aside class="rail">
+    <div class="railhd"><span>Structure</span><span id="roomcount"></span></div>
+    <div class="tree" id="tree"></div>
+  </aside>
+
+  <main>
+    <div class="pane-head">
+      <div class="crumb" id="crumb"></div>
+      <div class="pills" id="pills"></div>
+      <div class="hero">
+        <div class="ring" id="ring"><i><b id="heropct">0%</b><span id="heroroom">all rooms</span></i></div>
+        <div class="herostats">
+          <div class="stat"><p class="l">Work done</p><div class="v g" id="sDone">₹—</div><p class="h" id="sDoneH"></p></div>
+          <div class="stat"><p class="l">Remaining</p><div class="v a" id="sRem">₹—</div><p class="h" id="sRemH"></p></div>
+          <div class="stat"><p class="l">Material waste</p><div class="v r" id="sWaste">₹—</div><p class="h" id="sWasteH"></p></div>
+        </div>
+      </div>
+    </div>
+
+    <p class="secttl">Activities</p>
+    <div id="acts"></div>
+  </main>
+</div>
+
+<div class="scrim" id="scrim"><div class="drawer" id="drawer"></div></div>
+
+<script id="DATA" type="application/json">{"project": "Hyatt Centric — Ahmedabad", "service": "Electrical", "services": ["Electrical", "Plumbing", "HVAC", "Fire", "FAPA"], "floors": [{"name": "13th Floor", "rooms": ["Rm 5", "Rm 6", "Rm 13", "Rm 14", "Rm 15", "Rm 16", "Rm 17", "Rm 18", "Rm 22", "Rm 23", "Rm 24", "Rm 25", "Rm 26", "Rm 27", "Rm 30", "Rm 31", "Rm 32", "Rm 33"]}, {"name": "14th Floor", "rooms": ["Rm 5", "Rm 6", "Rm 13", "Rm 14", "Rm 15", "Rm 16", "Rm 17", "Rm 18", "Rm 22", "Rm 23", "Rm 24", "Rm 25", "Rm 26", "Rm 27", "Rm 30", "Rm 31", "Rm 32", "Rm 33"]}, {"name": "15th Floor", "rooms": ["Rm 5", "Rm 6", "Rm 13", "Rm 14", "Rm 15", "Rm 16", "Rm 17", "Rm 18", "Rm 22", "Rm 23", "Rm 24", "Rm 25", "Rm 26", "Rm 27", "Rm 30", "Rm 31", "Rm 32", "Rm 33"]}, {"name": "16th Floor", "rooms": ["Rm 5", "Rm 6", "Rm 13", "Rm 14", "Rm 15", "Rm 16", "Rm 17", "Rm 18", "Rm 22", "Rm 23", "Rm 24", "Rm 25", "Rm 26", "Rm 27", "Rm 30", "Rm 31", "Rm 32", "Rm 33"]}, {"name": "17th Floor", "rooms": ["Rm 5", "Rm 6", "Rm 13", "Rm 14", "Rm 15", "Rm 16", "Rm 17", "Rm 18", "Rm 22", "Rm 23", "Rm 24", "Rm 25", "Rm 26", "Rm 27", "Rm 30", "Rm 31", "Rm 32", "Rm 33"]}, {"name": "18th Floor", "rooms": ["Rm 5", "Rm 6", "Rm 13", "Rm 14", "Rm 15", "Rm 16", "Rm 17", "Rm 18", "Rm 22", "Rm 23", "Rm 24", "Rm 25", "Rm 26", "Rm 27", "Rm 30", "Rm 31", "Rm 32", "Rm 33"]}], "nrooms": 108, "activities": ["Zari Work", "Metal Box", "Wall Piping", "Celling Piping Room Area", "Wire Puling - Lighting, Power, Cat6, Cat6A, RJ-6, Thermostat Wiring"], "mapping": {"Zari Work": [], "Metal Box": ["2.4", "2.5", "2.6", "2.8", "2.1#2", "2.11", "2.12", "2.13", "2.14", "2.15", "4.5", "4.6", "4.7"], "Wall Piping": ["2.16", "2.16.a", "2.16.b", "2.17", "4.1", "4.2", "4.3", "4.4"], "Celling Piping Room Area": ["2.16", "2.16.a", "2.16.b", "2.17", "4.1", "4.2", "4.3", "4.4"], "Wire Puling - Lighting, Power, Cat6, Cat6A, RJ-6, Thermostat Wiring": ["2.1", "2.2", "2.3", "2.4", "2.5", "2.6", "2.8", "2.9", "2.1#2", "2.11", "2.12", "2.16", "2.16.a", "2.16.b", "2.17", "4.1", "4.2", "4.3", "4.4", "4.5", "4.6"]}, "act_pct": {"Zari Work": 98.1, "Metal Box": 98.1, "Wall Piping": 97.2, "Celling Piping Room Area": 81.9, "Wire Puling - Lighting, Power, Cat6, Cat6A, RJ-6, Thermostat Wiring": 65.7}, "items": [{"code": "1.1", "desc": "Supply, Installation testing and commissioning of 16 way SPN DOUBLE DOOR with 32A DP RCBO,30mA incomer, 12nos 6-20A DPMCB as outgoing. Scope including - erraction connection of all circuit wiring / lableing of circuit (cost of supply of steel febrication not including in rate) FOR GUEST ROOM", "unit": "Nos.", "sub": "Switch/Socket", "qty": 1.0, "planned": 108.0, "used": 0.0, "remaining": 108.0, "pct": 0.0, "acts": [], "rate": 8500.0, "done_val": 0.0, "rem_val": 918000.0, "waste_val": null, "link": {"best": "32A RCBO 30MA 4 MODULE ( ADC232Y )", "score": 0.7, "conf": true}}, {"code": "1.2", "desc": "SITC of 6A DP MCB, 10kA with 6 way SPN DD DB Complete For UPS power for EMG Lighting for Guest Room LOOLPING LOOP OUT TERMIANAL TO PROIVDED", "unit": "Nos.", "sub": "Switch/Socket", "qty": 1.0, "planned": 108.0, "used": 0.0, "remaining": 108.0, "pct": 0.0, "acts": [], "rate": 2200.0, "done_val": 0.0, "rem_val": 237600.0, "waste_val": null, "link": {"best": "6A DP MCB ( NCN206N )", "score": 0.867, "conf": true}}, {"code": "2.1", "desc": "Primary point controlled by one single way 6A switch. (1.5 sq mm 5 Mtr)", "unit": "Nos.", "sub": "Switch/Socket", "qty": 9.0, "planned": 972.0, "used": 639.0, "remaining": 333.0, "pct": 65.7, "acts": ["Wire Puling - Lighting, Power, Cat6, Cat6A, RJ-6, Thermostat Wiring"], "rate": 450.0, "done_val": 287550.0, "rem_val": 149850.0, "waste_val": null, "link": {"best": "6A DP MCB ( NCN206N )", "score": 0.6, "conf": true}}, {"code": "2.2", "desc": "Secondary Light Point looped to item no. 5.1.1 with 1.5 sq mm ckt", "unit": "Nos.", "sub": "Light", "qty": 22.0, "planned": 2376.0, "used": 1562.0, "remaining": 814.0, "pct": 65.7, "acts": ["Wire Puling - Lighting, Power, Cat6, Cat6A, RJ-6, Thermostat Wiring"], "rate": 380.0, "done_val": 593560.0, "rem_val": 309320.0, "waste_val": 33440.0, "link": {"best": null, "score": 0.4, "conf": false}}, {"code": "2.3", "desc": "Supply, Installation, Testing and Commissioning of Key tag Switch with time delay with conntactor with key using 2.5 sq mm copper wires", "unit": "Nos.", "sub": "Switch/Socket", "qty": 0.0, "planned": 0.0, "used": 0.0, "remaining": 0.0, "pct": 65.7, "acts": ["Wire Puling - Lighting, Power, Cat6, Cat6A, RJ-6, Thermostat Wiring"], "rate": null, "done_val": null, "rem_val": null, "waste_val": null, "link": {"best": null, "score": 0.5, "conf": false}}, {"code": "2.4", "desc": "Supply, Installation, Testing and Commissioning of DND / Clean my room indication switches (Both Internal and External units) complete with GI back box and cover plates using 1.5 sq mm copper ZHFR wires", "unit": "Nos.", "sub": "Box/JB", "qty": 0.0, "planned": 0.0, "used": 0.0, "remaining": 0.0, "pct": 98.1, "acts": ["Metal Box", "Wire Puling - Lighting, Power, Cat6, Cat6A, RJ-6, Thermostat Wiring"], "rate": null, "done_val": null, "rem_val": null, "waste_val": null, "link": {"best": null, "score": 0.45, "conf": false}}, {"code": "2.5", "desc": "Supply, Installation, Testing and Commissioning of Shaver socket -110V/230V - with GI back box, faceplate ets as required complete using 1.5 sq mm copper ZHFR wires", "unit": "Nos.", "sub": "Bend/Fitting", "qty": 0.0, "planned": 0.0, "used": 0.0, "remaining": 0.0, "pct": 98.1, "acts": ["Metal Box", "Wire Puling - Lighting, Power, Cat6, Cat6A, RJ-6, Thermostat Wiring"], "rate": null, "done_val": null, "rem_val": null, "waste_val": null, "link": {"best": null, "score": 0.45, "conf": false}}, {"code": "2.6", "desc": "Supply, Installation, Testing and Commissioning of two way master switch (DP) with GI back box, faceplate ets as required complete using 2.5 sq mm copper ZHFR wires", "unit": "Nos.", "sub": "Box/JB", "qty": 0.0, "planned": 0.0, "used": 0.0, "remaining": 0.0, "pct": 98.1, "acts": ["Metal Box", "Wire Puling - Lighting, Power, Cat6, Cat6A, RJ-6, Thermostat Wiring"], "rate": null, "done_val": null, "rem_val": null, "waste_val": null, "link": {"best": null, "score": 0.45, "conf": false}}, {"code": "2.7", "desc": "SITC of 1 nos USB ( 2.1 Amp ) with two charging ports on lighting switch board", "unit": "Nos.", "sub": "Switch/Socket", "qty": 3.0, "planned": 324.0, "used": 0.0, "remaining": 324.0, "pct": 0.0, "acts": [], "rate": 520.0, "done_val": 0.0, "rem_val": 168480.0, "waste_val": null, "link": {"best": null, "score": 0.4, "conf": false}}, {"code": "2.8", "desc": "SITC Call Bell & modular type Buzzer with off switch with GI back box, face plate etc as required complete 1.5 sq mm cu ZHFR wires", "unit": "Nos.", "sub": "Box/JB", "qty": 1.0, "planned": 108.0, "used": 106.0, "remaining": 2.0, "pct": 98.1, "acts": ["Metal Box", "Wire Puling - Lighting, Power, Cat6, Cat6A, RJ-6, Thermostat Wiring"], "rate": 550.0, "done_val": 58300.0, "rem_val": 1100.0, "waste_val": null, "link": {"best": null, "score": 0.45, "conf": false}}, {"code": "2.9", "desc": "SITC of One 6A x 5Pin 230 Volt socket (UNIVERSAL) outlet point controlled by one 6A switch - 2.5 Sqmm", "unit": "Nos.", "sub": "Switch/Socket", "qty": 5.0, "planned": 540.0, "used": 355.0, "remaining": 185.0, "pct": 65.7, "acts": ["Wire Puling - Lighting, Power, Cat6, Cat6A, RJ-6, Thermostat Wiring"], "rate": 650.0, "done_val": 230750.0, "rem_val": 120250.0, "waste_val": null, "link": {"best": "6A DP MCB ( NCN206N )", "score": 0.6, "conf": true}}, {"code": "2.1#2", "desc": "1nos 6/16A x 230 Volt 5 Pin socket (UNIVERSAL) outlet point with 16A switch with box and plate complete to be done with 4 sq mm wire ckt from D.B. complete. (For Kettle, Hair dryer and cleaning socket)", "unit": "Nos.", "sub": "Switch/Socket", "qty": 4.0, "planned": 432.0, "used": 424.0, "remaining": 8.0, "pct": 98.1, "acts": ["Metal Box", "Wire Puling - Lighting, Power, Cat6, Cat6A, RJ-6, Thermostat Wiring"], "rate": null, "done_val": null, "rem_val": null, "waste_val": null, "link": {"best": "6A DP MCB ( NCN206N )", "score": 0.6, "conf": true}}, {"code": "2.11", "desc": "1nos 6A x 230 Volt 3 Pin socket (UNIVERSAL) outlet point controlled by 6A switch at convenient location including box plate etc complete to be done with 4 sqmm 2.5 sq mm ckt from D.B. (For Mini Bar)", "unit": "Nos.", "sub": "Switch/Socket", "qty": 1.0, "planned": 108.0, "used": 106.0, "remaining": 2.0, "pct": 98.1, "acts": ["Metal Box", "Wire Puling - Lighting, Power, Cat6, Cat6A, RJ-6, Thermostat Wiring"], "rate": 650.0, "done_val": 68900.0, "rem_val": 1300.0, "waste_val": null, "link": {"best": null, "score": 0.533, "conf": false}}, {"code": "2.12", "desc": "3 nos 6A 230 Volt 5 Pin socket (UNIVERSAL) outlet point with 2 no. 6A switch with box and plate complete to be done with 2.5 sq mm x 2 + 1.5 sq.mm x 1 Flexible Copper wire (For TV)", "unit": "Nos.", "sub": "Switch/Socket", "qty": 1.0, "planned": 108.0, "used": 106.0, "remaining": 2.0, "pct": 98.1, "acts": ["Metal Box", "Wire Puling - Lighting, Power, Cat6, Cat6A, RJ-6, Thermostat Wiring"], "rate": 900.0, "done_val": 95400.0, "rem_val": 1800.0, "waste_val": null, "link": {"best": null, "score": 0.533, "conf": false}}, {"code": "2.13", "desc": "ITC of bed side table lamp without any wiring accessories and back box. Only Connection b/w the table lamp and lighting switch board to be done.", "unit": "Nos.", "sub": "Box/JB", "qty": 0.0, "planned": 0.0, "used": 0.0, "remaining": 0.0, "pct": 98.1, "acts": ["Metal Box"], "rate": null, "done_val": null, "rem_val": null, "waste_val": null, "link": {"best": null, "score": 0.45, "conf": false}}, {"code": "2.14", "desc": "Supply & installation of 20 A 2 way Master switch with plate & back box of approved make ( wiring will paid extra )", "unit": "Nos.", "sub": "Box/JB", "qty": 2.0, "planned": 216.0, "used": 212.0, "remaining": 4.0, "pct": 98.1, "acts": ["Metal Box"], "rate": 780.0, "done_val": 165360.0, "rem_val": 3120.0, "waste_val": null, "link": {"best": null, "score": 0.467, "conf": false}}, {"code": "2.15", "desc": "Supply & installation of 16 A 2 way sub Master switch with plate & back box of approved make ( wiring will paid extra )", "unit": "Nos.", "sub": "Box/JB", "qty": 0.0, "planned": 0.0, "used": 0.0, "remaining": 0.0, "pct": 98.1, "acts": ["Metal Box"], "rate": null, "done_val": null, "rem_val": null, "waste_val": null, "link": {"best": null, "score": 0.467, "conf": false}}, {"code": "2.16", "desc": "3 x 1.5 sq mm FRZH copper wires in and including 25 mm dia rigid PVC conduit of ZHFR grade with wall thickness of 1.6-1.8 mm (MMS Grade).concealed & for open MS CONDUIT TO BE CONSIDERED.( FOR MASTER SWITCH WIRING ONLY)", "unit": "Rmt.", "sub": "Conduit", "qty": 60.0, "planned": 6480.0, "used": 6300.0, "remaining": 180.0, "pct": 97.2, "acts": ["Wall Piping", "Celling Piping Room Area", "Wire Puling - Lighting, Power, Cat6, Cat6A, RJ-6, Thermostat Wiring"], "rate": 95.0, "done_val": 598500.0, "rem_val": 17100.0, "waste_val": 85500.0, "link": {"best": null, "score": 0.4, "conf": false}}, {"code": "2.16.a", "desc": "2 x 2.5 & 1 x 1.5 sq mm FRZH copper wires in and including 25 mm dia rigid PVC conduit of ZHFR grade with wall thickness of 1.6-1.8 mm (MMS Grade).concealed & for open MS CONDUIT TO BE CONSIDERED.( FOR MASTER SWITCH WIRING ONLY)", "unit": "Rmt.", "sub": "Conduit", "qty": 25.0, "planned": 2700.0, "used": 2625.0, "remaining": 75.0, "pct": 97.2, "acts": ["Wall Piping", "Celling Piping Room Area", "Wire Puling - Lighting, Power, Cat6, Cat6A, RJ-6, Thermostat Wiring"], "rate": 140.0, "done_val": 367500.0, "rem_val": 10500.0, "waste_val": 10500.0, "link": {"best": null, "score": 0.4, "conf": false}}, {"code": "2.16.b", "desc": "2 x 4 & 1 x 1.5 sq mm FRZH copper wires in and including 25 mm dia rigid PVC conduit of ZHFR grade with wall thickness of 1.6-1.8 mm (MMS Grade).concealed & for open MS CONDUIT TO BE CONSIDERED.( FOR MASTER SWITCH WIRING ONLY)", "unit": "Rmt.", "sub": "Conduit", "qty": 26.0, "planned": 2808.0, "used": 2730.0, "remaining": 78.0, "pct": 97.2, "acts": ["Wall Piping", "Celling Piping Room Area", "Wire Puling - Lighting, Power, Cat6, Cat6A, RJ-6, Thermostat Wiring"], "rate": 180.0, "done_val": 491400.0, "rem_val": 14040.0, "waste_val": null, "link": {"best": null, "score": 0.4, "conf": false}}, {"code": "2.17", "desc": "100 MM HDG wall race way for wire dressing near DB", "unit": "Rmt.", "sub": "Wire", "qty": 1.0, "planned": 108.0, "used": 105.0, "remaining": 3.0, "pct": 97.2, "acts": ["Wall Piping", "Celling Piping Room Area", "Wire Puling - Lighting, Power, Cat6, Cat6A, RJ-6, Thermostat Wiring"], "rate": 320.0, "done_val": 33600.0, "rem_val": 960.0, "waste_val": null, "link": {"best": null, "score": 0.45, "conf": false}}, {"code": "2.18", "desc": "DND, CMR with wiring as pe requirment ( near bed , entry door )", "unit": "set", "sub": "Other", "qty": 0.0, "planned": 0.0, "used": 0.0, "remaining": 0.0, "pct": 0.0, "acts": [], "rate": null, "done_val": null, "rem_val": null, "waste_val": null, "link": {"best": null, "score": 0.0, "conf": false}}, {"code": "2.19", "desc": "SITC of magntic switch / sensor with wiring for door & ward rob", "unit": "Nos.", "sub": "Switch/Socket", "qty": 1.0, "planned": 108.0, "used": 0.0, "remaining": 108.0, "pct": 0.0, "acts": [], "rate": 1200.0, "done_val": 0.0, "rem_val": 129600.0, "waste_val": null, "link": {"best": null, "score": 0.4, "conf": false}}, {"code": "3.1", "desc": "IF-700 LED light fixture (10-15W) (as per ID)", "unit": "Nos.", "sub": "Light", "qty": 2.0, "planned": 216.0, "used": 0.0, "remaining": 216.0, "pct": 0.0, "acts": [], "rate": null, "done_val": null, "rem_val": null, "waste_val": null, "link": {"best": null, "score": 0.0, "conf": false}}, {"code": "3.2", "desc": "IF-702 LED light fixture (5-10W) (as per ID)", "unit": "Nos.", "sub": "Light", "qty": 9.0, "planned": 972.0, "used": 0.0, "remaining": 972.0, "pct": 0.0, "acts": [], "rate": null, "done_val": null, "rem_val": null, "waste_val": null, "link": {"best": null, "score": 0.0, "conf": false}}, {"code": "3.3", "desc": "IF-704A LED STRIP", "unit": "RMT", "sub": "Light", "qty": 14.0, "planned": 1512.0, "used": 0.0, "remaining": 1512.0, "pct": 0.0, "acts": [], "rate": null, "done_val": null, "rem_val": null, "waste_val": null, "link": {"best": null, "score": 0.0, "conf": false}}, {"code": "3.4", "desc": "IF-709 LED STRIP (600 lm/mtr)", "unit": "RMT", "sub": "Light", "qty": 5.0, "planned": 540.0, "used": 0.0, "remaining": 540.0, "pct": 0.0, "acts": [], "rate": null, "done_val": null, "rem_val": null, "waste_val": null, "link": {"best": null, "score": 0.0, "conf": false}}, {"code": "3.5", "desc": "NIGHT LIGHT FIXTURE (WALL MOUNTED)", "unit": "Nos.", "sub": "Light", "qty": 1.0, "planned": 108.0, "used": 0.0, "remaining": 108.0, "pct": 0.0, "acts": [], "rate": null, "done_val": null, "rem_val": null, "waste_val": null, "link": {"best": null, "score": 0.0, "conf": false}}, {"code": "3.6", "desc": "WALL SCONCE LIGHT FIXTURE", "unit": "Nos.", "sub": "Light", "qty": 0.0, "planned": 0.0, "used": 0.0, "remaining": 0.0, "pct": 0.0, "acts": [], "rate": null, "done_val": null, "rem_val": null, "waste_val": null, "link": {"best": null, "score": 0.0, "conf": false}}, {"code": "3.7", "desc": "PANDENT LIGHT FIXTURE", "unit": "Nos.", "sub": "Light", "qty": 1.0, "planned": 108.0, "used": 0.0, "remaining": 108.0, "pct": 0.0, "acts": [], "rate": null, "done_val": null, "rem_val": null, "waste_val": null, "link": {"best": null, "score": 0.0, "conf": false}}, {"code": "3.8", "desc": "FLOOR MOUNTED LIGHT FIXTURE", "unit": "Nos.", "sub": "Light", "qty": 1.0, "planned": 108.0, "used": 0.0, "remaining": 108.0, "pct": 0.0, "acts": [], "rate": null, "done_val": null, "rem_val": null, "waste_val": null, "link": {"best": null, "score": 0.0, "conf": false}}, {"code": "3.9", "desc": "TABLE LAMP", "unit": "Nos.", "sub": "Light", "qty": 1.0, "planned": 108.0, "used": 0.0, "remaining": 108.0, "pct": 0.0, "acts": [], "rate": null, "done_val": null, "rem_val": null, "waste_val": null, "link": {"best": null, "score": 0.0, "conf": false}}, {"code": "4.1", "desc": "Supply and Laying of 25mm Dia. rigid FRLS Category ISI marked PVC conduit (MMS Grade) with all accessories complete with GI fish wire.", "unit": "Rmt.", "sub": "Wire", "qty": 18.5, "planned": 1998.0, "used": 1942.5, "remaining": 55.5, "pct": 97.2, "acts": ["Wall Piping", "Celling Piping Room Area", "Wire Puling - Lighting, Power, Cat6, Cat6A, RJ-6, Thermostat Wiring"], "rate": null, "done_val": null, "rem_val": null, "waste_val": null, "link": {"best": null, "score": 0.45, "conf": false}}, {"code": "4.2", "desc": "Supply, Laying of Cat-6A wire in prelaid conduit for data / WIFI", "unit": "Rmt.", "sub": "Wire", "qty": 18.0, "planned": 1944.0, "used": 1890.0, "remaining": 54.0, "pct": 97.2, "acts": ["Wall Piping", "Celling Piping Room Area", "Wire Puling - Lighting, Power, Cat6, Cat6A, RJ-6, Thermostat Wiring"], "rate": null, "done_val": null, "rem_val": null, "waste_val": null, "link": {"best": null, "score": 0.45, "conf": false}}, {"code": "4.3", "desc": "Supply, Laying of Cat-6 wire in prelaid conduit for TELEPHONE", "unit": "Rmt.", "sub": "Wire", "qty": 20.0, "planned": 2160.0, "used": 2100.0, "remaining": 60.0, "pct": 97.2, "acts": ["Wall Piping", "Celling Piping Room Area", "Wire Puling - Lighting, Power, Cat6, Cat6A, RJ-6, Thermostat Wiring"], "rate": null, "done_val": null, "rem_val": null, "waste_val": null, "link": {"best": null, "score": 0.45, "conf": false}}, {"code": "4.4", "desc": "Supply, Laying of RG 6 coaxial TV wire in prelaid conduit", "unit": "Rmt.", "sub": "Wire", "qty": 7.7, "planned": 831.6, "used": 808.5, "remaining": 23.1, "pct": 97.2, "acts": ["Wall Piping", "Celling Piping Room Area", "Wire Puling - Lighting, Power, Cat6, Cat6A, RJ-6, Thermostat Wiring"], "rate": null, "done_val": null, "rem_val": null, "waste_val": null, "link": {"best": null, "score": 0.45, "conf": false}}, {"code": "4.5", "desc": "Supply, Installation testing and commissioning of RJ 11 Telephone Jack type socket with box and plate complete.", "unit": "Nos.", "sub": "Bend/Fitting", "qty": 2.0, "planned": 216.0, "used": 212.0, "remaining": 4.0, "pct": 98.1, "acts": ["Metal Box", "Wire Puling - Lighting, Power, Cat6, Cat6A, RJ-6, Thermostat Wiring"], "rate": null, "done_val": null, "rem_val": null, "waste_val": null, "link": {"best": null, "score": 0.4, "conf": false}}, {"code": "4.6", "desc": "Supply, Installation testing and commissioning of RJ-45 Computer Jack type socket with box and plate complete.", "unit": "Nos.", "sub": "Bend/Fitting", "qty": 2.0, "planned": 216.0, "used": 212.0, "remaining": 4.0, "pct": 98.1, "acts": ["Metal Box", "Wire Puling - Lighting, Power, Cat6, Cat6A, RJ-6, Thermostat Wiring"], "rate": null, "done_val": null, "rem_val": null, "waste_val": null, "link": {"best": null, "score": 0.4, "conf": false}}, {"code": "4.7", "desc": "Supply, Installation testing and commissioning of Television Coaxial Type Socket with box and plate complete.", "unit": "Nos.", "sub": "Bend/Fitting", "qty": 1.0, "planned": 108.0, "used": 106.0, "remaining": 2.0, "pct": 98.1, "acts": ["Metal Box"], "rate": null, "done_val": null, "rem_val": null, "waste_val": null, "link": {"best": null, "score": 0.4, "conf": false}}], "pnl_by_activity": {"Zari Work": {"planned_value": 0.0, "done_value": 0.0, "remaining_value": 0.0, "items": 0, "unrated": 0, "waste_value": 0.0, "saving_value": 0.0}, "Metal Box": {"planned_value": 395280.0, "done_value": 387960.0, "remaining_value": 7320.0, "items": 13, "unrated": 9, "waste_value": 0.0, "saving_value": 0.0}, "Wall Piping": {"planned_value": 1533600.0, "done_value": 1491000.0, "remaining_value": 42600.0, "items": 8, "unrated": 4, "waste_value": 96000.0, "saving_value": 0.0}, "Celling Piping Room Area": {"planned_value": 1533600.0, "done_value": 1491000.0, "remaining_value": 42600.0, "items": 8, "unrated": 4, "waste_value": 96000.0, "saving_value": 0.0}, "Wire Puling - Lighting, Power, Cat6, Cat6A, RJ-6, Thermostat Wiring": {"planned_value": 3451680.0, "done_value": 2825460.0, "remaining_value": 626220.0, "items": 21, "unrated": 11, "waste_value": 129440.0, "saving_value": 0.0}}, "pnl_project": {"planned_value": 5073840.0, "done_value": 2990820.0, "remaining_value": 2083020.0, "waste_value": 129440.0, "saving_value": 0.0, "pct_value_done": 58.9, "by_service": {"Electrical": {"planned_value": 5073840.0, "done_value": 2990820.0, "remaining_value": 2083020.0, "items": 39, "rated": 15, "waste_value": 129440.0, "saving_value": 0.0}}}, "waste": {"available": true, "wasted_value": 129440.0, "saved_value": 0.0, "net_value": 129440.0, "top_items": [{"item_code": "2.16", "description": "3 x 1.5 sq mm FRZH copper wires in and including 25 mm dia rigid PVC conduit of ZHFR grade with wall thickness of 1.6-1.8 mm (MMS Grade).concealed & for open MS CONDUIT TO BE CONSIDERED.( FOR MASTER SWITCH WIRING ONLY)", "waste_qty": 900.0, "waste_value": 85500.0}, {"item_code": "2.2", "description": "Secondary Light Point looped to item no. 5.1.1 with 1.5 sq mm ckt", "waste_qty": 88.0, "waste_value": 33440.0}, {"item_code": "2.16.a", "description": "2 x 2.5 & 1 x 1.5 sq mm FRZH copper wires in and including 25 mm dia rigid PVC conduit of ZHFR grade with wall thickness of 1.6-1.8 mm (MMS Grade).concealed & for open MS CONDUIT TO BE CONSIDERED.( FOR MASTER SWITCH WIRING ONLY)", "waste_qty": 75.0, "waste_value": 10500.0}]}, "overall_pct": 88.2}</script>
+<script>
+const D=JSON.parse(document.getElementById('DATA').textContent);
+const NR=D.nrooms;
+const byCode={}; D.items.forEach(it=>byCode[it.code]=it);
+// state: per-item pct (0..100), seeded from backend progress
+D.items.forEach(it=>it._pct=it.pct);
+
+// ---- INR formatting (lakh/crore) ----
+function inr(v){
+  if(v==null) return '—';
+  const n=Math.round(v);
+  if(n>=1e7) return '₹'+(n/1e7).toFixed(2)+' Cr';
+  if(n>=1e5) return '₹'+(n/1e5).toFixed(2)+' L';
+  return '₹'+n.toLocaleString('en-IN');
+}
+function qfmt(v){return (Math.round(v*10)/10).toLocaleString('en-IN')}
+
+// ---- recompute a single item's derived numbers from its pct ----
+function calcItem(it){
+  it.used=it.qty*NR*it._pct/100;
+  it.remaining=Math.max(it.planned-it.used,0);
+  it.done_val=it.rate!=null?it.used*it.rate:null;
+  it.rem_val=it.rate!=null?it.remaining*it.rate:null;
+}
+// ---- activity % = mean of its mapped items' pct ----
+function actPct(a){
+  const codes=D.mapping[a]||[]; if(!codes.length) return null;
+  let s=0,n=0; codes.forEach(c=>{if(byCode[c]){s+=byCode[c]._pct;n++}}); return n?s/n:null;
+}
+function actMoney(a){
+  const codes=D.mapping[a]||[]; let done=0,rem=0,rated=false;
+  codes.forEach(c=>{const it=byCode[c]; if(it&&it.rate!=null){done+=it.done_val||0;rem+=it.rem_val||0;rated=true}});
+  return {done:rated?done:null,rem:rated?rem:null};
+}
+
+// ---- render tree ----
+function renderTree(){
+  const t=document.getElementById('tree');
+  t.innerHTML=D.floors.map((f,i)=>`
+    <div class="floor${i===0?' exp':''}" data-f="${i}">
+      <div class="floorhd" onclick="this.parentElement.classList.toggle('exp')">
+        <span class="chev">▶</span><span>${f.name}</span><span class="fpct">${f.rooms.length} rms</span></div>
+      <div class="rooms">
+        <div class="room on" onclick="pickRoom(-1,-1,this)">All rooms</div>
+        ${f.rooms.map((r,j)=>`<div class="room" onclick="pickRoom(${i},${j},this)">${r}</div>`).join('')}
+      </div></div>`).join('');
+  document.getElementById('roomcount').textContent=NR+' rooms';
+}
+let curRoom=null;
+function pickRoom(fi,ri,el){
+  document.querySelectorAll('.room.on').forEach(e=>e.classList.remove('on'));
+  el.classList.add('on');
+  curRoom=(fi<0)?null:{f:D.floors[fi].name,r:D.floors[fi].rooms[ri]};
+  document.getElementById('heroroom').textContent=curRoom?curRoom.r:'all rooms';
+  document.getElementById('crumb').textContent='Hyatt Centric  ›  Electrical  ›  '+(curRoom?curRoom.f+' · '+curRoom.r:'All floors');
+}
+
+// ---- render pills ----
+function renderPills(){
+  document.getElementById('pills').innerHTML=D.services.map(s=>
+    `<button class="pill ${s===D.service?'on':'ghost'}" ${s===D.service?'':'disabled'}>${s}</button>`).join('');
+}
+
+// ---- render activity cards ----
+function renderActs(){
+  const wrap=document.getElementById('acts');
+  wrap.innerHTML=D.activities.map(a=>{
+    const codes=D.mapping[a]||[];
+    const items=codes.map(c=>byCode[c]).filter(Boolean).filter(it=>it.qty>0);
+    const p=actPct(a);
+    const labour=!codes.length;
+    return `<div class="card" data-a="${encodeURIComponent(a)}">
+      <div class="chd" onclick="this.parentElement.classList.toggle('open')">
+        <span class="cchev">▶</span>
+        <div class="cname">${a}${labour?'<div class="sub">labour only — no material mapped</div>':`<div class="sub">${items.length} BOQ items</div>`}</div>
+        <div class="cbar">
+          <div class="track"><div class="fill" data-fill="${encodeURIComponent(a)}" style="width:${p||0}%"></div></div>
+          <div class="lab"><span>progress</span><span data-apct="${encodeURIComponent(a)}">${p==null?'—':p.toFixed(0)+'%'}</span></div>
+        </div>
+        <div class="cmoney"><b data-adone="${encodeURIComponent(a)}">—</b><span>done</span></div>
+      </div>
+      <div class="cbody">
+        ${items.length?items.map(it=>brow(it)).join(''):'<div class="unmapped">No material items mapped to this activity.</div>'}
+      </div></div>`;
+  }).join('');
+  D.activities.forEach(a=>{const m=actMoney(a);const el=document.querySelector(`[data-adone="${encodeURIComponent(a)}"]`);if(el)el.textContent=m.done==null?'—':inr(m.done)});
+  bindSliders();
+}
+function brow(it){
+  const waste=it.waste_val!=null&&it.waste_val>0;
+  const alert=it.link&&!it.link.conf; // needs review link -> show as attention
+  return `<div class="brow" data-code="${it.code}">
+    <div class="bname"><span class="code">${it.code}</span>${shortName(it.desc)}
+      <div class="bmeta"><span class="tag">${it.sub}</span>
+        ${waste?`<span class="tag waste" data-waste="${it.code}">▲ waste ${inr(it.waste_val)}</span>`:''}
+      </div></div>
+    <div class="bqty" data-planned="${it.code}">${qfmt(it.planned)}<span>${it.unit} planned</span></div>
+    <div class="bslidewrap">
+      <input class="bslide" type="range" min="0" max="100" value="${Math.round(it._pct)}" data-slide="${it.code}">
+      <span class="bpct" data-bpct="${it.code}">${Math.round(it._pct)}%</span></div>
+    <div class="bmoney ${it.rate==null?'none':''}" data-money="${it.code}">
+      ${it.rate==null?'<button class="setrate">set rate</button>':'<b>'+inr(it.done_val)+'</b>'}</div>
+    <button class="fx ${alert?'alert':''}" onclick='openDrawer("${it.code}")'>↗</button>
+  </div>`;
+}
+function shortName(d){d=d.replace(/^(Supply,?\s*(Installation|checking)[^,]*,?\s*(Testing and Commissioning|storing)?[^,]*of\s*)/i,'');return d.length>62?d.slice(0,62)+'…':d}
+
+// ---- live update on slider ----
+function bindSliders(){
+  document.querySelectorAll('[data-slide]').forEach(s=>{
+    s.addEventListener('input',()=>{
+      const it=byCode[s.dataset.slide]; it._pct=+s.value; calcItem(it);
+      document.querySelector(`[data-bpct="${it.code}"]`).textContent=Math.round(it._pct)+'%';
+      const mo=document.querySelector(`[data-money="${it.code}"]`);
+      if(it.rate!=null) mo.innerHTML='<b>'+inr(it.done_val)+'</b>';
+      // roll up: this item's activities, then hero
+      it.acts.forEach(updateAct); updateHero();
+    });
+  });
+}
+function updateAct(a){
+  const p=actPct(a),m=actMoney(a);
+  const f=document.querySelector(`[data-fill="${encodeURIComponent(a)}"]`); if(f)f.style.width=(p||0)+'%';
+  const pc=document.querySelector(`[data-apct="${encodeURIComponent(a)}"]`); if(pc)pc.textContent=p==null?'—':p.toFixed(0)+'%';
+  const dn=document.querySelector(`[data-adone="${encodeURIComponent(a)}"]`); if(dn)dn.textContent=m.done==null?'—':inr(m.done);
+}
+function updateHero(){
+  let sp=0,np=0,done=0,rem=0;
+  D.items.forEach(it=>{if(it.qty>0){sp+=it._pct;np++} if(it.rate!=null){done+=it.done_val||0;rem+=it.rem_val||0}});
+  const hp=np?sp/np:0;
+  document.getElementById('heropct').textContent=hp.toFixed(0)+'%';
+  document.getElementById('ring').style.setProperty('--p',hp.toFixed(1));
+  document.getElementById('sDone').textContent=inr(done);
+  document.getElementById('sRem').textContent=inr(rem);
+  const planned=done+rem;
+  document.getElementById('sDoneH').textContent=planned?((100*done/planned).toFixed(0)+'% of value'):'';
+  document.getElementById('sRemH').textContent='to finish planned work';
+}
+
+// ---- drawer (forecast detail) ----
+function openDrawer(code){
+  const it=byCode[code]; const s=document.getElementById('scrim');
+  const link=it.link||{}; const conf=link.conf;
+  const daysWork=it.remaining>0?Math.max(Math.round(it.remaining/Math.max(it.used/30,1)),1):0; // rough demo horizon
+  document.getElementById('drawer').innerHTML=`
+    <div class="dhd"><div><h2>${it.code} · ${it.sub}</h2></div><button class="x" onclick="closeDrawer()">×</button></div>
+    <p class="dsub">${it.desc.slice(0,120)}${it.desc.length>120?'…':''}</p>
+    <div class="drow"><span>Planned (108 rooms)</span><b>${qfmt(it.planned)} ${it.unit}</b></div>
+    <div class="drow"><span>Used so far</span><b>${qfmt(it.used)} ${it.unit}</b></div>
+    <div class="drow"><span>Remaining work</span><b>${qfmt(it.remaining)} ${it.unit}</b></div>
+    <div class="drow"><span>Install rate</span><b>${it.rate!=null?inr(it.rate)+' /'+it.unit:'not set'}</b></div>
+    <div class="dbar"><i style="width:${it._pct}%"></i></div>
+    <div style="font-size:11.5px;color:var(--ink3);text-align:right">${Math.round(it._pct)}% complete</div>
+    <div class="dlink ${conf?'ok':'rev'}">${link.best?
+      (conf?`✓ Linked to stock: <b>${link.best}</b> (confidence ${(link.score*100).toFixed(0)}%)`:
+            `Needs review — closest stock match: <b>${link.best||'—'}</b> (${(link.score*100).toFixed(0)}%). Confirm before trusting the stock forecast.`):
+      `No confident stock match yet — link this item to a register material to enable its forecast.`}</div>
+    <div class="dfore"><b>Real-time forecast.</b> ${it.remaining>0?
+      `About <b>${qfmt(it.remaining)} ${it.unit}</b> of this item is still needed to finish the planned work across all rooms. Once linked to the stock register, Material Intelligence compares that against the burn rate to say whether stock on hand will finish the job — and the order-by date if not.`:
+      `Planned quantity for this item is fully consumed. No further material needed for the current BOQ.`}</div>
+    <p class="demo">Preview • rates shown are illustrative (user-entered in the live app)</p>`;
+  s.classList.add('on');
+}
+function closeDrawer(){document.getElementById('scrim').classList.remove('on')}
+document.getElementById('scrim').addEventListener('click',e=>{if(e.target.id==='scrim')closeDrawer()});
+
+// ---- init ----
+document.getElementById('proj').textContent=D.project;
+document.getElementById('crumb').textContent='Hyatt Centric  ›  Electrical  ›  All floors';
+renderTree();renderPills();
+D.items.forEach(calcItem);
+renderActs();
+// waste stat from backend (needs actual consumption)
+document.getElementById('sWaste').textContent=D.waste&&D.waste.available?inr(D.waste.wasted_value):'—';
+document.getElementById('sWasteH').textContent=D.waste&&D.waste.available?'over-consumed vs work done':'link stock to measure';
+updateHero();
+// open first non-labour card
+setTimeout(()=>{const c=document.querySelectorAll('.card')[1];if(c)c.classList.add('open')},60);
+</script>
+</body></html>

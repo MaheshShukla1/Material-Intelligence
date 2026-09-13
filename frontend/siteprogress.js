@@ -659,7 +659,7 @@
     const OUTCOME = {
       prevented: { label: "Prevented", color: "var(--green)" },
       materialized: { label: "Ran out for real", color: "var(--amber)" },
-      no_longer_needed: { label: "Work finished first", color: "var(--ink3)" },
+      no_longer_needed: { label: "Gap closed — no delivery needed", color: "var(--ink3)" },
       ongoing: { label: "Still flagged", color: "var(--amber)" },
     };
     const body = episodes.length ? episodes.map((ep) => {
@@ -1096,7 +1096,7 @@
     const OUTCOME = {
       prevented: { label: "Prevented", color: "var(--green)" },
       materialized: { label: "Ran out for real", color: "var(--amber)" },
-      no_longer_needed: { label: "Work finished first — no order needed", color: "var(--ink3)" },
+      no_longer_needed: { label: "Gap closed — no delivery needed", color: "var(--ink3)" },
       ongoing: { label: "Still flagged", color: "var(--amber)" },
     };
     const it = S._byCode[code];

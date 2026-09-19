@@ -345,6 +345,135 @@ $("sync").onclick = () => {
   syncFromSheet(link, META ? META.project : "");
 };
 
+// The real bucket definitions, read straight from the live <select id="status">
+// so there is exactly one source of truth for what "Act today" etc. actually
+// means -- the export modal's checkboxes are never a second, hand-typed copy.
+function statusOptions() {
+  return [...$("status").options].map((o) => ({ value: o.value, label: o.textContent }));
+}
+
+async function openExportModal() {
+  if (!RUN) return;
+  const svcSel = $("exSvc");
+  svcSel.innerHTML = `<option value="">All services</option>` +
+    LAST_SERVICES.map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join("");
+  svcSel.value = SVC || "";
+
+  // Smart default: pre-tick whichever single bucket the on-screen Status
+  // dropdown currently has selected, so opening the modal starts from
+  // exactly what's already on screen -- the same idea the old direct-link
+  // version had, just as a starting point inside the modal instead of
+  // skipping the modal entirely.
+  const curStatus = $("status").value;
+  $("exStatusList").innerHTML = statusOptions().map((o) =>
+    `<label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" data-exstatus="${esc(o.value)}"> ${esc(o.label)}</label>`
+  ).join("");
+  $("exStatusList").querySelectorAll("input[data-exstatus]").forEach((cb) => {
+    cb.checked = cb.dataset.exstatus === curStatus;
+    cb.onchange = updateExportScopeLine;
+  });
+
+  await refreshExportCategory();
+  updateExportScopeLine();
+  $("exportModal").hidden = false;
+}
+
+function closeExportModal() { $("exportModal").hidden = true; }
+
+async function refreshExportCategory() {
+  const svc = $("exSvc").value;
+  const typeSel = $("exType");
+  if (!svc) {
+    typeSel.disabled = true;
+    typeSel.innerHTML = `<option value="">All categories</option>`;
+    hideExportSize();
+    return;
+  }
+  typeSel.disabled = false;
+  const cats = (SUBCATS && SUBCATS.by_service && SUBCATS.by_service[svc]) || [];
+  typeSel.innerHTML = `<option value="">All categories</option>` +
+    cats.map((c) => `<option value="${esc(c.name)}">${esc(c.name)} (${c.count})</option>`).join("");
+  typeSel.value = "";
+  await refreshExportSize();
+}
+
+// Size only shows once a Category is picked AND that category actually has
+// extractable size tokens for THIS scope (see /api/sizes -- linkage.size_tokens(),
+// the same real extraction linkage.py already uses for BOQ matching, never a
+// second guess at what counts as a "size").
+async function refreshExportSize() {
+  const svc = $("exSvc").value, cat = $("exType").value;
+  if (!svc || !cat) { hideExportSize(); return; }
+  const sizes = await (await fetch(`/api/sizes/${RUN}?service=${encodeURIComponent(svc)}&subcategory=${encodeURIComponent(cat)}`)).json();
+  if (!sizes.length) { hideExportSize(); return; }
+  $("exSize").innerHTML = `<option value="">All sizes</option>` +
+    sizes.map((s) => `<option value="${esc(s.name)}">${esc(s.name)} (${s.count})</option>`).join("");
+  $("exSizeWrap").hidden = false;
+}
+function hideExportSize() { $("exSizeWrap").hidden = true; $("exSize").innerHTML = `<option value="">All sizes</option>`; }
+
+$("exSvc").onchange = () => { refreshExportCategory().then(updateExportScopeLine); };
+$("exType").onchange = () => { refreshExportSize().then(updateExportScopeLine); };
+$("exSize").onchange = updateExportScopeLine;
+$("exSelectAll").onclick = () => {
+  $("exSvc").value = "";
+  refreshExportCategory().then(updateExportScopeLine);
+  $("exStatusList").querySelectorAll("input").forEach((c) => { c.checked = true; });
+  updateExportScopeLine();
+};
+
+// Each checked box contributes its own real status code(s) (a bucket like
+// "Act today" is itself already STOCKED_OUT,RED) -- checking several buckets
+// unions their codes into one status filter. "Order date passed" is not a
+// status at all (see load()'s own comment on this) so it is pulled out and
+// sent as the separate overdue=1 flag instead.
+function exportModalParams() {
+  const svc = $("exSvc").value, cat = $("exType").value, size = $("exSize").value;
+  const boxes = [...document.querySelectorAll("#exStatusList input")];
+  const checked = boxes.filter((c) => c.checked);
+  const params = {};
+  if (svc) params.service = svc;
+  if (cat) params.subcategory = cat;
+  if (size) params.size = size;
+  // every box checked, or none at all, both mean "no status restriction" --
+  // an empty selection has no useful "export nothing" meaning here, so it
+  // falls back to the same "everything" behaviour as ticking every box.
+  if (checked.length && checked.length < boxes.length) {
+    const codes = new Set();
+    let overdue = false;
+    checked.forEach((c) => {
+      if (c.dataset.exstatus === "__overdue__") overdue = true;
+      else c.dataset.exstatus.split(",").forEach((code) => code && codes.add(code));
+    });
+    if (codes.size) params.status = [...codes].join(",");
+    if (overdue) params.overdue = 1;
+  }
+  return params;
+}
+
+function updateExportScopeLine() {
+  const bits = [$("exSvc").value || "All services"];
+  if ($("exType").value) bits.push($("exType").value);
+  if ($("exSize").value) bits.push($("exSize").value);
+  const boxes = [...document.querySelectorAll("#exStatusList input")];
+  const checked = boxes.filter((c) => c.checked).length;
+  const statusTxt = (checked === 0 || checked === boxes.length)
+    ? "Everything" : `${checked} of ${boxes.length} selected`;
+  $("exScopeLine").textContent = bits.join(" \u2192 ") + " \u00b7 " + statusTxt;
+}
+
+$("exGo").onclick = () => {
+  const p = new URLSearchParams(exportModalParams());
+  const qs = p.toString();
+  const a = document.createElement("a");
+  a.href = `/api/export/${RUN}` + (qs ? `?${qs}` : "");
+  a.click();
+  closeExportModal();
+};
+
+$("exportModal").onclick = (e) => { if (e.target.id === "exportModal") closeExportModal(); };
+$("dl").onclick = openExportModal;
+
 async function show(runId, meta, summary) {
   RUN = runId; META = meta; TYPE = ""; SIZE = "";
   try { localStorage.setItem("currentRun", runId); } catch (e) {}
@@ -367,7 +496,7 @@ async function show(runId, meta, summary) {
       : `Lead time ${LEAD} days plus a 2 day buffer, so an order must be raised ` +
         `${LEAD + 2} days before stock hits zero.`;
   }
-  $("dl").hidden = false; $("dl").href = `/api/export/${RUN}`;
+  $("dl").hidden = false;
   $("del").hidden = false;
   $("home").hidden = false;
   $("pick").hidden = false; $("sync").hidden = false; $("leadwrap").hidden = false;

@@ -27,7 +27,7 @@
     </label>
     <button id="pick" class="btn primary" hidden>Upload</button>
     <button id="sync" class="btn" hidden>Sync sheet</button>
-    <a id="dl" class="btn" hidden>Export</a>
+    <button id="dl" class="btn" hidden>Export</button>
     <button id="del" class="btn danger" hidden>Delete</button>
     <input id="file" type="file" accept=".xlsx,.xlsm,.xls" hidden>
   </div>
@@ -183,6 +183,38 @@
     <p id="merr" class="merr" hidden></p>
   </div>
 </div>
+
+<div id="exportModal" class="sheet mid" hidden>
+  <div class="card">
+    <div class="mhd">
+      <h2>Export</h2>
+      <button class="btn" onclick="closeExportModal()">Close</button>
+    </div>
+    <p class="msub">Pick a service and category to narrow it down — or leave both blank for everything.</p>
+
+    <label style="display:block;font-size:13px;color:#6b6862;margin:10px 0 4px">Service
+      <select id="exSvc" class="ctl" style="display:block;width:100%;margin-top:4px"></select>
+    </label>
+    <label style="display:block;font-size:13px;color:#6b6862;margin:10px 0 4px">Category
+      <select id="exType" class="ctl" style="display:block;width:100%;margin-top:4px" disabled><option value="">All categories</option></select>
+    </label>
+    <label id="exSizeWrap" style="display:block;font-size:13px;color:#6b6862;margin:10px 0 4px" hidden>Size
+      <select id="exSize" class="ctl" style="display:block;width:100%;margin-top:4px"><option value="">All sizes</option></select>
+    </label>
+
+    <p style="font-size:13px;color:#6b6862;margin:14px 0 6px">Show me</p>
+    <div id="exStatusList" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:13px"></div>
+    <button type="button" class="btn" id="exSelectAll" style="margin-top:10px;font-size:12px">Select everything</button>
+
+    <p style="font-size:13px;color:#2f6f4f;margin:14px 0 0" id="exScopeLine"></p>
+
+    <div class="mact">
+      <button class="btn" onclick="closeExportModal()">Cancel</button>
+      <button class="btn primary" id="exGo">Export</button>
+    </div>
+  </div>
+</div>
+
 
 <div id="confirm" class="sheet mid" hidden>
   <div class="card">

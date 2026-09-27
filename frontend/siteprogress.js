@@ -187,94 +187,151 @@
     } catch (e) {}
   }
 
+  let dprSvc = "";
+  let dprActiveFloor = null;
+  let dprPicked = {};   // path -> Set of room ids, persists across floor switches
+
   function openDprModal() {
     const today = new Date().toISOString().slice(0, 10);
     const rooms = allRoomsList();
     const groups = {};
     rooms.forEach((r) => { (groups[r.path] = groups[r.path] || []).push(r); });
     const groupEntries = Object.entries(groups);
-    const svcOptions = (S.state.services || [])
-      .map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join("");
+    dprSvc = ""; dprActiveFloor = groupEntries.length ? groupEntries[0][0] : null; dprPicked = {};
+    groupEntries.forEach(([path]) => { dprPicked[path] = new Set(); });
 
     modal("Export daily update",
-      "Auto-captured from progress updates. Pick a date range and, optionally, a service and/or an area.",
-      `<div style="display:flex;gap:8px;align-items:center;font-size:13px;padding:10px 0 6px">
+      "Auto-captured from progress updates. Pick a date range and, optionally, a service and area.",
+      `<div style="display:flex;gap:10px;align-items:center;font-size:13px;padding:4px 0 18px">
          <span style="color:var(--ink3)">Date range</span>
-         <input class="ctl" id="sp-dpr-start" type="date" value="${today}" style="width:150px">
+         <input class="ctl" id="sp-dpr-start" type="date" value="${today}" style="flex:1">
          <span style="color:var(--ink3)">to</span>
-         <input class="ctl" id="sp-dpr-end" type="date" value="${today}" style="width:150px">
+         <input class="ctl" id="sp-dpr-end" type="date" value="${today}" style="flex:1">
        </div>
-       <div style="padding:6px 0">
-         <label style="font-size:13px;color:var(--ink3);display:block;margin-bottom:4px">Service <span style="color:var(--ink4)">(optional — all services if left blank)</span></label>
-         <select class="ctl" id="sp-dpr-service" style="width:100%">
-           <option value="">All services</option>${svcOptions}
-         </select>
+       <p style="font-size:13px;color:var(--ink3);margin:0 0 8px">Service</p>
+       <div id="sp-dpr-svc" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:20px"></div>
+       <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px">
+         <p style="font-size:13px;color:var(--ink3);margin:0">Area</p>
+         <span id="sp-dpr-scope" style="font-size:12.5px;color:var(--violet)"></span>
        </div>
-       <div style="padding:6px 0">
-         <label style="font-size:13px;color:var(--ink3);display:block;margin-bottom:6px">Area <span style="color:var(--ink4)">(optional — whole project if left blank)</span></label>
-         ${rooms.length ? `
-         <div style="margin:0 0 8px"><button class="btn" id="sp-dprarea-all" type="button">Select all</button>
-         <button class="btn" id="sp-dprarea-none" type="button" style="margin-left:8px">Clear all</button></div>
-         <div style="border:1px solid var(--line2);border-radius:8px;padding:8px;max-height:200px;overflow-y:auto">
-           ${groupEntries.map(([path, rs], gi) => `
-             <div style="margin-bottom:10px">
-               <div style="display:flex;align-items:center;gap:8px;margin-bottom:5px">
-                 <b style="font-size:12.5px">${esc(path)}</b>
-                 <button type="button" class="linkbtn" data-dprgall="${gi}" style="font-size:11px">select all</button>
-                 <button type="button" class="linkbtn" data-dprgnone="${gi}" style="font-size:11px">clear</button>
-               </div>
-               <div class="sp-roomgroup" data-g="${gi}" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:5px">
-                 ${rs.map((r) => `<label style="display:flex;align-items:center;gap:5px;font-size:12.5px;cursor:pointer"><input type="checkbox" data-dprroom="${esc(r.id)}">${esc(r.name)}</label>`).join("")}
-               </div>
-             </div>`).join("")}
-         </div>
-         <p style="font-size:12.5px;color:var(--violet);margin:8px 0 0" id="sp-dpr-scope">Whole project</p>` :
-        `<p style="font-size:12.5px;color:var(--ink3)">No ${curLeafPluralLower(2)} in the structure yet.</p>`}
-       </div>`,
+       ${rooms.length ? `<div id="sp-dpr-floors"></div>`
+        : `<p style="font-size:12.5px;color:var(--ink3)">No ${curLeafPluralLower(2)} in the structure yet.</p>`}`,
       async () => {
         const start = $("sp-dpr-start").value;
         const end = $("sp-dpr-end").value;
         if (!start) return toast("Pick a start date");
-        const service = $("sp-dpr-service") ? $("sp-dpr-service").value : "";
-        const ticked = [...document.querySelectorAll("#sp-modal input[data-dprroom]")]
-          .filter((c) => c.checked).map((c) => c.dataset.dprroom);
+        const ticked = Object.values(dprPicked).flatMap((set) => [...set]);
         const q = new URLSearchParams();
         q.set("start", start);
         if (end && end !== start) q.set("end", end);
-        if (service) q.set("service", service);
+        if (dprSvc) q.set("service", dprSvc);
         ticked.forEach((rid) => q.append("rooms", rid));
         const a = document.createElement("a");
         a.href = api("/" + S.slug + "/export-dpr?" + q.toString());
         a.click();
         closeModal();
-      }, "Export DPR", "min(460px,92vw)");
+      }, "Export DPR", "min(640px,92vw)");
 
+    renderDprSvcChips();
     if (!rooms.length) return;
-    function scopeLabel() {
-      const ticked = [...document.querySelectorAll("#sp-modal input[data-dprroom]")].filter((c) => c.checked);
-      if (!ticked.length) return "Whole project";
-      const byGroup = {};
-      ticked.forEach((c) => {
-        const r = rooms.find((x) => x.id === c.dataset.dprroom);
-        if (r) (byGroup[r.path] = byGroup[r.path] || []).push(r.name);
+    renderDprFloors(groupEntries);
+    refreshDprScopeLine(groupEntries);
+  }
+
+  function renderDprSvcChips() {
+    const container = $("sp-dpr-svc");
+    const opts = ["", ...(S.state.services || [])];
+    container.innerHTML = opts.map((s) => {
+      const label = s || "All services";
+      const on = dprSvc === s;
+      return `<button type="button" data-dprsvc="${esc(s)}"
+        style="font-size:12.5px;padding:5px 12px;border-radius:999px;cursor:pointer;
+        background:${on ? "#eaf3de" : "#fff"};color:${on ? "#3b6d11" : "#1c1c1b"};
+        border:1px solid ${on ? "#97c459" : "var(--line2)"}">${esc(label)}</button>`;
+    }).join("");
+    container.querySelectorAll("[data-dprsvc]").forEach((b) => {
+      b.onclick = () => { dprSvc = b.dataset.dprsvc; renderDprSvcChips(); };
+    });
+  }
+
+  function dprFloorSummary(path, groups) {
+    const n = dprPicked[path].size;
+    return n ? `${n} of ${groups[path].length} ${curLeafPluralLower(2)}` : `no ${curLeafPluralLower(2)} picked`;
+  }
+
+  // Same accordion pattern as the Material Forecast export: only ONE
+  // floor's rooms are ever expanded at a time. Picking another floor
+  // auto-collapses the current one to a one-line summary -- no extra tap
+  // needed -- while its ticks stay exactly as they were, restored in full
+  // the moment that floor is reopened.
+  function renderDprFloors(groupEntries) {
+    const wrap = $("sp-dpr-floors");
+    wrap.innerHTML = "";
+
+    const totalTicked = Object.values(dprPicked).reduce((s, set) => s + set.size, 0);
+    const wp = document.createElement("div");
+    wp.style.cssText = `display:flex;align-items:center;justify-content:space-between;border:1px solid var(--line2);
+      border-radius:10px;padding:10px 14px;margin-bottom:8px;cursor:pointer;
+      background:${totalTicked === 0 ? "#eaf3de" : "#fff"}`;
+    wp.innerHTML = `<b style="font-size:13.5px">Whole project</b>
+      <span style="font-size:12.5px;color:var(--ink3)">${totalTicked === 0 ? "selected" : "tap to select"}</span>`;
+    wp.onclick = () => {
+      groupEntries.forEach(([path]) => dprPicked[path].clear());
+      dprActiveFloor = null;
+      renderDprFloors(groupEntries); refreshDprScopeLine(groupEntries);
+    };
+    wrap.appendChild(wp);
+
+    groupEntries.forEach(([path, rs], gi) => {
+      if (path !== dprActiveFloor) {
+        const row = document.createElement("div");
+        row.style.cssText = "display:flex;align-items:center;justify-content:space-between;border:1px solid var(--line2);border-radius:10px;padding:10px 14px;margin-bottom:8px;cursor:pointer";
+        row.innerHTML = `<span style="font-size:13.5px"><b>${esc(path)}</b> <span style="color:var(--ink3)">\u2014 ${esc(dprFloorSummary(path, Object.fromEntries(groupEntries)))}</span></span>
+          <span style="color:var(--ink3);font-size:13px">Edit</span>`;
+        row.onclick = () => { dprActiveFloor = path; renderDprFloors(groupEntries); };
+        wrap.appendChild(row);
+        return;
+      }
+      const g = document.createElement("div");
+      g.style.cssText = "border:1px solid var(--line2);border-radius:12px;padding:14px 16px;margin-bottom:8px";
+      g.innerHTML = `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+          <b style="font-size:14px">${esc(path)}</b>
+          <span style="display:flex;gap:12px">
+            <button type="button" class="linkbtn" data-dprgall="${gi}" style="font-size:12px">select all</button>
+            <button type="button" class="linkbtn" data-dprgnone="${gi}" style="font-size:12px">clear</button>
+          </span>
+        </div>
+        <div class="sp-roomgroup" data-g="${gi}" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(90px,1fr));gap:6px;max-height:150px;overflow-y:auto">
+          ${rs.map((r) => `<label style="display:flex;align-items:center;gap:5px;font-size:12.5px;cursor:pointer"><input type="checkbox" data-dprroom="${esc(r.id)}" ${dprPicked[path].has(r.id) ? "checked" : ""}>${esc(r.name)}</label>`).join("")}
+        </div>`;
+      wrap.appendChild(g);
+      g.querySelectorAll("input[data-dprroom]").forEach((c) => {
+        c.onchange = () => {
+          c.checked ? dprPicked[path].add(c.dataset.dprroom) : dprPicked[path].delete(c.dataset.dprroom);
+          refreshDprScopeLine(groupEntries);
+        };
       });
-      return Object.entries(byGroup).map(([path, names]) => {
-        const total = groups[path].length;
-        return names.length === total ? path : `${path} \u2192 ${names.join(", ")}`;
-      }).join(" \u00b7 ");
-    }
-    function refreshScopeLine() { const el = $("sp-dpr-scope"); if (el) el.textContent = scopeLabel(); }
-    document.querySelectorAll("#sp-modal input[data-dprroom]").forEach((c) => c.addEventListener("change", refreshScopeLine));
-    $("sp-dprarea-all").onclick = () => { document.querySelectorAll("#sp-modal input[data-dprroom]").forEach((c) => { c.checked = true; }); refreshScopeLine(); };
-    $("sp-dprarea-none").onclick = () => { document.querySelectorAll("#sp-modal input[data-dprroom]").forEach((c) => { c.checked = false; }); refreshScopeLine(); };
-    document.querySelectorAll("[data-dprgall]").forEach((b) => b.addEventListener("click", () => {
-      document.querySelector(`.sp-roomgroup[data-g="${cssA(b.dataset.dprgall)}"]`).querySelectorAll("input[data-dprroom]").forEach((c) => { c.checked = true; });
-      refreshScopeLine();
-    }));
-    document.querySelectorAll("[data-dprgnone]").forEach((b) => b.addEventListener("click", () => {
-      document.querySelector(`.sp-roomgroup[data-g="${cssA(b.dataset.dprgnone)}"]`).querySelectorAll("input[data-dprroom]").forEach((c) => { c.checked = false; });
-      refreshScopeLine();
-    }));
+      g.querySelector("[data-dprgall]").onclick = () => {
+        rs.forEach((r) => dprPicked[path].add(r.id));
+        renderDprFloors(groupEntries); refreshDprScopeLine(groupEntries);
+      };
+      g.querySelector("[data-dprgnone]").onclick = () => {
+        dprPicked[path].clear();
+        renderDprFloors(groupEntries); refreshDprScopeLine(groupEntries);
+      };
+    });
+  }
+
+  function refreshDprScopeLine(groupEntries) {
+    const el = $("sp-dpr-scope");
+    if (!el) return;
+    const total = Object.values(dprPicked).reduce((s, set) => s + set.size, 0);
+    if (!total) { el.textContent = "Whole project"; return; }
+    el.textContent = groupEntries
+      .filter(([path]) => dprPicked[path].size)
+      .map(([path, rs]) => dprPicked[path].size === rs.length ? path
+        : `${path} \u2192 ${rs.filter((r) => dprPicked[path].has(r.id)).map((r) => r.name).join(", ")}`)
+      .join(" \u00b7 ");
   }
 
   async function loadState(fromOpen) {
@@ -471,7 +528,6 @@
             <div class="sp-stats">
               <div class="sp-stat"><p class="l">Work done</p><div class="v g" id="sp-done">₹—</div><p class="h" id="sp-doneh"></p></div>
               <div class="sp-stat"><p class="l">Remaining</p><div class="v a" id="sp-rem">₹—</div><p class="h">to finish planned work</p></div>
-              <div class="sp-stat"><p class="l">Material waste</p><div class="v r" id="sp-waste">₹—</div><p class="h" id="sp-wasteh"></p></div>
             </div>
           </div>
           <p class="sp-unmapped" id="sp-unmapped" hidden></p>
@@ -660,7 +716,6 @@
     try { shortageSum = await jget(api("/" + S.slug + "/shortage-summary")); } catch (e) {}
     try { shortageLife = await jget(api("/" + S.slug + "/shortage-summary-lifetime")); } catch (e) {}
     S._ovCache = {};
-    const rs = o.rooms_summary || { done: 0, in_progress: 0, not_started: 0, total: 0 };
     const svcRows = Object.entries(o.by_service).map(([s, v]) =>
       `<div class="sp-card" data-ovsvc="${esc(s)}">
         <div class="sp-ovrow">
@@ -700,11 +755,9 @@
         <div class="sp-pills" id="sp-pills"></div>
         <div class="sp-hero">
           <div class="sp-ring" id="sp-oring"><i><b>${Math.round(o.pct_value_done)}%</b><span>value complete</span></i></div>
-          <div class="sp-stats four">
+          <div class="sp-stats">
             <div class="sp-stat"><p class="l">Work done</p><div class="v g">${inr(o.done_value)}</div><p class="h">of ${inr(o.planned_value)} planned</p></div>
             <div class="sp-stat"><p class="l">Remaining</p><div class="v a">${inr(o.remaining_value)}</div><p class="h">to finish planned work</p></div>
-            <div class="sp-stat"><p class="l">Material waste</p><div class="v r">${inr(o.waste_value)}</div><p class="h">${o.waste_caveat ? esc(o.waste_caveat) : (o.waste_value ? "over-consumed vs work done" : "link stock to measure")}</p></div>
-            <div class="sp-stat sp-statdiv"><p class="l">${curLeafPlural(2)} — whole site</p><div class="v">${rs.done} <span style="font-size:13px;font-weight:400;color:var(--ink3)">done</span> · ${rs.in_progress} <span style="font-size:13px;font-weight:400;color:var(--ink3)">in progress</span></div><p class="h">of ${rs.total} ${curLeafPluralLower(rs.total)}</p></div>
           </div>
         </div>
         ${shortageTicker}
@@ -1047,11 +1100,27 @@
                  : `Undid done for ${ids.length} ${curLeafPluralLower(ids.length)} on ${code}.`);
     } catch (e) { toast("Failed: " + briefErr(e)); }
   }
-  function openRoomsModal(code) {
+  function openRoomsModal(code, expandToEverything) {
     const it = S._byCode[code];
-    const rooms = allRoomsList();
-    if (!rooms.length) return toast(`No ${curLeafPluralLower(2)} in the structure yet.`);
+    const allRooms = allRoomsList();
+    if (!allRooms.length) return toast(`No ${curLeafPluralLower(2)} in the structure yet.`);
     const existingGroups = (S.svc.item_room_qty || {})[code] || [];
+    const explicitIds = (S.svc.item_rooms || {})[code] || [];
+    const byId = {};
+    allRooms.forEach((r) => { byId[r.id] = r; });
+
+    // The areas this item is ALREADY configured for -- a real quantity
+    // group's own rooms first, else a plain applicability list, else
+    // null (nothing configured yet -- a brand-new item has no "already
+    // set" area to restrict to, so the full tree is the only option).
+    // This is what actually gets ticked/updated day to day; a cable tray
+    // set for 6 corridors has nothing to do with the other 198 rooms in
+    // the building, so they don't belong in this list by default.
+    const configuredIds = existingGroups.length
+      ? [...new Set(existingGroups.flatMap((g) => g.rooms))]
+      : (explicitIds.length ? explicitIds : null);
+    const showEverything = expandToEverything || configuredIds === null;
+    const rooms = showEverything ? allRooms : allRooms.filter((r) => configuredIds.includes(r.id));
 
     // which rooms are already 100% done for THIS item -- same per-room
     // fraction resolution compute()/frac_for() use server-side (a room's own
@@ -1076,16 +1145,31 @@
     rooms.forEach((r) => { (groups[r.path] = groups[r.path] || []).push(r); });
     const groupEntries = Object.entries(groups);
 
+    // real area names, not just a count -- capped so a group covering
+    // dozens of rooms doesn't turn into an unreadable wall of text.
+    const namesFor = (ids, cap = 4) => {
+      const names = ids.map((id) => (byId[id] ? byId[id].name : id));
+      return names.length > cap
+        ? `${names.slice(0, cap).join(", ")} +${names.length - cap} more`
+        : names.join(", ");
+    };
+
     const groupsSummary = existingGroups.length
       ? `<div class="sp-qtygroups">
           <p class="lbl">Current quantity groups</p>
           ${existingGroups.map((g, gi) => {
             const doneN = g.rooms.filter(isDone).length;
-            return `<div class="row"><span>${g.rooms.length} ${curLeafPluralLower(g.rooms.length)}</span><b>${qf(g.qty, it.unit)} ${esc(it.unit)}</b>${doneN ? `<span class="sp-donebadge">${doneN} done</span>` : ""}<button type="button" class="sp-qtygroup-rm" data-rmgroup="${gi}" title="Remove this group">Remove</button></div>`;
+            return `<div class="row"><span>${esc(namesFor(g.rooms))}</span><b>${qf(g.qty, it.unit)} ${esc(it.unit)}</b>${doneN ? `<span class="sp-donebadge">${doneN} done</span>` : ""}<button type="button" class="sp-qtygroup-rm" data-rmgroup="${gi}" title="Remove this group">Remove</button></div>`;
           }).join("")}
           <p class="hint">Ticking ${curLeafPluralLower(2)} below and saving with a quantity moves them into a new group (out of whichever group they're currently in).</p>
         </div>`
       : "";
+
+    const expandLink = (!showEverything)
+      ? `<p style="margin:8px 0 0"><button type="button" class="linkbtn" id="sp-rooms-expand" style="font-size:12.5px">+ Add other ${curLeafPluralLower(2)} (not currently set for this item)</button></p>`
+      : (configuredIds !== null
+        ? `<p style="margin:8px 0 0;font-size:12px;color:var(--ink3)">Showing every ${curLeafLower()} in the building -- ${curLeafPluralLower(2)} already set for this item are marked below.</p>`
+        : "");
 
     const body = `${groupsSummary}
       <div class="sp-qtyrow">
@@ -1105,7 +1189,8 @@
           <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:5px">
           ${rs.map((r) => `<label style="display:flex;align-items:center;gap:5px;font-size:12.5px;cursor:pointer" class="${isDone(r.id) ? "sp-roomdone" : ""}"><input type="checkbox" data-room="${esc(r.id)}" ${checked.has(r.id) ? "checked" : ""}>${esc(r.name)}${isDone(r.id) ? ' <span class="sp-doneck" title="Already marked done">✓</span>' : ""}</label>`).join("")}
           </div>
-        </div>`).join("")}`;
+        </div>`).join("")}
+      ${expandLink}`;
 
     // Mark done / Undo done live in the modal's FIXED FOOTER (see modal()'s
     // extraFooterHTML param), not inside the scrollable room list -- always
@@ -1140,6 +1225,7 @@
         await afterSvc();
       }, `Save ${curLeafPluralLower(2)}`, "min(600px,94vw)", footerButtons);
 
+    if ($("sp-rooms-expand")) $("sp-rooms-expand").onclick = () => { closeModal(); openRoomsModal(code, true); };
     $("sp-rooms-all").onclick = () => document.querySelectorAll("#sp-modal input[data-room]").forEach((c) => { c.checked = true; });
     $("sp-rooms-none").onclick = () => document.querySelectorAll("#sp-modal input[data-room]").forEach((c) => { c.checked = false; });
     $("sp-mark-done").onclick = () => markRoomsDone(code, true);
@@ -1412,14 +1498,6 @@
     const p = S.svc.overall_pct || 0; $("sp-hpct").textContent = Math.round(p) + "%"; $("sp-ring").style.setProperty("--p", p.toFixed(1));
     const t = (S.pnl && S.pnl.project) || {}; $("sp-done").textContent = inr(t.done_value); $("sp-rem").textContent = inr(t.remaining_value);
     $("sp-doneh").textContent = t.pct_value_done != null ? Math.round(t.pct_value_done) + "% of value" : "";
-    const w = S.pnl && S.pnl.waste; $("sp-waste").textContent = (w && w.available) ? inr(w.wasted_value) : "—";
-    // waste is never room-scoped (the stock register has no room column, see
-    // pnl route docstring) -- when a room is selected, say so plainly rather
-    // than let a whole-project number sit under a room heading looking like
-    // it belongs to that room.
-    $("sp-wasteh").textContent = (w && w.available)
-      ? (w.caveat ? w.caveat : (S.room ? `whole project — not split by ${curLeafLower()}` : "over-consumed vs work done"))
-      : "link stock to measure";
     // items whose activity was deleted keep their own progress (nothing is
     // erased) but no longer count toward the numbers above, since they have
     // no home in the activity list. Say so, instead of the money vanishing

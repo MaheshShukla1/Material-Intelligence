@@ -185,28 +185,24 @@
 </div>
 
 <div id="exportModal" class="sheet mid" hidden>
-  <div class="card">
+  <div class="card export">
     <div class="mhd">
       <h2>Export</h2>
       <button class="btn" onclick="closeExportModal()">Close</button>
     </div>
     <p class="msub">Pick a service and category to narrow it down — or leave both blank for everything.</p>
 
-    <label style="display:block;font-size:13px;color:#6b6862;margin:10px 0 4px">Service
-      <select id="exSvc" class="ctl" style="display:block;width:100%;margin-top:4px"></select>
-    </label>
-    <label style="display:block;font-size:13px;color:#6b6862;margin:10px 0 4px">Category
-      <select id="exType" class="ctl" style="display:block;width:100%;margin-top:4px" disabled><option value="">All categories</option></select>
-    </label>
-    <label id="exSizeWrap" style="display:block;font-size:13px;color:#6b6862;margin:10px 0 4px" hidden>Size
-      <select id="exSize" class="ctl" style="display:block;width:100%;margin-top:4px"><option value="">All sizes</option></select>
-    </label>
+    <label style="display:block;font-size:13px;color:#6b6862;margin:10px 0 4px">Service</label>
+    <div id="exSvc" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:4px"></div>
+    <p id="exNoSvcHint" style="font-size:12px;color:#8b8983;margin:4px 0 0">Categories appear once you pick a service above.</p>
+    <div id="exGroups"></div>
 
     <p style="font-size:13px;color:#6b6862;margin:14px 0 6px">Show me</p>
     <div id="exStatusList" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:13px"></div>
     <button type="button" class="btn" id="exSelectAll" style="margin-top:10px;font-size:12px">Select everything</button>
 
     <p style="font-size:13px;color:#2f6f4f;margin:14px 0 0" id="exScopeLine"></p>
+    <p style="font-size:12px;color:#8b8983;margin:4px 0 0;word-break:break-all" id="exFname"></p>
 
     <div class="mact">
       <button class="btn" onclick="closeExportModal()">Cancel</button>

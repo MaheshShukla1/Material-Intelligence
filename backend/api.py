@@ -581,19 +581,65 @@ def _scoped_forecast(run_id, status="", service="", subcategory="", size="",
     if status:
         f = f[f.status.isin(status.split(","))]
     if service:
-        f = f[f.service == service]
+        f = f[f.service.isin(service.split(","))]
     if subcategory:
-        f = f[f.subcategory == subcategory]
+        f = f[f.subcategory.isin(subcategory.split(","))]
     # Size is a token from linkage.size_tokens() (e.g. "1.5SQMM", "25MM"), the
     # SAME extraction linkage.py already uses for BOQ matching - never a
     # second, looser guess at what counts as a size. Recomputed per request
     # rather than baked into the parquet: cheap regex work over a few hundred
     # materials at most, same order of cost as subcat.add_subcategory below.
     if size:
-        f = f[f.material.map(lambda m: size in linkage.size_tokens(m))]
+        wanted = set(size.split(","))
+        f = f[f.material.map(lambda m: bool(wanted & linkage.size_tokens(m)))]
     if q:
         f = f[f.material.str.contains(q.strip().upper(), regex=False)]
     return f
+
+
+def _scoped_forecast_grouped(run_id, groups, status="", q="", overdue=0):
+    """Like _scoped_forecast, but for the Export modal's per-service picker,
+    where each selected SERVICE has its OWN category/size picks -- Electrical
+    scoped to just Wire, Plumbing left at "every category", say.
+
+    _scoped_forecast's flat service/subcategory/size params can't express
+    this: `service in {Electrical,Plumbing} AND subcategory in {Wire}` isn't
+    "Electrical/Wire or all of Plumbing" -- it's the cross product, which
+    would wrongly ALSO include a hypothetical Plumbing/Wire row and wrongly
+    EXCLUDE every real Plumbing row (none of which are subcategory "Wire").
+    This scopes each group independently and ORs the results together
+    instead, so "Electrical -> Wire" and "Plumbing -> everything" combine
+    correctly rather than cross-contaminating each other.
+
+    groups: [{"service": str, "subcategory": [str, ...], "size": [str, ...]}, ...]
+    An empty `groups` list means no service was picked at all -> everything
+    (after status/q/overdue), same as _scoped_forecast with no service.
+    """
+    f, _ = load_run(run_id)
+    if "subcategory" not in f.columns:
+        f = subcat.add_subcategory(f)
+    if "tool_type" not in f.columns:
+        f = toolcat.add_tooltype(f, INVENTORY_SERVICES)
+    if overdue:
+        f = f[f.order_by.notna() & (f.order_by < pd.Timestamp.now())]
+    if status:
+        f = f[f.status.isin(status.split(","))]
+    if q:
+        f = f[f.material.str.contains(q.strip().upper(), regex=False)]
+    if not groups:
+        return f
+    combined = None
+    for g in groups:
+        m = f.service == g.get("service")
+        cats = g.get("subcategory") or []
+        if cats:
+            m = m & f.subcategory.isin(cats)
+        sizes = g.get("size") or []
+        if sizes:
+            wanted = set(sizes)
+            m = m & f.material.map(lambda mat: bool(wanted & linkage.size_tokens(mat)))
+        combined = m if combined is None else (combined | m)
+    return f[combined] if combined is not None else f.iloc[0:0]
 
 
 @app.get("/api/forecast/{run_id}")
@@ -636,6 +682,10 @@ def sizes(run_id: str, service: str = "", subcategory: str = ""):
     BOQ matching (see its docstring), not a second guess at what a "size" is.
     Same scoping rules as /api/subcategories: MEP only, Safety/Tools excluded
     (a size token from a helmet's name would be meaningless noise here).
+
+    service/subcategory each accept a comma-joined list (matching
+    _scoped_forecast's own convention) so the multi-select Export picker can
+    ask for sizes across several services/categories at once, not just one.
     """
     f, _ = load_run(run_id)
     if "subcategory" not in f.columns:
@@ -643,9 +693,9 @@ def sizes(run_id: str, service: str = "", subcategory: str = ""):
     if "service" in f.columns:
         f = f[~f.service.isin(INVENTORY_SERVICES)]
     if service:
-        f = f[f.service == service]
+        f = f[f.service.isin(service.split(","))]
     if subcategory:
-        f = f[f.subcategory == subcategory]
+        f = f[f.subcategory.isin(subcategory.split(","))]
     counts = {}
     for name in f.material.dropna():
         for tok in linkage.size_tokens(name):
@@ -716,7 +766,8 @@ def _status_label(row):
 
 @app.get("/api/export/{run_id}")
 def export_csv(run_id: str, status: str = "", service: str = "",
-               subcategory: str = "", size: str = "", q: str = "", overdue: int = 0):
+               subcategory: str = "", size: str = "", q: str = "", overdue: int = 0,
+               groups: str = ""):
     """The Material Forecast export -- scoped by the SAME Service/Category/
     Size/Status filters the on-screen table itself uses (_scoped_forecast(),
     shared with /api/forecast so the two can never disagree), formatted as a
@@ -727,13 +778,30 @@ def export_csv(run_id: str, status: str = "", service: str = "",
     Order By DATES rather than "in N days" text that goes stale the moment
     the file is opened later than today.
 
+    `groups` (optional): a JSON-encoded list of per-service picks -- see
+    _scoped_forecast_grouped's own docstring for why this exists (the flat
+    service/subcategory/size params below can't express "Electrical -> Wire
+    only, Plumbing -> everything" without cross-contaminating the two). When
+    given, it takes over service/subcategory/size scoping entirely; status/
+    q/overdue still apply on top exactly as before, since those were never
+    per-service to begin with.
+
     No filters at all -> every material, unchanged from what this route
     always did -- scoping is additive, never a behaviour change for an
     existing caller (the plain <a href> link) that never passes any."""
     d = RUNS / run_id
     if not (d / "forecast.parquet").exists():
         raise HTTPException(404, "run not found")
-    f = _scoped_forecast(run_id, status, service, subcategory, size, q, overdue)
+    parsed_groups = None
+    if groups:
+        try:
+            parsed_groups = json.loads(groups)
+        except (ValueError, TypeError):
+            raise HTTPException(400, "groups must be valid JSON")
+    if parsed_groups is not None:
+        f = _scoped_forecast_grouped(run_id, parsed_groups, status, q, overdue)
+    else:
+        f = _scoped_forecast(run_id, status, service, subcategory, size, q, overdue)
 
     from . import dpr
     from openpyxl import Workbook
@@ -744,16 +812,31 @@ def export_csv(run_id: str, status: str = "", service: str = "",
     ws = wb.active
     ws.title = "Material Forecast"
     ws.sheet_view.showGridLines = False
-    widths = {1: 38, 2: 14, 3: 16, 4: 16, 5: 11, 6: 14, 7: 16, 8: 13, 9: 13, 10: 11}
+    widths = {1: 38, 2: 8, 3: 14, 4: 16, 5: 16, 6: 11, 7: 14, 8: 16, 9: 13, 10: 13, 11: 11}
     for c, w in widths.items():
         ws.column_dimensions[get_column_letter(c)].width = w
 
-    scope_bits = [service or "All services"]
-    if subcategory:
-        scope_bits.append(subcategory)
-    if size:
-        scope_bits.append(size)
-    scope_txt = " \u2192 ".join(scope_bits)
+    def _readable(value):
+        return ", ".join(value.split(",")) if value else None
+
+    if parsed_groups is not None:
+        # Per-service breakdown, e.g. "Electrical -> Wire, 1.5 SQMM | Plumbing -> all"
+        parts = []
+        for g in parsed_groups:
+            bits = [g.get("service") or "?"]
+            if g.get("subcategory"):
+                bits.append(", ".join(g["subcategory"]))
+            if g.get("size"):
+                bits.append(", ".join(g["size"]))
+            parts.append(" \u2192 ".join(bits) if len(bits) > 1 else f"{bits[0]} \u2192 all categories")
+        scope_txt = " | ".join(parts) if parts else "All services"
+    else:
+        scope_bits = [_readable(service) or "All services"]
+        if subcategory:
+            scope_bits.append(_readable(subcategory))
+        if size:
+            scope_bits.append(_readable(size))
+        scope_txt = " \u2192 ".join(scope_bits)
     if status:
         scope_txt += f" \u00b7 {len(status.split(','))} status filter(s)"
     if overdue:
@@ -769,7 +852,7 @@ def export_csv(run_id: str, status: str = "", service: str = "",
     c2.font = Font(size=10, color="6B6862")
 
     row = 4
-    headers = ["Material", "Service", "Category", "Status", "Stock",
+    headers = ["Material", "UOM", "Service", "Category", "Status", "Stock",
               "Total Received", "Consumed to date", "Runs Out", "Order By", "Confidence"]
     dpr._header_row(ws, row, headers)
     row += 1
@@ -782,8 +865,14 @@ def export_csv(run_id: str, status: str = "", service: str = "",
         row_dict = {"status": getattr(r, "status", None), "order_by": getattr(r, "order_by", None)}
         exhaust = getattr(r, "exhaust_date", None)
         order_by = getattr(r, "order_by", None)
+        # engine.py's build_daily() fills a genuinely missing register Unit
+        # with the placeholder "-" (so groupby doesn't silently drop the
+        # row) rather than leaving it blank/NaN -- shown here as "\u2014" so
+        # it reads as "not recorded", not as a broken/empty cell.
+        unit = getattr(r, "unit", None)
+        uom = "\u2014" if unit is None or pd.isna(unit) or str(unit).strip() in ("", "-") else str(unit)
         vals = [
-            getattr(r, "material", None), getattr(r, "service", None),
+            getattr(r, "material", None), uom, getattr(r, "service", None),
             getattr(r, "subcategory", None), _status_label(row_dict), stock,
             received, cons,
             None if exhaust is None or pd.isna(exhaust) else pd.Timestamp(exhaust).strftime("%Y-%m-%d"),
@@ -793,18 +882,49 @@ def export_csv(run_id: str, status: str = "", service: str = "",
         for c, v in enumerate(vals, 1):
             cell = ws.cell(row, c, v)
             cell.font = Font(size=10)
-            if c in (5, 6, 7) and v is not None:
+            if c in (6, 7, 8) and v is not None:
                 cell.number_format = "#,##0"
-            if c == 4 and v in ("Already out", "Order now"):
+            if c == 5 and v in ("Already out", "Order now"):
                 cell.font = Font(size=10, bold=True, color="B23A2E")
-        dpr._zebra(ws, row, 10)
+        dpr._zebra(ws, row, 11)
         row += 1
 
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
-    scope_slug = re.sub(r"[^A-Za-z0-9]+", "-", scope_txt).strip("-").lower()
-    fname = f"material-forecast_{run_id}" + (f"_{scope_slug}" if scope_bits != ["All services"] else "") + ".xlsx"
+
+    def _slug(s):
+        return re.sub(r"[^A-Za-z0-9]+", "-", s).strip("-")
+
+    def _capped(value, label):
+        """1-2 picks -> their real names (still readable); 3+ -> a plain
+        count ("3-categories") so the FILENAME never balloons with a long
+        list -- the in-sheet header above stays fully verbose regardless,
+        this only shortens what lands on disk."""
+        if not value:
+            return None
+        items = value.split(",")
+        if len(items) <= 2:
+            return "+".join(_slug(v) for v in items)
+        return f"{len(items)}-{label}"
+
+    _, meta = load_run(run_id)
+    project = _slug(meta.get("project") or run_id)
+    fname_bits = [project, dt.datetime.now().strftime("%Y-%m-%d")]
+    if parsed_groups is not None:
+        all_svcs = [g.get("service") for g in parsed_groups if g.get("service")]
+        all_cats = [c for g in parsed_groups for c in (g.get("subcategory") or [])]
+        all_sizes = [s for g in parsed_groups for s in (g.get("size") or [])]
+        for items, label in ((all_svcs, "services"), (all_cats, "categories"), (all_sizes, "sizes")):
+            c = _capped(",".join(items), label)
+            if c:
+                fname_bits.append(c)
+    else:
+        for value, label in ((service, "services"), (subcategory, "categories"), (size, "sizes")):
+            c = _capped(value, label)
+            if c:
+                fname_bits.append(c)
+    fname = "_".join(fname_bits) + ".xlsx"
     return Response(
         content=buf.read(),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

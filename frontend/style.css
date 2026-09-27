@@ -245,6 +245,7 @@ tbody tr:hover{background:#faf9f6}
 }
 
 .card.wide{width:min(560px,92vw);max-height:82vh;overflow:auto}
+.card.export{width:min(640px,92vw);max-height:85vh;overflow:auto}
 .mhd{display:flex;justify-content:space-between;align-items:center;gap:16px;
   margin-bottom:4px}
 .mhd h2{margin-bottom:0}
@@ -333,6 +334,7 @@ tbody tr:hover{background:#faf9f6}
   main{padding:0 16px 56px}
   .kpis{grid-template-columns:repeat(auto-fit,minmax(140px,1fr))}
   .card.wide{padding:18px}
+  .card.export{padding:18px}
   /* Forecast tab's main table had no mobile handling at all -- its
      percentage-width colgroup just shrinks with the viewport, crushing
      five columns of real data (material name, action, stock, date, trust)

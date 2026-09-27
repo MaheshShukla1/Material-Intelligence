@@ -352,12 +352,41 @@ function statusOptions() {
   return [...$("status").options].map((o) => ({ value: o.value, label: o.textContent }));
 }
 
+// Per-service state -- exGroupState[service] = { cat: Set, size: Set }.
+// Deliberately NOT cleared when a service is deselected (see renderSvcChips)
+// so re-ticking it later restores exactly what was picked before -- nothing
+// is lost just because another service was added or removed in between.
+const exSvcSel = new Set();
+let exGroupState = {};
+// Stable, predictable order everywhere (matches the DOM's own group order)
+// rather than raw Set insertion order, which can silently reshuffle after a
+// deselect + reselect and make the filename/query look inconsistent.
+function orderedSelectedServices() { return LAST_SERVICES.filter((s) => exSvcSel.has(s)); }
+
+function renderChips(container, options, selectedSet, onToggle) {
+  if (!options.length) { container.innerHTML = `<span style="font-size:12.5px;color:#8b8983">None available</span>`; return; }
+  container.innerHTML = options.map((o) => {
+    const on = selectedSet.has(o.value);
+    return `<button type="button" class="ex-chip" data-chipval="${esc(o.value)}"
+      style="font-size:12.5px;padding:5px 12px;border-radius:999px;cursor:pointer;
+      background:${on ? "#eaf3de" : "#fff"};color:${on ? "#3b6d11" : "#1c1c1b"};
+      border:1px solid ${on ? "#97c459" : "#e7e5df"}">${esc(o.label)}</button>`;
+  }).join("");
+  container.querySelectorAll("[data-chipval]").forEach((b) => {
+    b.onclick = () => {
+      const v = b.dataset.chipval;
+      selectedSet.has(v) ? selectedSet.delete(v) : selectedSet.add(v);
+      onToggle();
+    };
+  });
+}
+
 async function openExportModal() {
   if (!RUN) return;
-  const svcSel = $("exSvc");
-  svcSel.innerHTML = `<option value="">All services</option>` +
-    LAST_SERVICES.map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join("");
-  svcSel.value = SVC || "";
+  exSvcSel.clear();
+  exGroupState = {};
+  exActiveService = null;
+  renderSvcChips();
 
   // Smart default: pre-tick whichever single bucket the on-screen Status
   // dropdown currently has selected, so opening the modal starts from
@@ -373,51 +402,118 @@ async function openExportModal() {
     cb.onchange = updateExportScopeLine;
   });
 
-  await refreshExportCategory();
+  await renderGroups();
   updateExportScopeLine();
   $("exportModal").hidden = false;
 }
 
 function closeExportModal() { $("exportModal").hidden = true; }
 
-async function refreshExportCategory() {
-  const svc = $("exSvc").value;
-  const typeSel = $("exType");
-  if (!svc) {
-    typeSel.disabled = true;
-    typeSel.innerHTML = `<option value="">All categories</option>`;
-    hideExportSize();
-    return;
+// The one service whose full category/size chips are currently expanded --
+// null means none. Clicking a not-yet-included service both adds it AND
+// makes it active (the previously-active one auto-collapses to a one-line
+// summary with no extra click on it needed). Clicking an ALREADY-included
+// service's chip removes it entirely (its data in exGroupState is left
+// alone regardless -- re-adding it later still restores its prior picks).
+let exActiveService = null;
+
+function renderSvcChips() {
+  const container = $("exSvc");
+  container.innerHTML = LAST_SERVICES.map((s) => {
+    const on = exSvcSel.has(s);
+    return `<button type="button" class="ex-chip" data-chipval="${esc(s)}"
+      style="font-size:12.5px;padding:5px 12px;border-radius:999px;cursor:pointer;
+      background:${on ? "#eaf3de" : "#fff"};color:${on ? "#3b6d11" : "#1c1c1b"};
+      border:1px solid ${on ? "#97c459" : "#e7e5df"}">${esc(s)}</button>`;
+  }).join("");
+  container.querySelectorAll("[data-chipval]").forEach((b) => {
+    b.onclick = async () => {
+      const s = b.dataset.chipval;
+      if (exSvcSel.has(s)) {
+        exSvcSel.delete(s);
+        if (exActiveService === s) exActiveService = null;
+      } else {
+        exSvcSel.add(s);
+        exGroupState[s] = exGroupState[s] || { cat: new Set(), size: new Set() };
+        exActiveService = s;
+      }
+      renderSvcChips();
+      await renderGroups();
+      updateExportScopeLine();
+    };
+  });
+  $("exNoSvcHint").hidden = exSvcSel.size > 0;
+}
+
+function groupSummaryText(svc) {
+  const state = exGroupState[svc] || { cat: new Set(), size: new Set() };
+  const bits = [];
+  if (state.cat.size) bits.push([...state.cat].join(", "));
+  if (state.size.size) bits.push([...state.size].join(", "));
+  return bits.length ? bits.join(" \u00b7 ") : "every category";
+}
+
+// One EXPANDED group (the active service) with its own bounded/scrollable
+// category list and a clearly labeled Size row beneath it; every OTHER
+// selected service collapses to a compact one-line summary -- tapping that
+// line re-activates it (collapsing whichever was active in turn), so two
+// services' picks never visually merge and neither overwrites the other.
+async function renderGroups() {
+  const wrap = $("exGroups");
+  wrap.innerHTML = "";
+  for (const svc of LAST_SERVICES.filter((s) => exSvcSel.has(s))) {
+    if (svc !== exActiveService) {
+      const row = document.createElement("div");
+      row.style.cssText = "display:flex;align-items:center;justify-content:space-between;border:1px solid #e7e5df;border-radius:10px;padding:10px 14px;margin-bottom:10px;cursor:pointer";
+      row.innerHTML = `<span style="font-size:13.5px"><b>${esc(svc)}</b> <span style="color:#8b8983">\u2014 ${esc(groupSummaryText(svc))}</span></span>
+        <span style="color:#8b8983;font-size:13px">Edit</span>`;
+      row.onclick = async () => { exActiveService = svc; await renderGroups(); };
+      wrap.appendChild(row);
+      continue;
+    }
+    const state = exGroupState[svc] || (exGroupState[svc] = { cat: new Set(), size: new Set() });
+    const g = document.createElement("div");
+    g.style.cssText = "border:1px solid #e7e5df;border-radius:12px;padding:16px 18px;margin-bottom:10px";
+    g.innerHTML = `<p style="font-size:14.5px;font-weight:500;margin:0 0 12px">${esc(svc)}</p>
+      <div class="ex-catbox" style="display:flex;flex-wrap:wrap;gap:8px;max-height:120px;overflow-y:auto;
+        border:1px solid #e7e5df;border-radius:8px;padding:8px"></div>
+      <p class="ex-sizelbl" style="font-size:12px;color:#8b8983;margin:14px 0 8px;text-transform:uppercase;
+        letter-spacing:.03em;display:none">Size</p>
+      <div class="ex-sizebox" style="display:flex;flex-wrap:wrap;gap:8px"></div>`;
+    wrap.appendChild(g);
+
+    const cats = ((SUBCATS && SUBCATS.by_service && SUBCATS.by_service[svc]) || []);
+    [...state.cat].forEach((c) => { if (!cats.some((x) => x.name === c)) state.cat.delete(c); });
+    renderChips(g.querySelector(".ex-catbox"),
+      cats.map((c) => ({ value: c.name, label: `${c.name} (${c.count})` })), state.cat,
+      async () => { await refreshGroupSizes(svc, g); updateExportScopeLine(); });
+
+    await refreshGroupSizes(svc, g);
   }
-  typeSel.disabled = false;
-  const cats = (SUBCATS && SUBCATS.by_service && SUBCATS.by_service[svc]) || [];
-  typeSel.innerHTML = `<option value="">All categories</option>` +
-    cats.map((c) => `<option value="${esc(c.name)}">${esc(c.name)} (${c.count})</option>`).join("");
-  typeSel.value = "";
-  await refreshExportSize();
 }
 
-// Size only shows once a Category is picked AND that category actually has
-// extractable size tokens for THIS scope (see /api/sizes -- linkage.size_tokens(),
-// the same real extraction linkage.py already uses for BOQ matching, never a
-// second guess at what counts as a "size").
-async function refreshExportSize() {
-  const svc = $("exSvc").value, cat = $("exType").value;
-  if (!svc || !cat) { hideExportSize(); return; }
-  const sizes = await (await fetch(`/api/sizes/${RUN}?service=${encodeURIComponent(svc)}&subcategory=${encodeURIComponent(cat)}`)).json();
-  if (!sizes.length) { hideExportSize(); return; }
-  $("exSize").innerHTML = `<option value="">All sizes</option>` +
-    sizes.map((s) => `<option value="${esc(s.name)}">${esc(s.name)} (${s.count})</option>`).join("");
-  $("exSizeWrap").hidden = false;
+// Sizes for ONE service's own currently-picked categories -- a single
+// comma-joined call per group, matching _scoped_forecast_grouped's real
+// linkage.size_tokens() extraction, never a second guess at what a "size" is.
+async function refreshGroupSizes(svc, groupEl) {
+  const state = exGroupState[svc];
+  const sizeBox = groupEl.querySelector(".ex-sizebox");
+  const sizeLbl = groupEl.querySelector(".ex-sizelbl");
+  if (!state.cat.size) { state.size.clear(); sizeBox.innerHTML = ""; if (sizeLbl) sizeLbl.style.display = "none"; return; }
+  const catParam = [...state.cat].join(",");
+  const sizes = await (await fetch(`/api/sizes/${RUN}?service=${encodeURIComponent(svc)}&subcategory=${encodeURIComponent(catParam)}`)).json();
+  [...state.size].forEach((s) => { if (!sizes.some((x) => x.name === s)) state.size.delete(s); });
+  if (!sizes.length) { sizeBox.innerHTML = ""; if (sizeLbl) sizeLbl.style.display = "none"; return; }
+  if (sizeLbl) sizeLbl.style.display = "block";
+  renderChips(sizeBox, sizes.map((s) => ({ value: s.name, label: `${s.name} (${s.count})` })), state.size, updateExportScopeLine);
 }
-function hideExportSize() { $("exSizeWrap").hidden = true; $("exSize").innerHTML = `<option value="">All sizes</option>`; }
 
-$("exSvc").onchange = () => { refreshExportCategory().then(updateExportScopeLine); };
-$("exType").onchange = () => { refreshExportSize().then(updateExportScopeLine); };
-$("exSize").onchange = updateExportScopeLine;
-$("exSelectAll").onclick = () => {
-  $("exSvc").value = "";
-  refreshExportCategory().then(updateExportScopeLine);
+$("exSelectAll").onclick = async () => {
+  exSvcSel.clear();
+  exGroupState = {};
+  exActiveService = null;
+  renderSvcChips();
+  await renderGroups();
   $("exStatusList").querySelectorAll("input").forEach((c) => { c.checked = true; });
   updateExportScopeLine();
 };
@@ -428,16 +524,16 @@ $("exSelectAll").onclick = () => {
 // status at all (see load()'s own comment on this) so it is pulled out and
 // sent as the separate overdue=1 flag instead.
 function exportModalParams() {
-  const svc = $("exSvc").value, cat = $("exType").value, size = $("exSize").value;
   const boxes = [...document.querySelectorAll("#exStatusList input")];
   const checked = boxes.filter((c) => c.checked);
   const params = {};
-  if (svc) params.service = svc;
-  if (cat) params.subcategory = cat;
-  if (size) params.size = size;
-  // every box checked, or none at all, both mean "no status restriction" --
-  // an empty selection has no useful "export nothing" meaning here, so it
-  // falls back to the same "everything" behaviour as ticking every box.
+  if (exSvcSel.size) {
+    const groups = orderedSelectedServices().map((svc) => {
+      const state = exGroupState[svc] || { cat: new Set(), size: new Set() };
+      return { service: svc, subcategory: [...state.cat], size: [...state.size] };
+    });
+    params.groups = JSON.stringify(groups);
+  }
   if (checked.length && checked.length < boxes.length) {
     const codes = new Set();
     let overdue = false;
@@ -451,15 +547,44 @@ function exportModalParams() {
   return params;
 }
 
+// Mirrors api.py's own _capped()/_slug() exactly -- 1-2 picks show their
+// real names, 3+ collapse to a plain count, so the PREVIEW here never lies
+// about what the download will actually be named. Aggregates across every
+// service group for the filename (the QUERY stays correctly per-service
+// via exportModalParams()'s groups above -- this is display-only).
+function _exSlug(s) { return s.replace(/[^A-Za-z0-9]+/g, "-").replace(/(^-|-$)/g, ""); }
+function _exCapped(items, label) {
+  if (!items.length) return null;
+  if (items.length <= 2) return items.map(_exSlug).join("+");
+  return `${items.length}-${label}`;
+}
+
 function updateExportScopeLine() {
-  const bits = [$("exSvc").value || "All services"];
-  if ($("exType").value) bits.push($("exType").value);
-  if ($("exSize").value) bits.push($("exSize").value);
+  const bits = [];
+  if (!exSvcSel.size) {
+    bits.push("All services");
+  } else {
+    orderedSelectedServices().forEach((svc) => {
+      const state = exGroupState[svc] || { cat: new Set(), size: new Set() };
+      let s = svc;
+      if (state.cat.size) s += ` \u2192 ${[...state.cat].join(", ")}`;
+      if (state.size.size) s += ` \u2192 ${[...state.size].join(", ")}`;
+      bits.push(s);
+    });
+  }
   const boxes = [...document.querySelectorAll("#exStatusList input")];
   const checked = boxes.filter((c) => c.checked).length;
   const statusTxt = (checked === 0 || checked === boxes.length)
     ? "Everything" : `${checked} of ${boxes.length} selected`;
-  $("exScopeLine").textContent = bits.join(" \u2192 ") + " \u00b7 " + statusTxt;
+  $("exScopeLine").textContent = bits.join(" | ") + " \u00b7 " + statusTxt;
+
+  const today = new Date().toISOString().slice(0, 10);
+  const allCats = orderedSelectedServices().flatMap((svc) => [...(exGroupState[svc] || { cat: new Set() }).cat]);
+  const allSizes = orderedSelectedServices().flatMap((svc) => [...(exGroupState[svc] || { size: new Set() }).size]);
+  const fnameBits = [_exSlug((META && META.project) || RUN), today];
+  [_exCapped(orderedSelectedServices(), "services"), _exCapped(allCats, "categories"), _exCapped(allSizes, "sizes")]
+    .forEach((c) => { if (c) fnameBits.push(c); });
+  $("exFname").textContent = fnameBits.join("_") + ".xlsx";
 }
 
 $("exGo").onclick = () => {

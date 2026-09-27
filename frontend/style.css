@@ -9,14 +9,19 @@
   --r:10px; --hdr:64px;
 }
 *{box-sizing:border-box}
+html{overflow-x:hidden}
 body{margin:0;background:var(--bg);color:var(--ink);
-  font:14px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  font:14px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  overflow-x:hidden}
 h1,h2{margin:0;font-weight:600}
-main{max-width:1240px;margin:0 auto;padding:0 22px 72px}
+main{max-width:1240px;margin:0 auto;
+  padding:0 max(22px,env(safe-area-inset-right,0px)) 72px max(22px,env(safe-area-inset-left,0px))}
 
 .top{position:sticky;top:0;z-index:30;background:var(--bg);
   border-bottom:1px solid var(--line);display:flex;align-items:center;
-  justify-content:space-between;gap:18px;padding:13px 22px;margin-bottom:22px}
+  justify-content:space-between;gap:18px;
+  padding:calc(13px + env(safe-area-inset-top,0px)) max(22px,env(safe-area-inset-right,0px)) 13px max(22px,env(safe-area-inset-left,0px));
+  margin-bottom:22px}
 .brand{display:flex;align-items:center;gap:11px;min-width:0}
 .mark{width:30px;height:30px;border-radius:7px;background:var(--ink);flex:none;
   overflow:hidden;display:flex;align-items:center;justify-content:center}
@@ -345,6 +350,25 @@ tbody tr:hover{background:#faf9f6}
      changes above 760px. */
   .tablewrap{overflow-x:auto}
   .tablewrap table{min-width:640px}
+  /* th{position:sticky;top:var(--hdr)} assumes .top is exactly --hdr tall --
+     true on desktop, but .top wraps to 2 lines here (flex-wrap above), so
+     the header is now taller than --hdr while the table header still
+     sticks at the OLD, shorter offset -- it ends up overlapping mid-scroll
+     into the data rows below it (reported: column header rendering on top
+     of/between material rows on a phone). Fixed-pixel sticky offsets and a
+     wrapping header are a fragile combination on mobile regardless of the
+     exact number; disabling sticky here (header scrolls away normally,
+     same trade Site Progress's own rail makes below) is the reliable fix
+     rather than chasing an exact new offset that could drift again. */
+  th{position:static}
+  /* Touch targets: 8px/15px padding at 13px font is a real button, but its
+     tapped height lands under 40px -- comfortable for a mouse pointer,
+     tight for a fingertip, especially where several buttons sit close
+     together (.topact already wraps here). ~44px is the standard mobile
+     minimum (Apple HIG/Material both land there); desktop's own .btn rule
+     above is untouched, this only widens the tap area on a touch screen. */
+  .btn{min-height:44px;padding:11px 16px;display:inline-flex;align-items:center;justify-content:center}
+  input[type="checkbox"],input[type="radio"]{width:20px;height:20px}
 }
 @media(max-width:640px){
   .home-head h2{font-size:21px}

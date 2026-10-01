@@ -444,14 +444,7 @@ _SVC_RULES = [
     (re.compile(r"FIRE|FFTG|SPRINKLER|HYDRANT", re.I), "Fire"),
     (re.compile(r"HVAC|CHILLED|DUCT|VENTILAT", re.I), "HVAC"),
     (re.compile(r"PHE|PLUMB|SANITARY|WATER|CPVC|PERT", re.I), "Plumbing"),
-    # ELV checked BEFORE the plain Electrical rule below, and kept as its
-    # own distinct service rather than folded into "Electrical" -- matches
-    # schema.py's SERVICE_RULES (the register-side parser), which already
-    # treats ELV as its own trade, not a sub-component of Electrical. A BOQ
-    # sheet named just "ELV" previously collided with real Electrical items
-    # that happened to share the same item-code numbering once merged.
-    (re.compile(r"\bELV\b|\bBMS\b", re.I), "ELV"),
-    (re.compile(r"ELECTRIC|\bELE\b", re.I), "Electrical"),
+    (re.compile(r"ELECTRIC|\bELE\b|\bELV\b", re.I), "Electrical"),
 ]
 
 

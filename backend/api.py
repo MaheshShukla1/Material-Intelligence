@@ -5,6 +5,7 @@ import re
 import shutil
 import uuid
 import datetime as dt
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -59,7 +60,7 @@ app = FastAPI(title="Material Intelligence")
 # ------------------------------------------------------------------ helpers
 def detect(path):
     try:
-        head = pd.read_excel(path, nrows=1)
+        head = pd.read_excel(path, nrows=1, engine="calamine")
         if {"Material", "Quantity", "Document Date"}.issubset(head.columns):
             return "projectbase"
     except Exception:
@@ -68,7 +69,7 @@ def detect(path):
 
 
 def sheet_plan(path):
-    xl = pd.ExcelFile(path)
+    xl = pd.ExcelFile(path, engine="calamine")
     keep, skipped = {}, []
     for s in xl.sheet_names:
         flat = re.sub(r"[^A-Z]", "", s.upper())
@@ -99,7 +100,7 @@ PPE_FIELDS = {
 def _ppe_sheet_names(path):
     """Names of tabs that are PPE issue logs (skipped by the register parser)."""
     out = []
-    for s in pd.ExcelFile(path).sheet_names:
+    for s in pd.ExcelFile(path, engine="calamine").sheet_names:
         flat = re.sub(r"[^A-Z]", "", s.upper())
         if "PPE" in flat:
             out.append(s)
@@ -136,7 +137,7 @@ def parse_ppe_log(path, max_rows=5000):
 
     records, sheets_used = [], []
     for sheet in names:
-        raw = pd.ExcelFile(path).parse(sheet, header=None)
+        raw = pd.ExcelFile(path, engine="calamine").parse(sheet, header=None)
         if raw.empty:
             continue
         # find header row: the first row (scan up to 15) naming NAME + an item
@@ -264,7 +265,19 @@ def jsonable(df):
     return json.loads(out.replace({np.nan: None}).to_json(orient="records"))
 
 
+@lru_cache(maxsize=128)
 def load_run(run_id):
+    """A run's forecast.parquet/meta.json are written once at upload/sync
+    time and never modified afterward (confirmed -- every later route only
+    reads them), so caching by run_id alone is safe: the same id can never
+    legitimately resolve to different data later. A failed lookup (404)
+    is never cached, since lru_cache only remembers successful returns.
+
+    Test note: this cache persists for the process lifetime, so a test
+    that monkeypatches RUNS and reuses a run_id another test already used
+    (e.g. "run1") can read a stale cached value. Call
+    api.load_run.cache_clear() in such a fixture if that happens -- real
+    runs never collide this way since run_id is already unique per sync."""
     d = RUNS / run_id
     if not d.exists() or not (d / "meta.json").exists():
         raise HTTPException(404, "run not found")

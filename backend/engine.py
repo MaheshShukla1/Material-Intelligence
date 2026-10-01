@@ -93,7 +93,7 @@ def parse_site_register(path, sheet_map=None, skip_sheets=()):
     """
     from . import schema
 
-    xl = pd.ExcelFile(path)
+    xl = pd.ExcelFile(path, engine="calamine")
     names = list(xl.sheet_names) if sheet_map is None else list(sheet_map)
     frames = []
     report = {"sheets": [], "skipped": [], "date_swaps": 0}
@@ -188,7 +188,7 @@ def parse_site_register(path, sheet_map=None, skip_sheets=()):
 # ------------------------------------------------ adapter B: ProjectBase export
 def parse_projectbase_movement(path):
     """Long layout: one row per transaction, negative qty = issue."""
-    df = pd.read_excel(path)
+    df = pd.read_excel(path, engine="calamine")
     need = {"Material", "Unit", "Quantity", "Document Date", "Document Type"}
     if not need.issubset(df.columns):
         raise ValueError(f"missing columns: {need - set(df.columns)}")

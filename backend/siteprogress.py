@@ -650,7 +650,14 @@ def get_state(slug: str):
     struct = _read_json(d / "structure.json", None)
     activities = _read_json(d / "activities.json", {}) or {}
     boqdf = _load_boq(d)
-    services = sorted(boqdf.service.unique().tolist()) if not boqdf.empty else []
+    # Upload/sheet order, not alphabetical -- plain sorted() is case-
+    # sensitive, so an all-caps service like "ELV" sorts before a
+    # Title-case one like "Electrical" in plain ASCII order, landing
+    # it first in the pill row for no reason the engineer would expect.
+    # .unique() already preserves first-seen order on its own, which
+    # naturally matches the order sheets appeared in the uploaded
+    # workbook -- what the engineer actually expects.
+    services = boqdf.service.unique().tolist() if not boqdf.empty else []
     prog = _load_progress(d).df
     summary = progress.project_summary(prog) if len(prog) else {"by_service": {}, "overall": 0, "rooms": 0}
     nrooms = structure.Structure.from_dict(struct).count_rooms() if struct else 0
@@ -726,7 +733,7 @@ def overall(slug: str):
     boqdf = _load_boq(d)
     if boqdf.empty:
         raise HTTPException(404, "no BOQ uploaded yet")
-    services = sorted(boqdf.service.unique().tolist())
+    services = boqdf.service.unique().tolist()   # upload order, see /{slug} above
     per, all_pcts = {}, []
     tot = {"done": 0.0, "planned": 0.0, "remaining": 0.0, "waste": 0.0, "saved": 0.0, "full": 0.0}
     m = _load_mapping(d)
@@ -1066,7 +1073,7 @@ async def init_from_tracker(slug: str, file: UploadFile = File(...),
     prog.to_parquet(d / "progress.parquet")
     return {"slug": _slugify(slug), "floors": len(s.containers("floor")),
             "rooms": s.count_rooms(),
-            "services": sorted(acts.keys()),
+            "services": list(acts.keys()),   # upload order, see /{slug} above
             "activities": {k: len(v) for k, v in acts.items()},
             "progress_rows": int(len(prog))}
 
@@ -1554,7 +1561,7 @@ def export_dpr(slug: str, start: str, end: str = None, service: str = None,
     leaf_label = _leaf_label(d)
 
     boqdf = _load_boq(d)
-    all_services = sorted(boqdf.service.unique().tolist()) if not boqdf.empty else []
+    all_services = boqdf.service.unique().tolist() if not boqdf.empty else []   # upload order, see /{slug} above
     services = [service] if service else all_services
     if service and service not in all_services:
         raise HTTPException(400, f"unknown service: {service}")

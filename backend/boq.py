@@ -444,7 +444,14 @@ _SVC_RULES = [
     (re.compile(r"FIRE|FFTG|SPRINKLER|HYDRANT", re.I), "Fire"),
     (re.compile(r"HVAC|CHILLED|DUCT|VENTILAT", re.I), "HVAC"),
     (re.compile(r"PHE|PLUMB|SANITARY|WATER|CPVC|PERT", re.I), "Plumbing"),
-    (re.compile(r"ELECTRIC|\bELE\b|\bELV\b", re.I), "Electrical"),
+    # ELV checked BEFORE the plain Electrical rule below, and kept as its
+    # own distinct service rather than folded into "Electrical" -- matches
+    # schema.py's SERVICE_RULES (the register-side parser), which already
+    # treats ELV as its own trade, not a sub-component of Electrical. A BOQ
+    # sheet named just "ELV" previously collided with real Electrical items
+    # that happened to share the same item-code numbering once merged.
+    (re.compile(r"\bELV\b|\bBMS\b", re.I), "ELV"),
+    (re.compile(r"ELECTRIC|\bELE\b", re.I), "Electrical"),
 ]
 
 
@@ -484,7 +491,7 @@ def parse_workbook(path):
     per-room/total call, and silently inheriting the ProjectBase sibling's
     convention would be exactly the kind of guess this app never makes.
     """
-    xl = pd.ExcelFile(path)
+    xl = pd.ExcelFile(path, engine="calamine")
     by_service, skipped = {}, []          # service -> [parse_sheet result, ...]
     for s in xl.sheet_names:
         if _SKIP.search(s):

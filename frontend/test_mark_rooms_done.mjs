@@ -100,7 +100,8 @@ async function main() {
   const markBtn = d.querySelector("#sp-mark-done");
   ok(!!markBtn, "'Mark ticked as done' button rendered");
   const saveBtn = d.querySelector("#sp-modal-save");
-  ok(!!saveBtn && saveBtn.textContent === "Save rooms", "the original Save rooms button is untouched, still present");
+  // hotel/hospital/other projects: the dialog says "areas" (a leaf can be a banquet hall, lobby, corridor...), mall says "zones"
+  ok(!!saveBtn && saveBtn.textContent === "Save areas", "the original Save button is untouched, still present (worded \"areas\" for a non-mall project)");
 
   // -------------------------------------------------- ticking + marking done
   const boxes = [...modalEl.querySelectorAll("input[data-room]")];

@@ -5,7 +5,7 @@
 // the dialog's one quantity box edits the PLAN, not the done qty.
 // Rules pinned here:
 //   * a room planned at >1 unit gets a number box (value = what is recorded,
-//     "/ 9 Nos" beside it); tick = the full plan; typing a number = partial
+//     "of 9 Nos" beside it); tick = the full plan; typing a number = partial
 //     AND ticks the row;
 //   * "Mark ticked as done" posts the typed quantity to /progress/rooms --
 //     but only when a ticked row is genuinely partial; plain full ticks keep
@@ -51,7 +51,7 @@ const PLANS = {
   [NOPLAN]: { unit: "Nos", rooms: { [Z4]: { planned: null, frac: 0 }, [Z5]: { planned: null, frac: 0 } } },
 };
 
-async function boot({ planFails = false, plans = PLANS, groupRooms = [Z5] } = {}) {
+async function boot({ planFails = false, plans = PLANS, groupRooms = [Z5], structure = STRUCTURE } = {}) {
   const html = `<!doctype html><html><body>
     <header class="top"><div class="brand"><p id="ctx"></p></div><div class="topact"></div></header><main></main></body></html>`;
   const dom = new JSDOM(html, { url: "https://example.test/", runScripts: "dangerously", pretendToBeVisual: true });
@@ -63,7 +63,7 @@ async function boot({ planFails = false, plans = PLANS, groupRooms = [Z5] } = {}
     if (opts && opts.method === "POST") posts.push({ url: u, body: JSON.parse(opts.body) });
     else gets.push(u);
     if (u === "/api/projects") body = [{ slug: "thoth-mall", project: "Thoth Mall", runs: 1, latest_run: "r1" }];
-    else if (u === "/api/siteprogress/thoth-mall") body = { structure: STRUCTURE, has_boq: true, services: ["HVAC"] };
+    else if (u === "/api/siteprogress/thoth-mall") body = { structure, has_boq: true, services: ["HVAC"] };
     else if (u.startsWith("/api/siteprogress/thoth-mall/item-room-plan")) {
       if (planFails) { status = 500; body = { detail: "boom" }; }
       else body = plans[new URL(u, "https://x.test").searchParams.get("item_code")] || { rooms: {} };
@@ -99,7 +99,7 @@ async function main() {
   let b5 = box(m, Z5);
   ok(!!b5, "Zone 5 (plan 9 Nos) gets a quantity box");
   ok(b5 && b5.value === "0", `box starts at what is recorded (0), got ${b5 && b5.value}`);
-  ok(m.querySelector(".sp-roomqty .u").textContent.replace(/\s+/g, " ").trim() === "/ 9 Nos", `shows the plan beside the box, got "${m.querySelector(".sp-roomqty .u").textContent}"`);
+  ok(m.querySelector(".sp-roomqty .u").textContent.replace(/\s+/g, " ").trim() === "of 9 Nos", `shows the plan beside the box, got "${m.querySelector(".sp-roomqty .u").textContent}"`);
   ok(!!m.querySelector("#sp-qty-hint") && /PLAN/.test(m.querySelector("#sp-qty-hint").textContent), "the top Quantity box is labelled as the PLAN box (the 9->5 trap)");
   ok(tick(m, Z5).checked === false, "nothing is ticked by default (unchanged rule)");
 
@@ -202,6 +202,55 @@ async function main() {
   click(ctx.w, ctx.d.querySelector("#sp-modal-x"));        // closed immediately
   await sleep(40);
   ok(!ctx.d.querySelector("#sp-modal"), "closed dialog stays closed (late plan is ignored)");
+
+  // ================= 9. dialog design: short help, plan box tucked away, state styling
+  ctx = await boot(); m = await openZones(ctx, FAN);
+  ok(m.classList.contains("sp-zones"), "Zones dialog is scoped with .sp-zones (styling never leaks to other dialogs)");
+  ok(m.querySelector(".sheethd p").textContent.trim().length < 160, "header is one short instruction, no wall of text");
+  const planInp = m.querySelector("#sp-roomqty");
+  ok(!!planInp && !!planInp.closest(".sp-planbox") && !m.querySelector("details"), "planned-quantity box is always visible (not tucked into a collapsed section)");
+  ok(/planned quantity/i.test(m.querySelector(".sp-planbox label").textContent), "its label says it is the PLANNED quantity");
+  ok(/PLAN/.test(m.querySelector("#sp-qty-hint").textContent) && /next to each name/.test(m.querySelector("#sp-qty-hint").textContent) && !/zone|room/i.test(m.querySelector("#sp-qty-hint").textContent), "hint right under it says: this is the plan; what is fitted goes in the box next to each name (no zone/room noun)");
+  ok(/part of it|partial/i.test(m.querySelector("#sp-zhelp").textContent) && !/zone|room/i.test(m.querySelector("#sp-zhelp").textContent), "one short noun-free help line explains typing a number for a partial quantity");
+  let cell5 = box(m, Z5).closest(".sp-roomcell");
+  ok(!cell5.classList.contains("is-on"), "untouched zone is not highlighted");
+  type(ctx.w, box(m, Z5), 5);
+  ok(cell5.classList.contains("is-on") && cell5.classList.contains("is-partial") && !cell5.classList.contains("is-full"), "typing 5 of 9: ticked + partial");
+  toggle(ctx.w, tick(m, Z5), false);
+  ok(!cell5.classList.contains("is-on"), "unticking clears the highlight");
+  toggle(ctx.w, tick(m, Z5), true);
+  ok(cell5.classList.contains("is-on") && cell5.classList.contains("is-full"), "ticking = full plan: ticked + full");
+  click(ctx.w, ctx.d.querySelector("#sp-rooms-none"));
+  ok(!cell5.classList.contains("is-on"), "Clear all clears the highlight");
+  // the plan box still saves the PLAN exactly as before
+  ctx.posts.length = 0;
+  m.querySelector("#sp-roomqty").value = "9";
+  toggle(ctx.w, tick(m, Z5), true);
+  click(ctx.w, ctx.d.querySelector("#sp-modal-save")); await sleep(40);
+  ok(ctx.posts.length === 1 && ctx.posts[0].url.includes("/item-room-qty") && ctx.posts[0].body.qty === 9, `Save zones with the plan box still posts /item-room-qty, got ${JSON.stringify(ctx.posts.map((p) => p.url))}`);
+
+  // ================= 10. wording follows the project type (mall = zones; hotel/hospital/other = areas)
+  // and the new text never names the wrong thing, whatever the area is called
+  // (Banquet Hall, Lobby, Zone 5, Room 101 ...).
+  const HOTEL = { kind: "hotel", id: "p0", type: "project", name: "Hyatt",
+    children: [{ id: "fl1", type: "floor", name: "Ground", children: [
+      { id: Z4, type: "room", name: "Banquet Hall", children: [] }, { id: Z5, type: "room", name: "Room 101", children: [] }, { id: Z6, type: "room", name: "Lobby", children: [] }] }] };
+  const words = (mm) => ({
+    title: mm.querySelector("h2").textContent,
+    instr: mm.querySelector(".sheethd p").textContent.split(" — ").slice(1).join(" — "),
+    label: mm.querySelector('label[for="sp-roomqty"]').textContent,
+    hint: mm.querySelector("#sp-qty-hint").textContent, help: mm.querySelector("#sp-zhelp").textContent,
+    save: mm.querySelector("#sp-modal-save").textContent });
+  ctx = await boot({ structure: HOTEL, groupRooms: [Z4, Z5, Z6], plans: { [FAN]: { unit: "Nos", rooms: { [Z4]: { planned: 9, frac: 0 }, [Z5]: { planned: 9, frac: 0 }, [Z6]: { planned: 9, frac: 0 } } } } });
+  m = await openZones(ctx, FAN);
+  let wd = words(m), all = Object.values(wd).join(" | ");
+  ok(/areas/i.test(wd.label) && /Areas/.test(wd.title) && wd.save === "Save areas", `hotel: label/title/save say areas (a leaf can be a banquet hall, lobby, room...), got ${JSON.stringify(wd)}`);
+  ok(!/zone|room/i.test(all), `hotel: neither "zone" nor "room" anywhere in the dialog wording, got ${all}`);
+  ok(m.querySelectorAll("input[data-roomqty]").length === 3 && /Banquet Hall/.test(m.textContent), "hotel: a Banquet Hall / Lobby row gets the same number box as any room");
+  ctx = await boot(); m = await openZones(ctx, FAN);
+  wd = words(m); all = Object.values(wd).join(" | ");
+  ok(/zones/i.test(wd.label) && /Zones/.test(wd.title) && wd.save === "Save zones", `mall: label/title/save say zones, got ${JSON.stringify(wd)}`);
+  ok(!/room|area/i.test(all), `mall: no stray "room"/"area" anywhere in the dialog text, got ${all}`);
 
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);

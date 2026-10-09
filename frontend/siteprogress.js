@@ -608,6 +608,14 @@
   function curLeafLower() { return curLeaf().toLowerCase(); }
   function curLeafPlural(n) { return curLeaf() + (n === 1 ? "" : "s"); }
   function curLeafPluralLower(n) { return curLeafLower() + (n === 1 ? "" : "s"); }
+  // Wording for the Zones/Rooms dialog and its entry chip. A mall's leaves are
+  // zones. In a hotel / hospital / other project a leaf can be a guest room, a
+  // banquet hall, a lobby, a corridor... so calling every one of them a "room"
+  // reads wrong -- the dialog says "area" there. (The rest of the app keeps
+  // curLeaf*, unchanged.)
+  function dlgLeafLower() { return curLeaf() === "Zone" ? "zone" : "area"; }
+  function dlgLeafPlural(n) { const w = dlgLeafLower(); return w.charAt(0).toUpperCase() + w.slice(1) + (n === 1 ? "" : "s"); }
+  function dlgLeafPluralLower(n) { return dlgLeafLower() + (n === 1 ? "" : "s"); }
   function renderTree() {
     const host = $("sp-tree"); host.innerHTML = nodeHTML(S.state.structure, 0);
     host.querySelectorAll("[data-toggle]").forEach((el) => el.addEventListener("click", (e) => {
@@ -1065,7 +1073,7 @@
     const out = [];
     (function walk(node, path) {
       if (!node) return;
-      if (node.type === "room") { out.push({ id: node.id, name: node.name, path: path.join(" › ") || curLeafPlural(2) }); return; }
+      if (node.type === "room") { out.push({ id: node.id, name: node.name, path: path.join(" › ") || dlgLeafPlural(2) }); return; }
       (node.children || []).forEach((c) => walk(c, node.type === "project" ? path : path.concat(node.name)));
     })(S.state.structure, []);
     return out;
@@ -1077,11 +1085,11 @@
     if (groups && groups.length) {
       const covered = groups.reduce((s, g) => s + g.rooms.length, 0);
       return groups.length === 1
-        ? `${covered} ${curLeafPluralLower(covered)} @ ${qf(groups[0].qty, S._byCode[code] ? S._byCode[code].unit : "")} ${esc(S._byCode[code] ? S._byCode[code].unit : "")}`.trim()
-        : `${covered} of ${total} ${curLeafPluralLower(total)} · ${groups.length} qty groups`;
+        ? `${covered} ${dlgLeafPluralLower(covered)} @ ${qf(groups[0].qty, S._byCode[code] ? S._byCode[code].unit : "")} ${esc(S._byCode[code] ? S._byCode[code].unit : "")}`.trim()
+        : `${covered} of ${total} ${dlgLeafPluralLower(total)} · ${groups.length} qty groups`;
     }
-    if (!ids || !ids.length) return `all ${total} ${curLeafPluralLower(total)}`;
-    return `${ids.length} of ${total} ${curLeafPluralLower(total)}`;
+    if (!ids || !ids.length) return `all ${total} ${dlgLeafPluralLower(total)}`;
+    return `${ids.length} of ${total} ${dlgLeafPluralLower(total)}`;
   }
   // "Mark ticked as done" / its undo -- same tick-list either way, a
   // separate action from Save so it never depends on (or clobbers)
@@ -1094,7 +1102,7 @@
   // dead end.
   async function markRoomsDone(code, done, getPlan) {
     const ids = [...document.querySelectorAll("#sp-modal input[data-room]")].filter((c) => c.checked).map((c) => c.dataset.room);
-    if (!ids.length) return toast(`Tick at least one ${curLeafLower()} to ${done ? "mark done" : "undo"}.`);
+    if (!ids.length) return toast(`Tick at least one ${dlgLeafLower()} to ${done ? "mark done" : "undo"}.`);
     // Rows with a quantity box (a zone planned at more than one unit) carry a
     // REAL installed quantity -- tick = the full plan, or whatever was typed.
     // Only when at least one ticked row is genuinely partial does the
@@ -1126,7 +1134,7 @@
         const one = boxed.length === 1 && !rest.length ? boxed[0] : null;
         const unit = (S._byCode[code] || {}).unit || "";
         return toast(one ? `Saved ${one.qty} of ${one.planned} ${unit} for ${code}.`
-                         : `Saved quantities for ${ids.length} ${curLeafPluralLower(ids.length)} on ${code}.`);
+                         : `Saved quantities for ${ids.length} ${dlgLeafPluralLower(ids.length)} on ${code}.`);
       }
       S.svc = await jpost(api("/" + S.slug + "/mark-rooms-done" + roomQ()), { service: S.service, item_code: code, rooms: ids, done });
       closeModal();
@@ -1139,14 +1147,14 @@
       // load, silently disagreeing with the "Remaining work" line right
       // above it in the same drawer -- an actual reported case of this.
       await afterSvc();
-      toast(done ? `Marked ${ids.length} ${curLeafPluralLower(ids.length)} done for ${code}.`
-                 : `Undid done for ${ids.length} ${curLeafPluralLower(ids.length)} on ${code}.`);
+      toast(done ? `Marked ${ids.length} ${dlgLeafPluralLower(ids.length)} done for ${code}.`
+                 : `Undid done for ${ids.length} ${dlgLeafPluralLower(ids.length)} on ${code}.`);
     } catch (e) { toast("Failed: " + briefErr(e)); }
   }
   function openRoomsModal(code, expandToEverything) {
     const it = S._byCode[code];
     const allRooms = allRoomsList();
-    if (!allRooms.length) return toast(`No ${curLeafPluralLower(2)} in the structure yet.`);
+    if (!allRooms.length) return toast(`No ${dlgLeafPluralLower(2)} in the structure yet.`);
     const existingGroups = (S.svc.item_room_qty || {})[code] || [];
     const explicitIds = (S.svc.item_rooms || {})[code] || [];
     const byId = {};
@@ -1204,22 +1212,27 @@
             const doneN = g.rooms.filter(isDone).length;
             return `<div class="row"><span>${esc(namesFor(g.rooms))}</span><b>${qf(g.qty, it.unit)} ${esc(it.unit)}</b>${doneN ? `<span class="sp-donebadge">${doneN} done</span>` : ""}<button type="button" class="sp-qtygroup-rm" data-rmgroup="${gi}" title="Remove this group">Remove</button></div>`;
           }).join("")}
-          <p class="hint">Ticking ${curLeafPluralLower(2)} below and saving with a quantity moves them into a new group (out of whichever group they're currently in).</p>
+          <p class="hint">Ticking ${dlgLeafPluralLower(2)} below and saving with a quantity moves them into a new group (out of whichever group they're currently in).</p>
         </div>`
       : "";
 
     const expandLink = (!showEverything)
-      ? `<p style="margin:8px 0 0"><button type="button" class="linkbtn" id="sp-rooms-expand" style="font-size:12.5px">+ Add other ${curLeafPluralLower(2)} (not currently set for this item)</button></p>`
+      ? `<p style="margin:8px 0 0"><button type="button" class="linkbtn" id="sp-rooms-expand" style="font-size:12.5px">+ Add other ${dlgLeafPluralLower(2)} (not currently set for this item)</button></p>`
       : (configuredIds !== null
-        ? `<p style="margin:8px 0 0;font-size:12px;color:var(--ink3)">Showing every ${curLeafLower()} in the building -- ${curLeafPluralLower(2)} already set for this item are marked below.</p>`
+        ? `<p style="margin:8px 0 0;font-size:12px;color:var(--ink3)">Showing every ${dlgLeafLower()} in the building -- ${dlgLeafPluralLower(2)} already set for this item are marked below.</p>`
         : "");
 
+    // The plan box sets the PLANNED quantity for the ticked areas. It stays
+    // visible (an engineer who cannot see it cannot find it), clearly labelled
+    // as the plan, with the hint below telling them where "how many are
+    // actually fitted" goes (the number box on each area).
     const body = `${groupsSummary}
+      <div class="sp-planbox">
       <div class="sp-qtyrow">
-        <label for="sp-roomqty">Quantity for the ${curLeafPluralLower(2)} ticked below</label>
-        <input class="ctl" id="sp-roomqty" type="number" min="0" step="any" placeholder="optional — leave blank for plain applicability">
+        <label for="sp-roomqty">Planned quantity for the ticked ${dlgLeafPluralLower(2)}</label>
+        <input class="ctl" id="sp-roomqty" type="number" min="0" step="any" placeholder="optional">
         <span class="u">${esc(it.unit)}</span>
-      </div>
+      </div></div>
       <div style="margin:12px 0"><button class="btn" id="sp-rooms-all">Select all (typical)</button>
       <button class="btn" id="sp-rooms-none" style="margin-left:8px">Clear all</button></div>
       ${groupEntries.map(([path, rs], gi) => `
@@ -1243,8 +1256,8 @@
       <button type="button" class="btn" id="sp-mark-done" style="border-color:var(--green);color:var(--green)">Mark ticked as done</button>
       <button type="button" class="btn" id="sp-unmark-done">Undo done</button>`;
 
-    modal(`${curLeafPlural(2)} → ${esc(code)}`,
-      `${esc(short(it.desc, 70))} — pick which ${curLeafPluralLower(2)} this item applies to. Nothing is ticked by default; tick exactly the ${curLeafPluralLower(2)} you're updating right now (✓ marks ones already done, for reference). To record a REAL quantity for a set of ${curLeafPluralLower(2)}, tick just those ${curLeafPluralLower(2)} and enter their quantity above instead. Tick the ${curLeafPluralLower(2)} that are actually finished, then hit "Mark ticked as done" in the footer below.`,
+    modal(`${dlgLeafPlural(2)} → ${esc(code)}`,
+      `${esc(short(it.desc, 70))} — tick the ${dlgLeafPluralLower(2)} you're updating, then "Mark ticked as done". ✓ = already done.`,
       body, async () => {
         const boxes = [...document.querySelectorAll("#sp-modal input[data-room]")];
         const ids = boxes.filter((c) => c.checked).map((c) => c.dataset.room);
@@ -1252,7 +1265,7 @@
         if (qtyVal !== "") {
           const qty = Number(qtyVal);
           if (isNaN(qty)) return toast("Enter a number for quantity, or leave it blank.");
-          if (!ids.length) return toast(`Tick at least one ${curLeafLower()} to assign this quantity to.`);
+          if (!ids.length) return toast(`Tick at least one ${dlgLeafLower()} to assign this quantity to.`);
           S.svc = await jpost(api("/" + S.slug + "/item-room-qty" + roomQ()), { service: S.service, item_code: code, rooms: ids, qty });
         } else {
           // every room checked = typical -> send [] so it keeps auto-covering
@@ -1266,7 +1279,8 @@
         // planned/used/remaining, which the drawer's stock-forecast message
         // is directly built from.
         await afterSvc();
-      }, `Save ${curLeafPluralLower(2)}`, "min(600px,94vw)", footerButtons);
+      }, `Save ${dlgLeafPluralLower(2)}`, "min(600px,94vw)", footerButtons);
+    $("sp-modal").classList.add("sp-zones");
 
     if ($("sp-rooms-expand")) $("sp-rooms-expand").onclick = () => { closeModal(); openRoomsModal(code, true); };
     $("sp-rooms-all").onclick = () => document.querySelectorAll("#sp-modal input[data-room]").forEach((c) => { c.checked = true; });
@@ -1294,6 +1308,7 @@
     const fmtQ = (v) => (isCountItem ? Math.round(v) : Math.round(v * 100) / 100);
     const cells = [];   // {cb, inp, cell, planned, done0}
     const paintCell = (c, v) => {
+      c.cell.classList.toggle("is-on", !!c.cb.checked);
       c.cell.classList.toggle("is-partial", v > 0 && v < c.planned);
       c.cell.classList.toggle("is-full", v >= c.planned);
     };
@@ -1324,7 +1339,7 @@
         cell.appendChild(label);
         const box = document.createElement("span");
         box.className = "sp-roomqty";
-        box.innerHTML = `<input class="ctl" type="number" min="0" max="${esc(String(info.planned))}" step="${isCountItem ? "1" : "any"}" inputmode="${isCountItem ? "numeric" : "decimal"}" data-roomqty="${esc(cb.dataset.room)}" value="${done0}" aria-label="Quantity done"><span class="u">/ ${fmtQ(info.planned)} ${esc(it.unit)}</span>`;
+        box.innerHTML = `<input class="ctl" type="number" min="0" max="${esc(String(info.planned))}" step="${isCountItem ? "1" : "any"}" inputmode="${isCountItem ? "numeric" : "decimal"}" data-roomqty="${esc(cb.dataset.room)}" value="${done0}" aria-label="Quantity done"><span class="u">of ${fmtQ(info.planned)} ${esc(it.unit)}</span>`;
         cell.appendChild(box);
         const inp = box.querySelector("input");
         const c = { cb, inp, cell, planned: info.planned, done0 };
@@ -1361,11 +1376,18 @@
           syncCells();
         }
       });
+      const pb = modalEl.querySelector(".sp-planbox");
+      if (pb && !$("sp-zhelp")) {
+        const zh = document.createElement("p");
+        zh.id = "sp-zhelp"; zh.className = "sp-zhelp";
+        zh.textContent = "Tick = the full planned quantity is done. To record only part of it, type the number next to the name.";
+        pb.insertAdjacentElement("beforebegin", zh);
+      }
       const q = modalEl.querySelector(".sp-qtyrow");
       if (q && !$("sp-qty-hint")) {
         const h = document.createElement("p");
         h.id = "sp-qty-hint"; h.className = "sp-qtyhint";
-        h.textContent = `That box sets the PLAN for the ticked ${curLeafPluralLower(2)}. To record how many are actually fitted, use the number next to each ${curLeafLower()} below, then "Mark ticked as done".`;
+        h.textContent = `Sets the PLAN. What's actually fitted goes in the box next to each name below.`;
         q.insertAdjacentElement("afterend", h);
       }
     }

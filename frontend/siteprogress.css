@@ -446,22 +446,41 @@ body[data-view="inventory"] #leadwrap{display:none !important}
 }
 
 /* ---------------------------------------------------------------- per-room done quantity
-   Rooms/Zones dialog: a number box next to a room's tick, shown when the room
-   is planned at more than one unit (see openRoomsModal). Tick = full plan;
-   a typed number = what is really fitted. Amber = partial, green = full. */
-.sp-roomcell{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-height:40px;
-  padding:4px 8px;border:1px solid var(--line);border-radius:10px;background:var(--panel)}
-.sp-roomcell>label{flex:1 1 110px;min-width:0}
-.sp-roomcell.is-partial{border-color:#e4cc94;background:#fffaf0}
-.sp-roomcell.is-full{border-color:#c4dcb2;background:#f6fbf1}
-.sp-roomqty{display:inline-flex;align-items:center;gap:6px;flex:none}
-.sp-roomqty input{width:78px;text-align:center;font-weight:600;font-size:15px;padding:7px 6px}
-.sp-roomqty .u{font-size:12px;color:var(--ink3);white-space:nowrap}
-.sp-roomcell.is-partial .sp-roomqty input{border-color:#c98a1b}
-.sp-roomcell.is-full .sp-roomqty input{border-color:var(--green)}
+   Rooms/Zones dialog (#sp-modal.sp-zones). A zone planned at more than one unit
+   gets a number box next to its tick (see openRoomsModal). Tick = full plan;
+   a typed number = what is really fitted. Layout per zone:
+       [x] Zone 1                [ 95.8 ]
+           of 357.14 Rmt
+   Neutral until the zone is ticked; then amber = partial, green = full. A zone
+   that is not ticked just shows what is already recorded, in muted ink. */
+.sp-zones .sheethd{align-items:flex-start;margin-bottom:10px}
+.sp-zones .sheethd .btn{flex:none;align-self:flex-start}
+.sp-zones .sheethd p{margin-top:2px}
+.sp-zones .sp-maplist{overflow-x:hidden}
+.sp-zhelp{font-size:12.5px;color:var(--ink3);margin:0 0 12px}
+.sp-planbox{margin:0 0 10px;padding:8px 12px;background:#f6f4f0;border-radius:10px}
+.sp-planbox .sp-qtyrow{flex-wrap:wrap;row-gap:6px;margin-bottom:0}
+.sp-planbox .sp-qtyrow label{flex:1 0 100%;font-size:12.5px;font-weight:600;color:var(--ink2)}
+.sp-planbox .sp-qtyrow input{flex:0 1 150px;width:auto;min-width:0;max-width:150px;background:var(--panel)}
+.sp-planbox .sp-qtyhint{margin:6px 0 0}
+.sp-roomcell{display:grid;grid-template-columns:minmax(0,1fr) 96px;
+  grid-template-areas:"name inp" "plan inp";align-items:center;column-gap:10px;row-gap:0;
+  min-height:56px;padding:6px 10px;border:1px solid var(--line);border-radius:10px;background:var(--panel)}
+.sp-roomcell>label{grid-area:name;min-width:0}
+.sp-roomqty{display:contents}
+.sp-roomqty .u{grid-area:plan;font-size:11.5px;color:var(--ink3);white-space:nowrap;padding-left:23px}
+.sp-roomcell .sp-roomqty input{grid-area:inp;width:100%;min-width:0;box-sizing:border-box;
+  text-align:right;font-weight:600;font-size:15px;padding:8px 10px;color:var(--ink3)}
+.sp-roomcell.is-on{border-color:var(--ink3);background:#fafaf8}
+.sp-roomcell.is-on .sp-roomqty input{color:var(--ink)}
+.sp-roomcell.is-on.is-partial{border-color:#e4cc94;background:#fffaf0}
+.sp-roomcell.is-on.is-partial .sp-roomqty input{border-color:#c98a1b}
+.sp-roomcell.is-on.is-full{border-color:#c4dcb2;background:#f6fbf1}
+.sp-roomcell.is-on.is-full .sp-roomqty input{border-color:var(--green)}
 .sp-qtyhint{font-size:11.5px;color:var(--ink3);margin:2px 0 0}
 @media (hover:none),(pointer:coarse){
-  .sp-roomcell{min-height:52px}
+  .sp-roomcell{min-height:60px}
   .sp-roomcell>label{min-height:44px}
-  .sp-roomqty input{min-height:44px;width:84px;font-size:16px}
+  .sp-roomcell .sp-roomqty input{min-height:44px;font-size:16px}
+  .sp-zones .sheethd .btn{min-height:44px}
 }

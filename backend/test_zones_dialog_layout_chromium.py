@@ -38,7 +38,8 @@ GEOM = """() => {
 
 with sync_playwright() as p:
     b = p.chromium.launch()
-    for name, vp, mob in (("desktop 1440", {"width": 1440, "height": 889}, False), ("phone 412", {"width": 412, "height": 915}, True), ("phone 360", {"width": 360, "height": 740}, True)):
+    for name, vp, mob in (("desktop 1440", {"width": 1440, "height": 889}, False), ("phone 412", {"width": 412, "height": 915}, True), ("phone 360", {"width": 360, "height": 740}, True),
+                          ("small phone 320x568", {"width": 320, "height": 568}, True), ("landscape 844x390", {"width": 844, "height": 390}, True), ("landscape 667x375", {"width": 667, "height": 375}, True)):
         ctx = b.new_context(viewport=vp, is_mobile=mob, has_touch=mob)
         pg = ctx.new_page(); open_dialog(pg)
         check(pg.query_selector("#sp-modal.sp-zones") is not None, f"[{name}] dialog open")
@@ -65,10 +66,10 @@ with sync_playwright() as p:
         pb = pg.eval_on_selector(".sp-planbox", "e=>{const r=e.getBoundingClientRect(),c=document.querySelector('#sp-modal .card').getBoundingClientRect(),i=document.querySelector('#sp-roomqty').getBoundingClientRect();return [r.left,r.right,c.left,c.right,i.width,i.height]}")
         check(pb[0] >= pb[2] and pb[1] <= pb[3] and pb[4] >= 80, f"[{name}] plan box fits the dialog and the input is usable ({round(pb[4])}px wide)")
         check("PLAN" in pg.inner_text("#sp-qty-hint"), f"[{name}] hint explains it sets the PLAN")
-        # footer buttons stay reachable
-        for sel in ("#sp-mark-done", "#sp-modal-save"):
+        # header + footer stay on screen without scrolling; only the zone list scrolls
+        for sel in ("#sp-mark-done", "#sp-modal-save", "#sp-modal-x"):
             bx = pg.eval_on_selector(sel, "e=>{const r=e.getBoundingClientRect();return [r.left,r.right,r.top,r.bottom,innerWidth,innerHeight]}")
-            check(bx[0] >= 0 and bx[1] <= bx[4] + 1 and bx[3] <= bx[5] + 1, f"[{name}] {sel} visible on screen")
+            check(bx[0] >= 0 and bx[1] <= bx[4] + 1 and bx[2] >= 0 and bx[3] <= bx[5] + 1, f"[{name}] {sel} on screen without scrolling")
         ctx.close()
     b.close()
 print("FAILS:", len(fails)); sys.exit(1 if fails else 0)

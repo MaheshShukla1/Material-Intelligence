@@ -57,16 +57,18 @@ GEOM = """() => { const r = e => e.getBoundingClientRect(), q = s => document.qu
 
 with sync_playwright() as p:
     b = p.chromium.launch()
-    for W in (360, 412, 640):
+    # portrait phones, then landscape phone / tablets / small window, where the Structure
+    # rail beside the list leaves it ~550-750px wide although the screen is wider than 720px
+    for (W, H) in ((360, 740), (412, 915), (640, 960), (768, 1024), (915, 412), (1024, 768), (1100, 800)):
         for view in ("service", "overall"):
-            ctx = b.new_context(viewport={"width": W, "height": 915}, is_mobile=True, has_touch=True)
-            pg = ctx.new_page(); go(pg, view); g = pg.evaluate(GEOM); tag = f"[{view} {W}px]"
+            ctx = b.new_context(viewport={"width": W, "height": H}, is_mobile=True, has_touch=True)
+            pg = ctx.new_page(); go(pg, view); g = pg.evaluate(GEOM); tag = f"[{view} {W}x{H}]"
             check(g["docW"] <= g["vw"], f"{tag} page does not scroll sideways")
             if view == "service":
                 check(g["cname"] >= 140, f"{tag} activity name has room ({round(g['cname'])}px, was 3px)")
                 check(g["barTop"] >= g["cnameBottom"] - 1, f"{tag} progress bar sits below the title, not on it")
                 check(g["cmoneyR"] <= g["cardR"] and g["cname"] > 0, f"{tag} header money inside the card")
-                check(g["bname"] >= 0.8 * (g["cardR"] - g["cardL"]) - 40, f"{tag} item name uses the full row width ({round(g['bname'])}px)")
+                check(g["bname"] >= 0.8 * (g["cardR"] - g["cardL"]) - 40, f"{tag} item name uses the full row width ({round(g['bname'])}px; was 53-190px beside the rail)")
                 check(not g["qtyClip"], f"{tag} installed-quantity box shows its whole number")
                 check(g["qtyTop"] >= g["bnameBottom"] - 1, f"{tag} quantity row starts below the name/chips block")
                 check(abs(g["qtyTop"] - g["mnTop"]) < 24, f"{tag} quantity, % and rupees sit on one line")
@@ -75,11 +77,14 @@ with sync_playwright() as p:
             else:
                 check(g["ovAct"] >= 150, f"{tag} Overall activity name has room ({round(g['ovAct'])}px, was 43px)")
                 check(g["ovItem"] >= 200 and g["ovItemLines"] <= 2, f"{tag} Overall item name is {round(g['ovItem'])}px wide, {g['ovItemLines']} line(s)")
-                check(g["ovActMoneyTop"] >= g["ovActNameBottom"] - 1, f"{tag} done/remaining sit under the name")
-                check(g["ovSvcDone"] >= 80, f"{tag} service 'done' figure is not crushed into the chevron column ({round(g['ovSvcDone'])}px)")
+                if W <= 640:   # stacked layout is the <=640px design; wider screens keep name and money on one row
+                    check(g["ovActMoneyTop"] >= g["ovActNameBottom"] - 1, f"{tag} done/remaining sit under the name")
+                    check(g["ovSvcDone"] >= 80, f"{tag} service 'done' figure is not crushed into the chevron column ({round(g['ovSvcDone'])}px)")
             ctx.close()
-    # desktop must stay exactly the desktop layout (header is one flex row, bar 130px)
-    ctx = b.new_context(viewport={"width": 1280, "height": 900}); pg = ctx.new_page(); go(pg, "service"); g = pg.evaluate(GEOM)
-    check(g["hdD"] == "flex" and round(g["barW"]) == 130, f"[desktop 1280] activity header unchanged (flex row, bar {round(g['barW'])}px)")
-    ctx.close(); b.close()
+    # wide desktop must stay exactly the desktop layout (header is one flex row, bar 130px)
+    for (W, H) in ((1280, 800), (1440, 900)):
+        ctx = b.new_context(viewport={"width": W, "height": H}); pg = ctx.new_page(); go(pg, "service"); g = pg.evaluate(GEOM)
+        check(g["hdD"] == "flex" and round(g["barW"]) == 130, f"[desktop {W}] activity header unchanged (flex row, bar {round(g['barW'])}px)")
+        ctx.close()
+    b.close()
 print("FAILS:", len(fails)); sys.exit(1 if fails else 0)

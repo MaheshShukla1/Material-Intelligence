@@ -1092,10 +1092,42 @@
   // Undo is not a special case -- same function, opposite target value --
   // so a room ticked/marked done by mistake is a one-click fix, not a
   // dead end.
-  async function markRoomsDone(code, done) {
+  async function markRoomsDone(code, done, getPlan) {
     const ids = [...document.querySelectorAll("#sp-modal input[data-room]")].filter((c) => c.checked).map((c) => c.dataset.room);
     if (!ids.length) return toast(`Tick at least one ${curLeafLower()} to ${done ? "mark done" : "undo"}.`);
+    // Rows with a quantity box (a zone planned at more than one unit) carry a
+    // REAL installed quantity -- tick = the full plan, or whatever was typed.
+    // Only when at least one ticked row is genuinely partial does the
+    // quantity route get involved; a plain batch of full ticks (and every row
+    // without a box) goes through the original /mark-rooms-done call exactly
+    // as before.
+    const plan = done && getPlan ? getPlan() : null;
+    const boxed = [];
+    if (plan) {
+      ids.forEach((id) => {
+        const inp = document.querySelector(`#sp-modal input[data-roomqty="${cssA(id)}"]`);
+        const info = plan.rooms && plan.rooms[id];
+        if (!inp || !info || !(info.planned > 0)) return;
+        const v = Number(inp.value);
+        const typed = inp.dataset.touched && inp.value.trim() !== "" && !isNaN(v);
+        boxed.push({ room: id, qty: typed ? Math.min(Math.max(v, 0), info.planned) : info.planned, planned: info.planned });
+      });
+    }
+    const partial = boxed.some((b) => b.qty < b.planned);
     try {
+      if (partial) {
+        const boxedIds = new Set(boxed.map((b) => b.room));
+        const rest = ids.filter((id) => !boxedIds.has(id));
+        S.svc = await jpost(api("/" + S.slug + "/progress/rooms" + roomQ()),
+          { service: S.service, item_code: code, entries: boxed.map((b) => ({ room: b.room, qty: b.qty })) });
+        if (rest.length) S.svc = await jpost(api("/" + S.slug + "/mark-rooms-done" + roomQ()), { service: S.service, item_code: code, rooms: rest, done: true });
+        closeModal();
+        await afterSvc();
+        const one = boxed.length === 1 && !rest.length ? boxed[0] : null;
+        const unit = (S._byCode[code] || {}).unit || "";
+        return toast(one ? `Saved ${one.qty} of ${one.planned} ${unit} for ${code}.`
+                         : `Saved quantities for ${ids.length} ${curLeafPluralLower(ids.length)} on ${code}.`);
+      }
       S.svc = await jpost(api("/" + S.slug + "/mark-rooms-done" + roomQ()), { service: S.service, item_code: code, rooms: ids, done });
       closeModal();
       // afterSvc() refreshes S.pnl AND S.real (the drawer's stock-adequacy
@@ -1239,7 +1271,7 @@
     if ($("sp-rooms-expand")) $("sp-rooms-expand").onclick = () => { closeModal(); openRoomsModal(code, true); };
     $("sp-rooms-all").onclick = () => document.querySelectorAll("#sp-modal input[data-room]").forEach((c) => { c.checked = true; });
     $("sp-rooms-none").onclick = () => document.querySelectorAll("#sp-modal input[data-room]").forEach((c) => { c.checked = false; });
-    $("sp-mark-done").onclick = () => markRoomsDone(code, true);
+    $("sp-mark-done").onclick = () => markRoomsDone(code, true, () => roomPlan);
     $("sp-unmark-done").onclick = () => markRoomsDone(code, false);
     document.querySelectorAll("[data-gall]").forEach((b) => b.addEventListener("click", () => {
       document.querySelector(`.sp-roomgroup[data-g="${cssA(b.dataset.gall)}"]`).querySelectorAll("input[data-room]").forEach((c) => { c.checked = true; });
@@ -1247,6 +1279,99 @@
     document.querySelectorAll("[data-gnone]").forEach((b) => b.addEventListener("click", () => {
       document.querySelector(`.sp-roomgroup[data-g="${cssA(b.dataset.gnone)}"]`).querySelectorAll("input[data-room]").forEach((c) => { c.checked = false; });
     }));
+    // ---- real per-room quantity (partial progress) ----
+    // Ticking a zone could only ever mean "the whole planned quantity is done",
+    // so a zone planned at 9 Nos with 5 actually fitted had no honest way to
+    // be recorded. Once the item's per-room plan arrives, every room planned
+    // at more than one unit (or measured in MTR etc.) gets a number box next
+    // to its tick: tick = the full plan, a typed number = what is really
+    // fitted (typing also ticks the row). A room planned at exactly 1 count
+    // keeps just the tick -- that is all there is to say. The fetch is
+    // best-effort: if it fails or is slow the dialog is exactly what it was.
+    let roomPlan = null;
+    const modalEl = $("sp-modal");
+    const isCountItem = isCountUnit(it.unit);
+    const fmtQ = (v) => (isCountItem ? Math.round(v) : Math.round(v * 100) / 100);
+    const cells = [];   // {cb, inp, cell, planned, done0}
+    const paintCell = (c, v) => {
+      c.cell.classList.toggle("is-partial", v > 0 && v < c.planned);
+      c.cell.classList.toggle("is-full", v >= c.planned);
+    };
+    // A row nobody typed in follows its tick (ticked = the full plan, unticked
+    // = what is already recorded) -- this also covers "Select all"/"clear".
+    // A row the engineer typed in keeps their number until they tick/untick it.
+    function syncCells() {
+      cells.forEach((c) => {
+        if (c.inp.dataset.touched) return;
+        const v = c.cb.checked ? c.planned : c.done0;
+        c.inp.value = fmtQ(v);
+        paintCell(c, v);
+      });
+    }
+    function applyRoomPlan(plan) {
+      if (!plan || !plan.rooms || $("sp-modal") !== modalEl) return;
+      roomPlan = plan;
+      document.querySelectorAll("#sp-modal input[data-room]").forEach((cb) => {
+        const info = plan.rooms[cb.dataset.room];
+        if (!info || !(info.planned > 0)) return;                 // unknown plan: tick only, never a guessed number
+        if (isCountItem && info.planned <= 1) return;             // 1 per room: the tick says it all
+        const label = cb.closest("label");
+        if (!label || label.parentNode.classList.contains("sp-roomcell")) return;
+        const done0 = fmtQ((info.frac || 0) * info.planned);
+        const cell = document.createElement("div");
+        cell.className = "sp-roomcell";
+        label.replaceWith(cell);
+        cell.appendChild(label);
+        const box = document.createElement("span");
+        box.className = "sp-roomqty";
+        box.innerHTML = `<input class="ctl" type="number" min="0" max="${esc(String(info.planned))}" step="${isCountItem ? "1" : "any"}" inputmode="${isCountItem ? "numeric" : "decimal"}" data-roomqty="${esc(cb.dataset.room)}" value="${done0}" aria-label="Quantity done"><span class="u">/ ${fmtQ(info.planned)} ${esc(it.unit)}</span>`;
+        cell.appendChild(box);
+        const inp = box.querySelector("input");
+        const c = { cb, inp, cell, planned: info.planned, done0 };
+        cells.push(c);
+        paintCell(c, done0);
+        // typing = "this is what I'm updating": tick the row, keep the number
+        inp.addEventListener("input", () => {
+          inp.dataset.touched = "1";
+          cb.checked = true;
+          const v = Number(inp.value);
+          paintCell(c, isNaN(v) ? 0 : v);
+        });
+        // leaving the box: keep it a sane number (never above the plan --
+        // raising the plan is a separate, deliberate edit)
+        inp.addEventListener("change", () => {
+          let v = Number(inp.value);
+          if (inp.value.trim() === "" || isNaN(v) || v < 0) { delete inp.dataset.touched; cb.checked = false; syncCells(); return; }
+          if (v > info.planned) { v = info.planned; toast(`Planned here is ${fmtQ(info.planned)} ${it.unit}. To record more, raise the plan first.`); }
+          inp.value = fmtQ(v);
+          paintCell(c, v);
+        });
+        // ticking/unticking resets the row to "full plan" / "as recorded"
+        cb.addEventListener("change", () => { delete inp.dataset.touched; syncCells(); });
+      });
+      if (!cells.length) return;
+      document.querySelectorAll("#sp-modal .sp-roomgroup > div:last-child").forEach((g) => {
+        if (g.querySelector(".sp-roomcell")) g.style.gridTemplateColumns = "repeat(auto-fill,minmax(260px,1fr))";
+      });
+      // the bulk buttons set .checked directly (no change event): sync after them
+      modalEl.addEventListener("click", (e) => {
+        if (e.target.closest && e.target.closest("#sp-rooms-all, #sp-rooms-none, [data-gall], [data-gnone]")) {
+          if (e.target.closest("#sp-rooms-none, [data-gnone]")) cells.forEach((c) => { if (!c.cb.checked) delete c.inp.dataset.touched; });
+          cells.forEach((c) => { if (c.cb.checked) delete c.inp.dataset.touched; });
+          syncCells();
+        }
+      });
+      const q = modalEl.querySelector(".sp-qtyrow");
+      if (q && !$("sp-qty-hint")) {
+        const h = document.createElement("p");
+        h.id = "sp-qty-hint"; h.className = "sp-qtyhint";
+        h.textContent = `That box sets the PLAN for the ticked ${curLeafPluralLower(2)}. To record how many are actually fitted, use the number next to each ${curLeafLower()} below, then "Mark ticked as done".`;
+        q.insertAdjacentElement("afterend", h);
+      }
+    }
+    jget(api("/" + S.slug + "/item-room-plan?service=" + encodeURIComponent(S.service) + "&item_code=" + encodeURIComponent(code)))
+      .then(applyRoomPlan).catch(() => {});
+
     // remove one quantity group entirely -- reuses the same backend move/
     // clear mechanism a room-tick-then-blank-qty already uses (qty:null
     // strips the given rooms out of every group), just pre-filled with

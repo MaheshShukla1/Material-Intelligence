@@ -1012,6 +1012,131 @@ def mark_rooms_done(slug: str, payload: dict, room: str = None):
     return _service_view(d, svc, room=room)
 
 
+def _item_plan(d, service, item_code):
+    """(rooms, plan, unit) for ONE item: the rooms it applies to, and each
+    room's own planned quantity -- resolved with exactly itemprog.compute()'s
+    rules, so the per-room numbers the Rooms/Zones dialog shows always add up
+    to the item row's own planned/used (test_room_done_qty.py asserts this).
+
+      - item has quantity groups: a room in a group uses that group's qty,
+        any other applicable room uses the item's own BOQ qty (compute's
+        `_rq`). Applicability is the explicit item_rooms list unioned with the
+        group rooms, or the group rooms alone when no list is set.
+      - no groups: the whole-project planned override (else qty x rooms)
+        shared equally across the applicable rooms.
+
+    A room whose quantity is not a positive number is None, never a guess.
+    ([], {}, None) when the item is not in this service's BOQ.
+
+    Deliberately NOT built on _applicable_rooms()/_qty_for_room(): those feed
+    the DPR and still treat "no item_rooms list" as every room even for an
+    item with quantity groups, which compute() no longer does."""
+    code = str(item_code)
+    boqdf = _load_boq(d, service)
+    row = boqdf[boqdf.item_code.astype(str) == code]
+    if row.empty:
+        return [], {}, None
+    unit = row.iloc[0].get("unit")
+    qty = itemprog._f(row.iloc[0].get("qty"))
+    all_ids = _all_room_ids(d)
+    room_set = set(all_ids)
+    room_qty, group_appl = itemprog._room_qty_from_groups(_item_room_qty(d).get(service, {}).get(code), room_set)
+    explicit = _item_rooms(d).get(service, {}).get(code)
+    if room_qty is not None:
+        base = ([r for r in explicit if r in room_set] or all_ids) if explicit else list(group_appl)
+        appl = list(dict.fromkeys(base + group_appl))
+        plan = {r: room_qty.get(r, qty) for r in appl}
+    else:
+        appl = explicit or all_ids
+        appl = [r for r in appl if r in room_set] or all_ids
+        over = _planned(d, service).get(code)
+        per = (itemprog._f(over) / len(appl) if appl else None) if over is not None else qty
+        plan = {r: per for r in appl}
+    plan = {str(r): (v if v is not None and v > 0 else None) for r, v in plan.items()}
+    return [str(r) for r in appl], plan, unit
+
+
+@router.get("/{slug}/item-room-plan")
+def item_room_plan(slug: str, service: str, item_code: str):
+    """What the Rooms/Zones dialog needs to let an engineer record a REAL
+    quantity per room instead of a plain tick: for every room this item
+    applies to, that room's own planned quantity and how much of it is
+    recorded done. Rooms the item does not apply to are not listed -- their
+    planned quantity would be invented. `planned` is null when it cannot be
+    known (never a guess); the UI then offers the plain tick only.
+
+    service/item_code are query parameters, not path segments: real item
+    codes can contain "/" (e.g. QI8/13.2.1), which would break a path route."""
+    d = _need(slug)
+    appl, plan, unit = _item_plan(d, service, item_code)
+    node = _item_prog(d).get(service, {}).get(str(item_code))
+    rooms = {}
+    for rid in appl:
+        p = plan.get(rid)
+        rooms[rid] = {"planned": (round(p, 4) if p is not None else None),
+                      "frac": itemprog.frac_for(node, rid)}
+    return {"unit": unit, "rooms": rooms}
+
+
+@router.post("/{slug}/progress/rooms")
+def set_rooms_progress(slug: str, payload: dict, room: str = None):
+    """Record a REAL installed quantity for several rooms of one item in one
+    call -- the partial-progress counterpart of /mark-rooms-done (which can
+    only say 0% or 100%). Body: {"service","item_code","entries":[{"room":
+    room_id,"qty":number}, ...]}.
+
+    Reported case: a Thoth jet fan planned at 9 Nos in Zone 5 but only 5
+    actually fitted -- ticking the zone could only ever say 9. Each room
+    gets its OWN per-room override via itemprog.set_progress(..., room=rid)
+    (never the room=None '*' path), so no other room's recorded state can be
+    wiped, exactly like /mark-rooms-done. The stored value stays a fraction
+    of that room's planned qty (frac = qty / room_planned, clamped to [0,1]),
+    so every existing reader of item_progress.json keeps working unchanged;
+    a quantity at/above the room's plan is stored as exactly 1.0 so the room
+    counts as done.
+
+    All entries are validated before ANYTHING is written (one bad room =
+    nothing saved). A room whose planned quantity is unknown is refused, not
+    guessed. Logged to the DPR like any other room update (frac > 0 only --
+    setting a room back to 0 is not "work done today", same as undo)."""
+    d = _need(slug)
+    svc = payload.get("service")
+    code = payload.get("item_code")
+    entries = payload.get("entries") or []
+    if not svc or code is None:
+        raise HTTPException(400, "service and item_code are required")
+    if not entries:
+        raise HTTPException(400, "at least one room entry is required")
+    appl_list, plan, _unit = _item_plan(d, svc, code)
+    appl = set(appl_list)
+    todo = []
+    for e in entries:
+        e = e or {}
+        rid = str(e.get("room"))
+        if rid not in appl:
+            raise HTTPException(400, f"room {rid} is not one of this item's rooms")
+        try:
+            qty = float(e.get("qty"))
+        except (TypeError, ValueError):
+            raise HTTPException(400, f"quantity for room {rid} must be a number")
+        if qty != qty or qty < 0:
+            raise HTTPException(400, f"quantity for room {rid} must be 0 or more")
+        planned = plan.get(rid)
+        if planned is None or planned <= 0:
+            raise HTTPException(400, f"planned quantity for room {rid} is not set, so a partial quantity "
+                                     "cannot be recorded -- set the plan first, or just tick it")
+        frac = 1.0 if qty >= planned * (1 - 1e-9) else round(qty / planned, 6)
+        todo.append((rid, frac))
+    store = _item_prog(d)
+    for rid, frac in todo:
+        itemprog.set_progress(store, svc, code, frac, room=rid)
+    (d / "item_progress.json").write_text(json.dumps(store, ensure_ascii=False))
+    for rid, frac in todo:
+        if frac > 0:
+            _log_dpr_change(d, svc, rid, code, frac=frac)
+    return _service_view(d, svc, room=room)
+
+
 @router.post("/{slug}/mark-activity-rooms-done")
 def mark_activity_rooms_done(slug: str, payload: dict, room: str = None):
     """Labour-only companion to /mark-rooms-done above -- same exact

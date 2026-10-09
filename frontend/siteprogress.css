@@ -33,7 +33,7 @@
 
 /* ---- layout ---- */
 .sp-layout{display:grid;grid-template-columns:262px minmax(0,1fr);gap:26px;margin:22px auto 0;max-width:1560px}
-@media(max-width:900px){.sp-layout{grid-template-columns:1fr;gap:16px}.sp-rail{position:static}}
+@media(max-width:900px){.sp-layout{grid-template-columns:minmax(0,1fr);gap:16px}.sp-rail{position:static}}
 .sp-crumb, .sp-setup{max-width:1560px;margin-left:auto;margin-right:auto}
 
 /* left rail: generic tree (floors/rooms, levels/zones, wings...) */
@@ -400,4 +400,47 @@
 .sp-addchip:hover{border-color:var(--violet);color:var(--violet)}
 @media (hover:none),(pointer:coarse){
   .sp-addchip{width:38px;height:38px}
+}
+
+/* ---------------------------------------------------------------- per-tab chrome
+   <body data-view> is set by setView() in siteprogress.js. The header controls
+   below belong to the stock-register RUN that Forecast and Inventory read; Site
+   Progress has its own project dropdown (#sp-proj), so showing the run switcher
+   there put two different "which site" controls on screen, and changing the
+   top one un-hid the Forecast report underneath Site Progress.
+     Forecast       -> everything (unchanged)
+     Site Progress  -> none of the run controls, no run/file line, no Forecast report
+     Inventory      -> same as Forecast minus Lead time (a forecast-only setting)
+   visibility:hidden (not display:none) above 760px so the tab bar does not jump
+   sideways when switching tabs; on a phone the space is reclaimed instead. */
+body[data-view="siteprogress"] .topact,
+body[data-view="siteprogress"] #ctx,
+body[data-view="siteprogress"] #fresh{visibility:hidden}
+body[data-view="siteprogress"] #report{display:none !important}
+body[data-view="inventory"] #leadwrap{display:none !important}
+@media(max-width:760px){
+  body[data-view="siteprogress"] .topact,
+  body[data-view="siteprogress"] #ctx,
+  body[data-view="siteprogress"] #fresh{display:none}
+}
+
+/* ---------------------------------------------------------------- phone layout
+   Below 900px the left rail (Structure tree) stacks above the content, which put
+   the service pills (Overall / Electrical / ...) below the whole tree -- on an
+   18-floor hotel that is ~1300px down the page, past the first screen. Dissolve
+   the content wrapper so the pills, the tree and the rest of the content become
+   siblings in the grid, then order them pills -> tree -> content. Desktop
+   (side-by-side) layout is untouched. */
+@media(max-width:900px){
+  .sp-layout>*{min-width:0}
+  .sp-main{display:contents}
+  .sp-main>*{order:2}
+  .sp-main>.sp-pills{order:0;margin-bottom:0}
+  .sp-rail{order:1}
+}
+/* Touch-sized targets for the tab bar and service pills (same ~44px minimum the
+   rest of the app uses for touch). No effect with a mouse. */
+@media (hover:none),(pointer:coarse){
+  .spnav button{min-height:44px}
+  .sp-pill{min-height:44px;padding-left:16px;padding-right:16px}
 }

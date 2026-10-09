@@ -100,9 +100,20 @@
 
   function setView(v) {
     S.view = v; setNavActive(v);
+    // Which tab is open, exposed as <body data-view>. siteprogress.css keys
+    // the per-tab header controls off this ("Forecast shows forecast things,
+    // Site Progress none of them, Inventory only what inventory needs"), so
+    // the rule lives in one place instead of in every show()/hidden toggle.
+    try { document.body.dataset.view = v; } catch (e) {}
     const sp = ensureSection();
     if (v === "siteprogress") {
-      S.foreSnap = {}; FORE.forEach((id) => { const e = $(id); if (e) { S.foreSnap[id] = e.hidden; e.hidden = true; } });
+      // Snapshot the Forecast sections' visibility only on the FIRST entry into
+      // Site Progress. Tapping the Site Progress tab again while already on it
+      // used to re-snapshot the already-hidden state, so the next tap on
+      // Forecast restored "everything hidden" and left a blank page.
+      const first = !S.foreSnap;
+      if (first) S.foreSnap = {};
+      FORE.forEach((id) => { const e = $(id); if (e) { if (first) S.foreSnap[id] = e.hidden; e.hidden = true; } });
       sp.hidden = false; openSiteProgress();
     } else {
       sp.hidden = true;
@@ -521,7 +532,7 @@
           <div class="sp-tree" id="sp-tree"></div>
           <p class="sub" style="margin:10px 4px">Type: ${esc((st.structure && st.structure.kind) || "custom")} · ${st.rooms} ${curLeafPluralLower(st.rooms)}. Hover a row to rename/delete.</p>
         </aside>
-        <div>
+        <div class="sp-main">
           <div class="sp-pills" id="sp-pills"></div>
           <div class="sp-hero">
             <div class="sp-ring" id="sp-ring"><i><b id="sp-hpct">0%</b><span>complete</span></i></div>

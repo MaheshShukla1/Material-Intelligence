@@ -389,3 +389,25 @@ tbody tr:hover{background:#faf9f6}
   .home-head h2{font-size:19px}
   .homecard{padding:26px 16px}
 }
+
+/* Tablet / small laptop: the header (brand + tab bar + 7 controls) needs ~1090px
+   on one line; between 761px and that it overflowed and clipped Export/Delete
+   (same html{overflow-x:hidden} clipping as on a phone). Let it wrap onto a
+   second line instead. Wider screens keep today's single-line header. */
+@media(max-width:1100px){
+  .top{flex-wrap:wrap;row-gap:10px}
+  .topact{flex:0 1 auto;min-width:0;max-width:100%;flex-wrap:wrap;row-gap:8px}
+}
+
+/* Phone header + filter bar. .topact is flex:none (desktop: one line of
+   buttons), so inside the wrapping header it kept its full one-line width --
+   measured 768px wide on a 412px screen, with html{overflow-x:hidden} just
+   clipping Lead time / Upload / Sync / Export / Delete off-screen and making
+   them unreachable. Let it take the row and wrap inside it. Same for the
+   Forecast filter bar (.right: search + "Show me"), clipped the same way. */
+@media(max-width:760px){
+  .topact{flex:1 1 100%;min-width:0}
+  .topact .ctl{max-width:100%;min-width:0}
+  .right{flex-wrap:wrap;width:100%;min-width:0}
+  .right input{min-width:0;flex:1 1 160px}
+}

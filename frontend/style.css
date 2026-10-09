@@ -189,6 +189,11 @@ th{position:sticky;top:var(--hdr);z-index:10;text-align:left;font-size:11.5px;
   font-weight:600;color:var(--ink2);text-transform:uppercase;letter-spacing:.4px;
   padding:11px 14px;background:#f6f4f0;white-space:nowrap;
   border-bottom:1px solid var(--line)}
+/* Report-table headers may wrap onto a second line when their column is too
+   narrow for the text ("Total rcvd" in a 10% column), instead of spilling
+   over the neighbouring header. Single words never break; a header that
+   already fits stays on one line, so wide screens look exactly as before. */
+.tablewrap th{white-space:normal}
 thead tr:first-child th:first-child{border-top-left-radius:12px}
 thead tr:first-child th:last-child{border-top-right-radius:12px}
 td{padding:10px 14px;border-top:1px solid var(--line2);vertical-align:top;
@@ -349,7 +354,11 @@ tbody tr:hover{background:#faf9f6}
      min-width is exceeded there, so no scrollbar appears and nothing
      changes above 760px. */
   .tablewrap{overflow-x:auto}
-  .tablewrap table{min-width:640px}
+  .tablewrap table{min-width:720px}
+  /* 14px side padding eats ~28px of a ~65px column: "Stock" / "Trust"
+     headers (42px of text) then spill into the next column. 10px keeps the
+     text inside its column; th and td share it so edges stay aligned. */
+  .tablewrap th,.tablewrap td{padding-left:10px;padding-right:10px}
   /* th{position:sticky;top:var(--hdr)} assumes .top is exactly --hdr tall --
      true on desktop, but .top wraps to 2 lines here (flex-wrap above), so
      the header is now taller than --hdr while the table header still

@@ -68,6 +68,7 @@ async function main() {
   // the real Thoth shape + the two overlaid states: HVAC ready (supply, no draft yet), Only point wiring has wire
   const base = scenario((ov, u) => {
     u("HVAC").ready.supply = rdy(2353650);
+    ov.ready_total = 2353650;                                  // the backend sums the ready, no-draft amounts into this
     u("Electrical › Only point wiring").wire = true;
   });
   let { window, d, calls } = await boot(clone(base));
@@ -108,7 +109,7 @@ async function main() {
   ({ window, d, calls } = await boot(clone(base)));
   const k = [...d.querySelectorAll(".bl-kpi")];
   ok(k[1].classList.contains("good") && /Invoiced so far/.test(T(k[1])), "Invoiced so far is the green card");
-  ok(k[2].classList.contains("warn") && /Ready to bill, no draft yet/.test(T(k[2])), "Ready to bill, no draft yet stays amber");
+  ok(k[2].classList.contains("warn") && /Not invoiced yet/.test(T(k[2])) && /Ready, no draft ₹ 23,53,650/.test(T(k[2])), "the amber card is now 'Not invoiced yet' (drafts + ready) and still shows the ready part: " + T(k[2]));
   ok(/Live · refreshes every minute/.test(T(d.querySelector(".bl-live"))), "the Services header says it is live (a minute, as the code does)");
 
   // ---- main buttons act

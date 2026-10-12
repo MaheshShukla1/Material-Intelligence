@@ -176,21 +176,22 @@
     const s = section();
     B.view = "home";
     const anySet = ov.services.some((x) => x.set);
-    const drafts = ov.ras.filter((r) => r.status === "draft");
+    const snap = snapshotOf(ov);
     s.innerHTML = head("Billing",
       "The bill builds itself: installation from Site Progress, supply from delivery challans (or the stock register), rate from your BOQ sheet.",
       `<button class="btn" id="bl-setup">Billing setup</button>
        ${ov.ras.length ? `<button class="btn" id="bl-dl">Download</button>` : ""}
        ${ov.services.some((x) => x.supply_source === "challan") ? `<button class="btn" id="bl-imph">Import challans</button>` : ""}
        <button class="btn primary" id="bl-new" ${anySet ? "" : "disabled"}>+ New RA bill</button>`) + `
-      <div class="bl-kpis">
-        <div class="bl-kpi"><span>Contract value</span><b>${inr(ov.contract_value)}</b><i>${basesOf(ov).length} services${ov.services.length > basesOf(ov).length ? " · " + ov.services.length + " Work Orders" : ""}</i></div>
-        <div class="bl-kpi good"><span>Invoiced so far</span><b>${inr(ov.billed)}</b><i>${ov.ras.filter((r) => r.status === "locked").length} RA invoiced</i></div>
-        <div class="bl-kpi warn"><span>Ready to bill, no draft yet</span><b>${inr(ov.ready_total)}</b><i>Work done on site + material received</i></div>
+      <div class="bl-kpis bl-snap">
+        <div class="bl-kpi"><span>Contract value</span><b title="${esc(inr(ov.contract_value))}"><em class="full">${inr(ov.contract_value)}</em><em class="cmp" aria-hidden="true">${inrShort(ov.contract_value)}</em></b><i>${basesOf(ov).length} services${ov.services.length > basesOf(ov).length ? " · " + ov.services.length + " Work Orders" : ""}</i></div>
+        <div class="bl-kpi good"><span>Invoiced so far</span><b>${inr(ov.billed)}</b><i>${snap.nInv} RA invoiced</i></div>
+        <div class="bl-kpi warn bl-ni"><span>Not invoiced yet</span><b>${inr(snap.notInvoiced)}</b><i>${snap.n} draft${snap.n === 1 ? "" : "s"} ${inr(snap.draftTotal)}<br>Ready, no draft ${inr(snap.ready)}</i></div>
       </div>
+      <div class="bl-snaprow"><button class="btn primary" id="bl-share">Share snapshot</button><span>One tap copies a short summary, ready for WhatsApp or email.</span></div>
       ${anySet ? "" : `<div class="bl-callout">No service has a payment term yet. Open <b>Billing setup</b> and set Supply % / Installation % for each service. Until it is set, that service cannot be billed — no % is ever guessed.</div>`}
       <div class="bl-sech"><h3>Services</h3><span class="bl-live"><i></i>Live · refreshes every minute</span></div>
-      <div class="bl-card bl-svcl" id="bl-svcl">${basesOf(ov).flatMap((b) => b.units.map((u) => ov.services.find((x) => x.service === u)).filter(Boolean).map((x) => svcRow(ov, b, x))).join("")}</div>
+      <div class="bl-card bl-svcl" id="bl-svcl">${snap.n ? `<div class="bl-grp"><b>Not invoiced yet · ${snap.n} draft${snap.n === 1 ? "" : "s"}</b><b>${inr(snap.draftTotal)}</b></div>` : ""}${basesOf(ov).flatMap((b) => b.units.map((u) => ov.services.find((x) => x.service === u)).filter(Boolean).map((x) => svcRow(ov, b, x))).join("")}</div>
       <div class="bl-sech"><h3>RA bills</h3><span class="bl-live">Each row shows what is inside, stage by stage</span></div>
       <div class="bl-card bl-scroll"><div class="bl-ras">
         <div class="bl-rah"><div>RA</div><div>Cut-off</div><div>Status</div><div>What is inside</div><div class="n">This bill</div><div class="n">Up to date</div><div></div></div>
@@ -208,6 +209,7 @@
     wireProj();
     $("bl-setup").onclick = showSetup;
     $("bl-new").onclick = () => openNewRA();
+    $("bl-share").onclick = shareSnapshot;
     if ($("bl-dl")) $("bl-dl").onclick = () => openDownload();
     if ($("bl-imph")) $("bl-imph").onclick = importFromHome;
     s.querySelectorAll("[data-ra]").forEach((el) => {
@@ -222,7 +224,65 @@
       try { await createFromRow(el.dataset.mk, el.dataset.mkseries.split(",")); } catch (e) { toast(briefErr(e)); }
     });
     s.querySelectorAll("[data-menu]").forEach((el) => el.onclick = (e) => { e.stopPropagation(); openRowMenu(el); });
-    void drafts;
+  }
+
+  // ---------------------------------------------------------------- snapshot
+  // The three cards are the whole picture for a manager: what is invoiced, what is not invoiced yet, what the contract is.
+  // "Not invoiced yet" is only a SUM of figures the screen already has: the open drafts + what is ready with no draft. Nothing is
+  // estimated; a figure the overview does not carry is not shown as a number.
+  function snapshotOf(ov) {
+    const drafts = ov.ras.filter((r) => r.status === "draft");
+    const draftTotal = drafts.reduce((a, r) => a + (r.this_total || 0), 0);
+    const ready = Number(ov.ready_total) || 0;
+    const order = ov.services.map((x) => x.service);
+    const names = [...order, ...drafts.map((r) => r.service).filter((n) => order.indexOf(n) < 0)];
+    const per = [...new Set(names)].map((n) => {
+      const mine = drafts.filter((r) => r.service === n);
+      return mine.length ? { service: n, amt: mine.reduce((a, r) => a + (r.this_total || 0), 0) } : null;
+    }).filter(Boolean);
+    return { n: drafts.length, draftTotal, ready, notInvoiced: draftTotal + ready, per,
+             nInv: ov.ras.filter((r) => r.status === "locked").length };
+  }
+  // "₹ 114.7 Cr" / "₹ 3.29 L": only for the phone's half-width Contract card; the full number stays in its tooltip and on wider screens
+  function inrShort(v) {
+    if (v == null) return "—";
+    const n = Number(v), a = Math.abs(n), sg = n < 0 ? "−" : "";
+    if (a >= 1e7) return sg + "₹ " + (Math.round(a / 1e6) / 10).toLocaleString("en-IN") + " Cr";
+    if (a >= 1e5) return sg + "₹ " + (Math.round(a / 1e3) / 100).toLocaleString("en-IN") + " L";
+    return inr(v);
+  }
+  const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  function snapshotText(ov) {
+    const sn = snapshotOf(ov);
+    const rs = (v) => (v < 0 ? "−" : "") + Math.abs(Math.round(v)).toLocaleString("en-IN");
+    const d = new Date();
+    const pr = B.projects.find((p) => p.slug === B.slug);
+    const lines = [`${pr ? pr.project : B.slug} · Billing · ${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`,
+      `Invoiced: ${inr(ov.billed)} (${sn.nInv} RA)`,
+      `Not invoiced yet: ${inr(sn.notInvoiced)} (${sn.n} draft${sn.n === 1 ? "" : "s"})`];
+    for (let i = 0; i < sn.per.length; i += 3) lines.push("  " + sn.per.slice(i, i + 3).map((p) => `${p.service} ${rs(p.amt)}`).join(" · "));
+    lines.push(`Ready to bill, no draft: ${inr(sn.ready)}`, `Contract value: ${inr(ov.contract_value)}`);
+    return lines.join("\n");
+  }
+  // One tap. A phone opens its share sheet (WhatsApp is one tap away); a computer copies. Where copying is not allowed (a plain
+  // http address on a phone is not a "secure" page, so the browser refuses the clipboard) the text is shown, ready to select.
+  async function shareSnapshot() {
+    if (!B.ov) return;
+    const text = snapshotText(B.ov);
+    const touch = !!(window.matchMedia && window.matchMedia("(pointer:coarse)").matches);
+    if (touch && navigator.share) {
+      try { await navigator.share({ text }); return; } catch (e) { if (e && e.name === "AbortError") return; }
+    }
+    try { await navigator.clipboard.writeText(text); toast("Snapshot copied. Paste it in WhatsApp or email."); return; } catch (e) { /* try the older way */ }
+    let done = false;
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text; ta.setAttribute("readonly", ""); ta.style.cssText = "position:fixed;left:-9999px;top:0";
+      document.body.appendChild(ta); ta.select(); done = document.execCommand("copy"); ta.remove();
+    } catch (e) { done = false; }
+    if (done) { toast("Snapshot copied. Paste it in WhatsApp or email."); return; }
+    modal("Snapshot", "Copying is blocked here. Select the text and copy it.", `<textarea class="bl-snaptxt" id="bl-snaptxt" readonly rows="8">${esc(text)}</textarea>`, [{ label: "Close", cls: "primary", run: closeModal }]);
+    const t = $("bl-snaptxt"); if (t) { t.focus(); t.select(); }
   }
 
   // The services on the home screen. A service split into Work Orders shows one tile per Work Order (each has its

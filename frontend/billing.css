@@ -725,3 +725,28 @@ body[data-view="billing"] #report{display:none !important}
 @keyframes bl-shim{to{background-position:-200% 0}}
 @media (prefers-reduced-motion:reduce){.bl-sk span,.bl-sk b,.bl-sk i,.bl-skr span{animation:none}}
 @media(max-width:760px){.bl-skr{grid-template-columns:1fr 90px;gap:14px}.bl-skr span:nth-child(2){display:none}}
+
+/* ---------------- Snapshot: Not invoiced yet card, drafts header, Share snapshot ---------------- */
+.bl-kpis.bl-snap{grid-template-columns:1fr 1fr 1.35fr}
+.bl-kpi.bl-ni b{font-size:28px}
+.bl-kpi b em{font-style:normal}
+.bl-kpi b .cmp{display:none}
+.bl-snaprow{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:-4px 0 14px}
+.bl-snaprow span{font-size:13px;color:var(--ink3)}
+.bl-grp{border-radius:10px 10px 0 0;display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 18px;background:var(--amberbg);color:var(--amber);font-variant-numeric:tabular-nums}
+.bl-grp b{font-weight:600}
+.bl-snaptxt{width:100%;box-sizing:border-box;font:12.5px/1.55 ui-monospace,Consolas,monospace;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--ink);resize:none}
+@media(max-width:1000px) and (min-width:761px){.bl-kpis.bl-snap{grid-template-columns:1fr 1fr}.bl-kpis.bl-snap .bl-ni{grid-column:1/-1;order:-1}}
+@media(max-width:760px){
+  /* the amber card is the one that needs somebody to act, so it goes first; Invoiced and Contract share one row */
+  .bl-kpis.bl-snap{grid-template-columns:1fr 1fr;gap:8px}
+  .bl-kpis.bl-snap .bl-ni{grid-column:1/-1;order:-1}
+  .bl-kpis.bl-snap .bl-kpi:not(.bl-ni){padding:10px 12px}
+  .bl-kpis.bl-snap .bl-kpi:not(.bl-ni) b{font-size:17px}
+  .bl-kpi b .full{display:none}
+  .bl-kpi b .cmp{display:inline}
+  .bl-snaprow{margin:0 0 14px}
+  .bl-snaprow .btn{flex:1 1 100%;min-height:48px;justify-content:center;font-size:15px}
+  .bl-snaprow span{display:none}
+  .bl-grp{padding:12px 16px}
+}

@@ -544,3 +544,20 @@ body[data-view="inventory"] #leadwrap{display:none !important}
   .sp-roomcell .sp-roomqty input{min-height:44px;font-size:16px}
   .sp-zones .sheethd .btn{min-height:44px}
 }
+
+/* delete an activity: choose what happens to the work recorded on its items */
+.sp-del{display:flex;flex-direction:column;gap:12px}
+.sp-delp{margin:0;color:var(--ink2)}
+.sp-dopt{display:flex;gap:12px;align-items:flex-start;border:1px solid var(--line);border-radius:12px;padding:13px 14px;cursor:pointer;background:var(--panel);min-height:44px}
+.sp-dopt.on{border:1.5px solid var(--ink)}
+.sp-dopt input{margin-top:3px;width:18px;height:18px;flex:none}
+.sp-dopt small{display:block;color:var(--ink2);font-size:13px;margin-top:2px}
+.sp-dtag{display:inline-block;padding:1px 8px;border-radius:20px;background:var(--violetbg);color:var(--violet);font-size:11px;font-weight:600;vertical-align:1px}
+.sp-delimp{margin-top:10px;background:var(--amberbg);border:1px solid #ecd9a8;border-radius:8px;padding:9px 11px;font-size:12.5px;color:var(--amber)}
+.sp-delrow{display:flex;flex-wrap:wrap;justify-content:space-between;gap:2px 12px;margin-top:3px;font-variant-numeric:tabular-nums}
+.sp-delrow span:last-child{white-space:nowrap}
+.sp-delwarn{margin-top:6px;font-weight:600}
+.sp-delwait{color:var(--ink3)}
+.sp-delnote{margin:0;background:var(--bg);border-radius:10px;padding:9px 12px;font-size:12.5px;color:var(--ink2)}
+#sp-modal-save.sp-danger{background:var(--red);border-color:var(--red);color:#fff}
+@media(max-width:760px){.sp-dopt{padding:14px}#sp-modal-save,#sp-modal-cancel{min-height:44px}}

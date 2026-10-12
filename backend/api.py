@@ -949,6 +949,11 @@ def export_csv(run_id: str, status: str = "", service: str = "",
 from . import siteprogress  # noqa: E402
 app.include_router(siteprogress.router)
 
+# Billing (RA bills): its own router + its own billing.json per project. Reads
+# Site Progress / stock data, writes nothing outside billing.json.
+from . import billing  # noqa: E402
+app.include_router(billing.router)
+
 # Cache-busting, fully automatic: every local <link>/<script> reference in
 # index.html gets "?v=<the file's own last-modified time>" stamped on by the
 # SERVER on every request - never hand-typed, never forgotten. Replace
@@ -956,7 +961,7 @@ app.include_router(siteprogress.router)
 # new ?v= and the browser is forced to fetch the new file instead of
 # silently reusing a cached copy.
 _ASSET_RE = re.compile(
-    r'(href|src)="((?:style|siteprogress)\.css|(?:app|siteprogress)\.js)'
+    r'(href|src)="((?:style|siteprogress|billing)\.css|(?:app|siteprogress|billing)\.js)'
     r'(?:\?v=[^"]*)?"')
 
 

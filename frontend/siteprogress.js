@@ -80,7 +80,8 @@
     nav.className = "spnav";
     nav.innerHTML = `<button data-v="forecast" class="on">Forecast</button>
       <button data-v="siteprogress">Site Progress</button>
-      <button data-v="inventory">Inventory</button>`;
+      <button data-v="inventory">Inventory</button>
+      <button data-v="billing">Billing</button>`;
     header.insertBefore(nav, header.querySelector(".topact"));
     nav.querySelectorAll("button").forEach((b) => b.addEventListener("click", () => setView(b.dataset.v)));
     // any forecast action returns to Forecast tab
@@ -106,7 +107,9 @@
     // the rule lives in one place instead of in every show()/hidden toggle.
     try { document.body.dataset.view = v; } catch (e) {}
     const sp = ensureSection();
-    if (v === "siteprogress") {
+    const bl = $("billing");            // owned by billing.js; absent => Billing not loaded
+    if (bl) bl.hidden = v !== "billing";
+    if (v === "siteprogress" || v === "billing") {
       // Snapshot the Forecast sections' visibility only on the FIRST entry into
       // Site Progress. Tapping the Site Progress tab again while already on it
       // used to re-snapshot the already-hidden state, so the next tap on
@@ -114,7 +117,9 @@
       const first = !S.foreSnap;
       if (first) S.foreSnap = {};
       FORE.forEach((id) => { const e = $(id); if (e) { if (first) S.foreSnap[id] = e.hidden; e.hidden = true; } });
-      sp.hidden = false; openSiteProgress();
+      sp.hidden = v !== "siteprogress";
+      if (v === "siteprogress") openSiteProgress();
+      else if (window.MIBilling) window.MIBilling.open();
     } else {
       sp.hidden = true;
       if (S.foreSnap) FORE.forEach((id) => { const e = $(id); if (e) e.hidden = S.foreSnap[id]; });
@@ -125,7 +130,7 @@
 
   // Forecast vs Inventory: filter the existing #svc service pills by name.
   function applyPillFilter() {
-    if (S.view === "siteprogress") return;
+    if (S.view === "siteprogress" || S.view === "billing") return;
     const svc = $("svc"); if (!svc) return;
     const pills = [...svc.querySelectorAll(".tab")];
     if (!pills.length) return;
@@ -1458,9 +1463,57 @@
     try { S.svc = await jpost(api("/" + S.slug + "/activity" + roomQ()), { service: S.service, op: "rename", name: a, new_name: name.trim() }); afterSvc(); }
     catch (e) { toast("Failed: " + briefErr(e)); }
   }
+  // Deleting an activity. Two different things can be meant, so when work is recorded on its items the person chooses:
+  //  - "Only remove the activity" (default, what delete always did): the grouping goes; the work stays recorded on the items,
+  //    so the numbers and every Billing draft stay as they are.
+  //  - "Remove the activity and its recorded work": also erases the work of the items that belong to this activity alone.
+  //    Irreversible, so the dialog shows what it does to the open Billing drafts (asked of the real bill code) first.
+  const rs = (v) => (v < 0 ? "−" : "") + "₹ " + Math.abs(Math.round(v)).toLocaleString("en-IN");
   async function deleteActivity(a) {
-    if (!confirm(`Delete activity “${a}”? Its progress is removed; BOQ items stay in the BOQ.`)) return;
-    try { S.svc = await jpost(api("/" + S.slug + "/activity" + roomQ()), { service: S.service, op: "delete", name: a }); afterSvc(); }
+    byCode();
+    const codes = (S.svc.mapping[a] || []).map(String);
+    const recorded = codes.map((c) => S._byCode[c]).filter((i) => i && (i.pct || 0) > 0);
+    if (!recorded.length) {                 // nothing recorded on it: nothing to choose
+      if (!confirm(`Delete activity “${a}”? BOQ items stay in the BOQ.`)) return;
+      return doDeleteActivity(a, false);
+    }
+    const shared = new Set(); Object.entries(S.svc.mapping || {}).forEach(([n, cs]) => { if (n !== a) (cs || []).forEach((c) => shared.add(String(c))); });
+    const alone = recorded.filter((i) => !shared.has(String(i.code)));
+    const worth = recorded.reduce((t, i) => t + (i.rate != null ? (i.done_val || 0) : 0), 0);
+    const n = recorded.length;
+    modal(`Delete “${esc(a)}”?`, "", `<div class="sp-del">
+      <p class="sp-delp">This activity has work recorded on <b>${n} BOQ item${n === 1 ? "" : "s"}</b>${worth ? ` (${inr(worth)} done)` : ""}. Choose what happens to that work.</p>
+      <label class="sp-dopt on" id="sp-dopt-keep"><input type="radio" name="spdel" value="keep" checked>
+        <div><b>Only remove the activity</b> <span class="sp-dtag">Default</span>
+          <small>The grouping goes. The work stays recorded on the items, so progress and every bill stay as they are. The items show as “not in any activity” until you add them to one.</small></div></label>
+      <label class="sp-dopt" id="sp-dopt-wipe"><input type="radio" name="spdel" value="wipe">
+        <div><b>Remove the activity and its recorded work</b>
+          <small>For an activity entered by mistake. ${alone.length ? `The work on ${alone.length} item${alone.length === 1 ? "" : "s"} that belong${alone.length === 1 ? "s" : ""} to this activity alone is erased${recorded.length > alone.length ? `; ${recorded.length - alone.length} shared with another activity ${recorded.length - alone.length === 1 ? "stays as it is" : "stay as they are"}` : ""}.` : "Every item here is also in another activity, so no recorded work is erased."} This cannot be undone.</small>
+          <div class="sp-delimp" id="sp-delimp"><span class="sp-delwait">Checking what this does to Billing…</span></div></div></label>
+      <p class="sp-delnote">Invoiced RAs never change, whichever you pick.</p></div>`,
+      async () => {
+        const wipe = document.querySelector('#sp-modal input[name="spdel"]:checked').value === "wipe";
+        closeModal(); await doDeleteActivity(a, wipe);
+      }, "Remove activity only", "min(560px,94vw)");
+    const save = $("sp-modal-save");
+    const pick = () => {
+      const wipe = document.querySelector('#sp-modal input[name="spdel"]:checked').value === "wipe";
+      $("sp-dopt-keep").classList.toggle("on", !wipe); $("sp-dopt-wipe").classList.toggle("on", wipe);
+      save.textContent = wipe ? "Remove activity and work" : "Remove activity only"; save.classList.toggle("sp-danger", wipe);
+    };
+    document.querySelectorAll('#sp-modal input[name="spdel"]').forEach((r) => r.addEventListener("change", pick));
+    // what the second choice would do to the open Billing drafts, from the real bill code
+    const box = $("sp-delimp");
+    jget("/api/billing/" + S.slug + "/activity-impact?service=" + encodeURIComponent(S.service) + "&activity=" + encodeURIComponent(a)).then((p) => {
+      if (!$("sp-delimp")) return;
+      if (!p.drafts.length) { box.innerHTML = `<b>Billing</b>: no open draft bill is affected.` + (p.locked ? ` ${p.locked} invoiced RA${p.locked === 1 ? "" : "s"} stay${p.locked === 1 ? "s" : ""} as ${p.locked === 1 ? "it is" : "they are"}.` : ""); return; }
+      const rows = p.drafts.map((x) => `<div class="sp-delrow"><span>${esc(x.label)} (draft)</span><span>${rs(x.now)} → <b>${rs(x.then)}</b></span></div>`).join("");
+      const neg = p.drafts.some((x) => x.then < -0.005);
+      box.innerHTML = `<b>Billing will change</b>${rows}` + (neg ? `<div class="sp-delwarn">Below zero: this work was already billed in an invoiced RA, so the draft becomes a credit for it.</div>` : "");
+    }).catch(() => { if ($("sp-delimp")) box.innerHTML = `<span class="sp-delwait">Billing could not be checked just now. The choice above still works.</span>`; });
+  }
+  async function doDeleteActivity(a, withProgress) {
+    try { S.svc = await jpost(api("/" + S.slug + "/activity" + roomQ()), { service: S.service, op: "delete", name: a, ...(withProgress ? { with_progress: true } : {}) }); afterSvc(); }
     catch (e) { toast("Failed: " + briefErr(e)); }
   }
   // remove one BOQ item from one activity's mapping (item stays in the BOQ

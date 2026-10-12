@@ -1,0 +1,599 @@
+{
+ "slug": "test-thoth",
+ "project": {
+  "slug": "test-thoth",
+  "structure": {
+   "id": "p0",
+   "type": "project",
+   "name": "Thoth",
+   "kind": "hotel",
+   "children": [
+    {
+     "id": "flo1",
+     "type": "floor",
+     "name": "1",
+     "children": [
+      {
+       "id": "roo2",
+       "type": "room",
+       "name": "a",
+       "children": []
+      },
+      {
+       "id": "roo3",
+       "type": "room",
+       "name": "b",
+       "children": []
+      }
+     ]
+    },
+    {
+     "id": "flo4",
+     "type": "floor",
+     "name": "2",
+     "children": [
+      {
+       "id": "roo5",
+       "type": "room",
+       "name": "a",
+       "children": []
+      },
+      {
+       "id": "roo6",
+       "type": "room",
+       "name": "b",
+       "children": []
+      }
+     ]
+    }
+   ],
+   "_seq": 6
+  },
+  "rooms": 4,
+  "services": [
+   "Fire",
+   "HVAC"
+  ],
+  "activities": {
+   "Fire": [
+    "Pumps",
+    "Pipes"
+   ]
+  },
+  "progress_summary": {
+   "by_service": {},
+   "overall": 0,
+   "rooms": 0
+  },
+  "has_boq": true,
+  "settings": {}
+ },
+ "view": {
+  "service": "Fire",
+  "room": null,
+  "activities": [
+   "Pumps",
+   "Pipes"
+  ],
+  "mapping": {
+   "Pumps": [
+    "2",
+    "3"
+   ],
+   "Pipes": [
+    "3",
+    "5"
+   ]
+  },
+  "act_pct": {
+   "Pumps": 35.0,
+   "Pipes": 35.0
+  },
+  "overall_pct": 40.0,
+  "items": [
+   {
+    "code": "1",
+    "desc": "Diesel engine pump set",
+    "unit": "Nos",
+    "sub": "Other",
+    "acts": [],
+    "qty": 2.0,
+    "planned": 2.0,
+    "used": 0.0,
+    "remaining": 2.0,
+    "pct": 0.0,
+    "mapped": false,
+    "rooms": 4,
+    "in_room": true,
+    "rate": 100000.0,
+    "quick": false,
+    "done_val": 0.0,
+    "rem_val": 200000.0,
+    "full_val": 200000.0,
+    "install_pct": null,
+    "install_rate": 100000.0,
+    "install_pct_own": null,
+    "room_done": 0,
+    "room_progress": 0,
+    "room_pending": 4,
+    "room_total": 4,
+    "planned_override": true,
+    "has_room_groups": false
+   },
+   {
+    "code": "2",
+    "desc": "Butterfly valve 150mm",
+    "unit": "Nos",
+    "sub": "Valve",
+    "acts": [
+     "Pumps"
+    ],
+    "qty": 4.0,
+    "planned": 4.0,
+    "used": 2.0,
+    "remaining": 2.0,
+    "pct": 50.0,
+    "mapped": true,
+    "rooms": 4,
+    "in_room": true,
+    "rate": 5000.0,
+    "quick": false,
+    "done_val": 10000.0,
+    "rem_val": 10000.0,
+    "full_val": 20000.0,
+    "install_pct": null,
+    "install_rate": 5000.0,
+    "install_pct_own": null,
+    "room_done": 0,
+    "room_progress": 4,
+    "room_pending": 0,
+    "room_total": 4,
+    "planned_override": true,
+    "has_room_groups": false
+   },
+   {
+    "code": "3",
+    "desc": "GI pipe 100mm",
+    "unit": "Rmt",
+    "sub": "Pipe",
+    "acts": [
+     "Pumps",
+     "Pipes"
+    ],
+    "qty": 100.0,
+    "planned": 100.0,
+    "used": 20.0,
+    "remaining": 80.0,
+    "pct": 20.0,
+    "mapped": true,
+    "rooms": 4,
+    "in_room": true,
+    "rate": 800.0,
+    "quick": false,
+    "done_val": 16000.0,
+    "rem_val": 64000.0,
+    "full_val": 80000.0,
+    "install_pct": null,
+    "install_rate": 800.0,
+    "install_pct_own": null,
+    "room_done": 0,
+    "room_progress": 4,
+    "room_pending": 0,
+    "room_total": 4,
+    "planned_override": true,
+    "has_room_groups": false
+   },
+   {
+    "code": "5",
+    "desc": "Hydrant valve",
+    "unit": "Nos",
+    "sub": "Valve",
+    "acts": [
+     "Pipes"
+    ],
+    "qty": 10.0,
+    "planned": 10.0,
+    "used": 5.0,
+    "remaining": 5.0,
+    "pct": 50.0,
+    "mapped": true,
+    "rooms": 4,
+    "in_room": true,
+    "rate": 3000.0,
+    "quick": false,
+    "done_val": 15000.0,
+    "rem_val": 15000.0,
+    "full_val": 30000.0,
+    "install_pct": null,
+    "install_rate": 3000.0,
+    "install_pct_own": null,
+    "room_done": 0,
+    "room_progress": 4,
+    "room_pending": 0,
+    "room_total": 4,
+    "planned_override": true,
+    "has_room_groups": false
+   }
+  ],
+  "pnl_by_activity": {
+   "Pumps": {
+    "planned_value": 100000.0,
+    "done_value": 26000.0,
+    "remaining_value": 74000.0,
+    "full_value": 100000.0,
+    "items": 2,
+    "unrated": 0
+   },
+   "Pipes": {
+    "planned_value": 110000.0,
+    "done_value": 31000.0,
+    "remaining_value": 79000.0,
+    "full_value": 110000.0,
+    "items": 2,
+    "unrated": 0
+   }
+  },
+  "pnl_totals": {
+   "planned_value": 130000.0,
+   "done_value": 41000.0,
+   "remaining_value": 89000.0,
+   "full_value": 130000.0,
+   "items": 3,
+   "rated": 3
+  },
+  "pnl_unmapped_value": {
+   "items": 1,
+   "planned_value": 200000.0,
+   "done_value": 0.0,
+   "remaining_value": 200000.0,
+   "full_value": 200000.0
+  },
+  "item_rooms": {},
+  "item_progress": {
+   "2": {
+    "*": 0.5
+   },
+   "3": {
+    "*": 0.2
+   },
+   "5": {
+    "*": 0.5
+   }
+  },
+  "item_room_qty": {},
+  "activity_progress": {},
+  "labour_buckets": {},
+  "unmapped": [
+   "1"
+  ],
+  "labour_only": {
+   "Pumps": false,
+   "Pipes": false
+  },
+  "labour_pct": {},
+  "labour_suggested": {
+   "Pumps": false,
+   "Pipes": false
+  }
+ },
+ "impact_pumps": {
+  "items": 1,
+  "drafts": [
+   {
+    "id": "ra1",
+    "label": "Fire \u00b7 Installation RA 1",
+    "service": "Fire",
+    "now": 12300.0,
+    "then": 9300.0
+   }
+  ],
+  "locked": 0
+ },
+ "impact_pipes": {
+  "items": 1,
+  "drafts": [
+   {
+    "id": "ra1",
+    "label": "Fire \u00b7 Installation RA 1",
+    "service": "Fire",
+    "now": 12300.0,
+    "then": 7800.0
+   }
+  ],
+  "locked": 0
+ },
+ "view_with_empty": {
+  "service": "Fire",
+  "room": null,
+  "activities": [
+   "Pumps",
+   "Pipes",
+   "Empty"
+  ],
+  "mapping": {
+   "Pumps": [
+    "2",
+    "3"
+   ],
+   "Pipes": [
+    "3",
+    "5"
+   ],
+   "Empty": []
+  },
+  "act_pct": {
+   "Pumps": 35.0,
+   "Pipes": 35.0,
+   "Empty": null
+  },
+  "overall_pct": 40.0,
+  "items": [
+   {
+    "code": "1",
+    "desc": "Diesel engine pump set",
+    "unit": "Nos",
+    "sub": "Other",
+    "acts": [],
+    "qty": 2.0,
+    "planned": 2.0,
+    "used": 0.0,
+    "remaining": 2.0,
+    "pct": 0.0,
+    "mapped": false,
+    "rooms": 4,
+    "in_room": true,
+    "rate": 100000.0,
+    "quick": false,
+    "done_val": 0.0,
+    "rem_val": 200000.0,
+    "full_val": 200000.0,
+    "install_pct": null,
+    "install_rate": 100000.0,
+    "install_pct_own": null,
+    "room_done": 0,
+    "room_progress": 0,
+    "room_pending": 4,
+    "room_total": 4,
+    "planned_override": true,
+    "has_room_groups": false
+   },
+   {
+    "code": "2",
+    "desc": "Butterfly valve 150mm",
+    "unit": "Nos",
+    "sub": "Valve",
+    "acts": [
+     "Pumps"
+    ],
+    "qty": 4.0,
+    "planned": 4.0,
+    "used": 2.0,
+    "remaining": 2.0,
+    "pct": 50.0,
+    "mapped": true,
+    "rooms": 4,
+    "in_room": true,
+    "rate": 5000.0,
+    "quick": false,
+    "done_val": 10000.0,
+    "rem_val": 10000.0,
+    "full_val": 20000.0,
+    "install_pct": null,
+    "install_rate": 5000.0,
+    "install_pct_own": null,
+    "room_done": 0,
+    "room_progress": 4,
+    "room_pending": 0,
+    "room_total": 4,
+    "planned_override": true,
+    "has_room_groups": false
+   },
+   {
+    "code": "3",
+    "desc": "GI pipe 100mm",
+    "unit": "Rmt",
+    "sub": "Pipe",
+    "acts": [
+     "Pumps",
+     "Pipes"
+    ],
+    "qty": 100.0,
+    "planned": 100.0,
+    "used": 20.0,
+    "remaining": 80.0,
+    "pct": 20.0,
+    "mapped": true,
+    "rooms": 4,
+    "in_room": true,
+    "rate": 800.0,
+    "quick": false,
+    "done_val": 16000.0,
+    "rem_val": 64000.0,
+    "full_val": 80000.0,
+    "install_pct": null,
+    "install_rate": 800.0,
+    "install_pct_own": null,
+    "room_done": 0,
+    "room_progress": 4,
+    "room_pending": 0,
+    "room_total": 4,
+    "planned_override": true,
+    "has_room_groups": false
+   },
+   {
+    "code": "5",
+    "desc": "Hydrant valve",
+    "unit": "Nos",
+    "sub": "Valve",
+    "acts": [
+     "Pipes"
+    ],
+    "qty": 10.0,
+    "planned": 10.0,
+    "used": 5.0,
+    "remaining": 5.0,
+    "pct": 50.0,
+    "mapped": true,
+    "rooms": 4,
+    "in_room": true,
+    "rate": 3000.0,
+    "quick": false,
+    "done_val": 15000.0,
+    "rem_val": 15000.0,
+    "full_val": 30000.0,
+    "install_pct": null,
+    "install_rate": 3000.0,
+    "install_pct_own": null,
+    "room_done": 0,
+    "room_progress": 4,
+    "room_pending": 0,
+    "room_total": 4,
+    "planned_override": true,
+    "has_room_groups": false
+   }
+  ],
+  "pnl_by_activity": {
+   "Pumps": {
+    "planned_value": 100000.0,
+    "done_value": 26000.0,
+    "remaining_value": 74000.0,
+    "full_value": 100000.0,
+    "items": 2,
+    "unrated": 0
+   },
+   "Pipes": {
+    "planned_value": 110000.0,
+    "done_value": 31000.0,
+    "remaining_value": 79000.0,
+    "full_value": 110000.0,
+    "items": 2,
+    "unrated": 0
+   },
+   "Empty": {
+    "planned_value": 0.0,
+    "done_value": 0.0,
+    "remaining_value": 0.0,
+    "full_value": 0.0,
+    "items": 0,
+    "unrated": 0
+   }
+  },
+  "pnl_totals": {
+   "planned_value": 130000.0,
+   "done_value": 41000.0,
+   "remaining_value": 89000.0,
+   "full_value": 130000.0,
+   "items": 3,
+   "rated": 3
+  },
+  "pnl_unmapped_value": {
+   "items": 1,
+   "planned_value": 200000.0,
+   "done_value": 0.0,
+   "remaining_value": 200000.0,
+   "full_value": 200000.0
+  },
+  "item_rooms": {},
+  "item_progress": {
+   "2": {
+    "*": 0.5
+   },
+   "3": {
+    "*": 0.2
+   },
+   "5": {
+    "*": 0.5
+   }
+  },
+  "item_room_qty": {},
+  "activity_progress": {},
+  "labour_buckets": {},
+  "unmapped": [
+   "1"
+  ],
+  "labour_only": {
+   "Pumps": false,
+   "Pipes": false,
+   "Empty": false
+  },
+  "labour_pct": {},
+  "labour_suggested": {
+   "Pumps": false,
+   "Pipes": false,
+   "Empty": false
+  }
+ },
+ "pnl": {
+  "service": "Fire",
+  "room": null,
+  "project": {
+   "planned_value": 130000.0,
+   "done_value": 41000.0,
+   "remaining_value": 89000.0,
+   "full_value": 130000.0,
+   "waste_value": 0.0,
+   "saving_value": 0.0,
+   "pct_value_done": 31.5,
+   "by_service": {
+    "Fire": {
+     "planned_value": 130000.0,
+     "done_value": 41000.0,
+     "remaining_value": 89000.0,
+     "full_value": 130000.0,
+     "items": 3,
+     "rated": 3
+    }
+   }
+  },
+  "by_activity": {
+   "Pumps": {
+    "planned_value": 100000.0,
+    "done_value": 26000.0,
+    "remaining_value": 74000.0,
+    "full_value": 100000.0,
+    "items": 2,
+    "unrated": 0
+   },
+   "Pipes": {
+    "planned_value": 110000.0,
+    "done_value": 31000.0,
+    "remaining_value": 79000.0,
+    "full_value": 110000.0,
+    "items": 2,
+    "unrated": 0
+   },
+   "Empty": {
+    "planned_value": 0.0,
+    "done_value": 0.0,
+    "remaining_value": 0.0,
+    "full_value": 0.0,
+    "items": 0,
+    "unrated": 0
+   }
+  },
+  "waste": {
+   "available": true,
+   "wasted_value": 0.0,
+   "saved_value": 0.0,
+   "net_value": 0.0,
+   "top_items": [],
+   "progress_pct": 23.3,
+   "caveat": null
+  },
+  "rated_items": 3,
+  "total_items": 3,
+  "unmapped_value": {
+   "items": 1,
+   "planned_value": 200000.0,
+   "done_value": 0.0,
+   "remaining_value": 200000.0,
+   "full_value": 200000.0
+  }
+ },
+ "projects": [
+  {
+   "slug": "test-thoth",
+   "project": "Fixture"
+  }
+ ]
+}

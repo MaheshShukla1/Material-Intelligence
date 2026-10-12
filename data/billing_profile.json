@@ -1,0 +1,11 @@
+{
+ "fields": {
+  "contractor": "Vedant Engitech And Infrastructure Pvt. Ltd.",
+  "supplier_gstin": "24AADCV2799M1ZP",
+  "supplier_state": "GUJARAT",
+  "supplier_state_code": "24",
+  "supplier_pan": "AADCV2799M",
+  "supplier_category": "MEPF"
+ },
+ "from": "thoth-mall"
+}

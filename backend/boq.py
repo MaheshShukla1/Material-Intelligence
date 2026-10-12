@@ -230,6 +230,10 @@ def _parse_projectbase_sheet(raw, service=None):
     c_unit = hdr.index("BOQ UNIT") if "BOQ UNIT" in hdr else None
     c_qty = hdr.index("DESIGN QUANTITY") if "DESIGN QUANTITY" in hdr else None
     c_rate = hdr.index("RATE") if "RATE" in hdr else None
+    # Internal Ref No: ProjectBase's own unique id per sheet row (Client Ref No
+    # is blank/repeated on many rows, so it can't identify a line). Optional --
+    # only read when the column exists; billing uses it to label/locate lines.
+    c_iref = hdr.index("INTERNAL REF NO") if "INTERNAL REF NO" in hdr else None
     if c_desc is None or c_unit is None or c_qty is None:
         return None    # missing too much of the signature to trust a parse
 
@@ -261,6 +265,7 @@ def _parse_projectbase_sheet(raw, service=None):
             section = re.sub(r"\s+", " ", str(desc)).strip() if not desc_blank else section
             continue
 
+        iref = vals[c_iref] if c_iref is not None and c_iref < len(vals) else None
         rows.append({
             "item_code": None if pd.isna(code) else str(code).strip(),
             "description": re.sub(r"\s+", " ", str(desc)).strip(),
@@ -268,6 +273,8 @@ def _parse_projectbase_sheet(raw, service=None):
             "qty": _to_qty(qty),
             "rate": _to_qty(rate),
             "section": section,
+            "internal_ref": None if (iref is None or pd.isna(iref)) else str(iref).strip(),
+            "src_row": r + 1,     # 1-based Excel row of this line in its sheet
         })
 
     if not rows:

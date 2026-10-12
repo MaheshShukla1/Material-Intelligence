@@ -102,6 +102,10 @@
     if (!s.querySelector(".bl-head") && !(B.pre && B.projects.length)) s.innerHTML = skeleton();
     let projects = [];
     try { projects = await jget("/api/projects"); } catch (e) {}
+    try {                                                // projects with Site Progress data but no stock run (stock deleted / not yet connected)
+      const extra = await jget("/api/siteprogress/projects-without-stock");
+      if (Array.isArray(extra) && Array.isArray(projects)) projects = projects.concat(extra.filter((x) => x && x.slug && !projects.some((p) => p.slug === x.slug)));
+    } catch (e) {}
     B.projects = projects;
     if (!projects.length) {
       s.innerHTML = `<div class="bl-empty">No project yet. Upload a stock register on the <b>Forecast</b> tab, then set up Site Progress, then bill here.</div>`;
@@ -302,7 +306,11 @@
   }
   async function loadBadge() {
     try {
-      const ps = await jget("/api/projects");
+      let ps = await jget("/api/projects");
+      try {
+        const extra = await jget("/api/siteprogress/projects-without-stock");
+        if (Array.isArray(extra) && Array.isArray(ps)) ps = ps.concat(extra.filter((x) => x && x.slug && !ps.some((p) => p.slug === x.slug)));
+      } catch (e) {}
       if (!ps.length) return;
       const fromF = (typeof META !== "undefined" && META && META.project_slug);
       const slug = B.slug && ps.find((p) => p.slug === B.slug) ? B.slug : (fromF && ps.find((p) => p.slug === fromF)) ? fromF : ps[0].slug;
@@ -538,10 +546,10 @@
     B.bill = b;
     startLive();
     const ra = b.ra, locked = ra.status === "locked", stages = ra.stages;
-    const cols = `minmax(230px,2.6fr) 84px 92px repeat(${stages.length * 4},minmax(86px,1fr))`;
+    const cols = `minmax(230px,2.6fr) 84px 92px repeat(${stages.length * 4},minmax(86px,1fr))${locked ? "" : " 44px"}`;
     const hdr = `<div class="bl-lh" style="grid-template-columns:${cols}">
       <div>Line</div><div class="n">BOQ qty</div><div class="n">Rate</div>
-      ${stages.map((st) => `<div class="n sg">${STAGE[st]} ${b.pct[st] == null ? "" : b.pct[st] + "%"}<br><small>Before</small></div><div class="n"><small>&nbsp;<br>To date</small></div><div class="n"><small>&nbsp;<br>This bill</small></div><div class="n"><small>&nbsp;<br>Amount</small></div>`).join("")}</div>`;
+      ${stages.map((st) => `<div class="n sg">${STAGE[st]} ${b.pct[st] == null ? "" : b.pct[st] + "%"}<br><small>Before</small></div><div class="n"><small>&nbsp;<br>To date</small></div><div class="n"><small>&nbsp;<br>This bill</small></div><div class="n"><small>&nbsp;<br>Amount</small></div>`).join("")}${locked ? "" : "<div></div>"}</div>`;
     const lineRow = (l) => `
       <div class="bl-lr ${B.expanded.has(l.item_code) ? "open" : ""}" data-code="${esc(l.item_code)}" style="grid-template-columns:${cols}">
         <div class="d" data-l="Line"><span class="t">${esc(l.desc)}</span><small>${l.internal_ref ? "Ref " + esc(l.internal_ref) + " · " : ""}${esc(l.sheet || "")}${l.src_row ? " row " + l.src_row : ""}</small></div>
@@ -554,6 +562,7 @@
             <div class="n" data-l="${STAGE[st]} this bill">${locked ? `<b class="${c.this < 0 ? "neg" : ""}">${qn(c.this)}</b>`
               : `<button class="bl-qtybtn ${c.this == null ? "need" : ""} ${c.this < 0 ? "neg" : ""}" data-edit="${esc(l.item_code)}" data-stage="${st}" title="Type a quantity">${c.this == null ? "Type qty" : qn(c.this)}</button>`}</div>
             <div class="n" data-l="${STAGE[st]} amount"><b class="${c.amount < 0 ? "neg" : ""}">${inr(c.amount)}</b></div>`; }).join("")}
+        ${locked ? "" : `<div class="rm"><button class="bl-rm" data-rm="${esc(l.item_code)}" aria-label="Remove this line from the draft" title="Remove this line from this draft (Site Progress is not changed)">✕<span> Remove from this draft</span></button></div>`}
         <div class="x" style="grid-column:1/-1">${stages.map((st) => { const c = l[st]; if (!c) return "";
           return `<div><b>${STAGE[st]}</b>: ${c.amount == null ? "Amount not computed — quantity missing." :
             `rate ${inr(l.rate, true)} × ${qn(c.this)} ${esc(l.unit)} × ${c.pct}% = <b>${inr(c.amount, true)}</b>`}<br>
@@ -602,8 +611,11 @@
       </div></div>
       <div class="bl-lines-h"><h3 class="bl-h3">Lines <small>${b.lines.length}</small></h3>
         ${locked ? "" : `<button class="btn" id="bl-addline">+ Add line</button>`}</div>
-      <div class="bl-card bl-scroll"><div class="bl-lines" style="min-width:${360 + stages.length * 380}px">${hdr}
-        ${b.lines.length ? b.lines.map(lineRow).join("") : `<div class="bl-none">No line has anything to bill yet.</div>`}</div></div>`;
+      <div class="bl-card bl-scroll"><div class="bl-lines" style="min-width:${360 + stages.length * 380 + (locked ? 0 : 44)}px">${hdr}
+        ${b.lines.length ? b.lines.map(lineRow).join("") : `<div class="bl-none">No line has anything to bill yet.</div>`}</div></div>
+      ${!locked && (b.removed || []).length ? `<div class="bl-removed" id="bl-removed"><b>${b.removed.length} line${b.removed.length === 1 ? "" : "s"} removed from this draft</b>
+        <span>Not in this bill. Site Progress and other bills are not changed.</span>
+        ${b.removed.map((r) => `<div class="rr"><span class="t">${esc(r.desc)} <small>${esc(r.unit || "")}</small></span><button class="btn" data-restore="${esc(r.item_code)}">Restore</button></div>`).join("")}</div>` : ""}`;
     wireProj();
     $("bl-back").onclick = showHome;
     if ($("bl-tochallans")) $("bl-tochallans").onclick = () => showChallans(ra.service);
@@ -612,11 +624,21 @@
     if ($("bl-impra")) $("bl-impra").onclick = () => importChallans(ra.service, () => showRA(id));
     wireInvStrip(ra, id);
     s.querySelectorAll(".bl-lr").forEach((row) => row.addEventListener("click", (e) => {
-      if (e.target.closest("[data-edit]")) return;
+      if (e.target.closest("[data-edit]") || e.target.closest("[data-rm]")) return;
       const c = row.dataset.code; B.expanded.has(c) ? B.expanded.delete(c) : B.expanded.add(c); row.classList.toggle("open");
     }));
     s.querySelectorAll("[data-edit]").forEach((el) => el.onclick = () => editQty(el.dataset.edit, el.dataset.stage));
     if (!locked) {
+      // take a line out of THIS draft (or put it back): only this draft changes, so no "are you sure" -- Restore is right under the lines
+      const setRemoved = async (code, remove) => {
+        const y = window.scrollY;
+        try { await jsend(api("/" + B.slug + "/ra/" + id + "/line/remove"), { item_code: code, remove }); }
+        catch (e) { toast(briefErr(e)); return; }
+        await showRA(id); window.scrollTo(0, y);
+        toast(remove ? "Removed from this draft. You can restore it under the lines." : "Put back in this draft.");
+      };
+      s.querySelectorAll("[data-rm]").forEach((el) => el.onclick = (e) => { e.stopPropagation(); setRemoved(el.dataset.rm, true); });
+      s.querySelectorAll("[data-restore]").forEach((el) => el.onclick = () => setRemoved(el.dataset.restore, false));
       $("bl-addline").onclick = addLine;
       $("bl-del").onclick = () => modal("Delete this draft?", ra.label, "<p>Typed quantities in this draft are lost. Invoiced RAs are not affected.</p>", [
         { label: "Cancel", run: closeModal },

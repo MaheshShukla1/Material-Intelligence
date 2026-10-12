@@ -152,8 +152,14 @@
     const sp = ensureSection();
     let projects = [];
     try { projects = await jget("/api/projects"); } catch (e) {}
+    // Projects whose stock was deleted / never uploaded are not in /api/projects (it is built from stock runs), but their
+    // Site Progress data is still here: add them, so the work stays reachable and stock can be connected again below.
+    try {
+      const extra = await jget("/api/siteprogress/projects-without-stock");
+      if (Array.isArray(extra) && Array.isArray(projects)) projects = projects.concat(extra.filter((x) => x && x.slug && !projects.some((p) => p.slug === x.slug)));
+    } catch (e) {}
     S.projects = projects;
-    if (!projects.length) { sp.innerHTML = `<div class="sp-empty">No project yet. Upload a stock register on the <b>Forecast</b> tab first, then set up Site Progress here.</div>`; return; }
+    if (!projects.length) { renderFirstProject(sp); return; }
     if (!S.slug || !projects.find((p) => p.slug === S.slug)) {
       const fromF = (typeof META !== "undefined" && META && META.project_slug);
       S.slug = (fromF && projects.find((p) => p.slug === fromF)) ? fromF : projects[0].slug;
@@ -164,8 +170,163 @@
 
   function projBar() {
     return `<div class="sp-crumb" style="display:flex;gap:10px;align-items:center;margin-bottom:14px">
-      <select id="sp-proj" class="ctl">${S.projects.map((p) => `<option value="${esc(p.slug)}" ${p.slug === S.slug ? "selected" : ""}>${esc(p.project)}</option>`).join("")}</select>
+      <select id="sp-proj" class="ctl">${S.projects.map((p) => `<option value="${esc(p.slug)}" ${p.slug === S.slug ? "selected" : ""}>${esc(p.project)}</option>`).join("")}<option value="${NEWPROJ}">+ New project…</option></select>
+      <span id="sp-stock" class="sp-stock" style="color:var(--ink3)"></span>
       <span id="sp-where" style="color:var(--ink3);cursor:default"></span></div>`;
+  }
+
+  // ---------- Stock: which uploaded / Google-Sheet stock this project reads ----------
+  // The Forecast tab makes stocks (one per upload or Google Sheet link). A project reads the stock named like itself
+  // unless one is picked here. Picking changes ONLY which stock is read: BOQ, progress, saved links and bills are not touched.
+  async function wireStock() {
+    const el = $("sp-stock");
+    if (!el) return;
+    let d; try { d = await jget(api("/" + S.slug + "/stock")); } catch (e) { return; }
+    if (!d || !Array.isArray(d.options)) return;
+    const cur = d.current;
+    const when = (c) => (c ? String(c).slice(0, 16).replace("T", " ") : "");
+    el.innerHTML = cur
+      ? `Stock: <b>${esc(cur.name)}</b> · ${esc(cur.kind)}${cur.filename ? " · " + esc(cur.filename) : ""}${cur.created ? " · " + esc(when(cur.created)) : ""} · <a href="#" id="sp-stock-change">Change</a>${cur.source_link ? ` · <a href="#" id="sp-stock-resync">Re-sync</a>` : ""}`
+      : `Stock: <b>not connected</b> · <a href="#" id="sp-stock-change">Connect stock</a>`;
+    $("sp-stock-change").onclick = (e) => { e.preventDefault(); openStockPicker(d); };
+    if ($("sp-stock-resync")) $("sp-stock-resync").onclick = (e) => { e.preventDefault(); resyncStock(cur); };
+  }
+
+  // ---------- new project (no stock needed) ----------
+  // Same slug rule as the server (siteprogress._slugify / api.safe_slug), so a stock later connected under this name lands on this project.
+  const slugOf = (n) => (String(n || "").trim().replace(/[^A-Za-z0-9]+/g, "-").replace(/^-+|-+$/g, "").toLowerCase() || "untitled");
+  function startProject(name) {
+    name = String(name || "").trim();
+    if (!name) { toast("Type the project name first."); return false; }
+    const slug = slugOf(name);
+    const known = S.projects.find((p) => p.slug === slug);
+    S.slug = slug; S.service = null; S.state = null;
+    if (known) { toast(`"${known.project}" already exists. Opened it.`); loadState(); return true; }
+    S.projects = S.projects.concat([{ slug, project: name, runs: 0, latest_run: null, latest: null, draft: true }]);
+    renderSetup();                                         // the existing 3-step wizard: structure, BOQ, open
+    return true;
+  }
+  // The set-up wizard itself, before a project exists: the same three steps, dimmed, under one name field.
+  // Reached when nothing exists yet, or from the last row of the project dropdown. No separate screen, no extra button.
+  function renderFirstProject(sp) {
+    const have = S.projects.length > 0;
+    sp.innerHTML = `${have ? projBar() : ""}
+      <div class="sp-setup">
+        <h2>Set up Site Progress</h2>
+        <p class="sub">Three quick steps, once per project. Stock is optional: connect it any time from the Stock line at the top.</p>
+        <div class="sp-step" id="sp-np-box">
+          <h3>Project name</h3>
+          <div class="body" style="margin-left:0;margin-top:10px"><input id="sp-np-name" class="ctl" placeholder="e.g. Thoth Mall" style="min-width:240px" autocomplete="off">
+            <button class="btn primary" id="sp-np-go" style="margin-left:8px">Continue</button></div>
+        </div>
+        <div style="opacity:.45;pointer-events:none" aria-hidden="true">
+          <div class="sp-step"><span class="n">1</span><h3>Building structure</h3></div>
+          <div class="sp-step"><span class="n">2</span><h3>Bill of Quantities</h3></div>
+          <div class="sp-step"><span class="n">3</span><h3>Open</h3></div>
+        </div>
+      </div>`;
+    if (have) $("sp-proj").onchange = (e) => { if (isNewProj(e)) return; S.slug = e.target.value; S.service = null; loadState(); };
+    $("sp-np-go").onclick = () => startProject($("sp-np-name").value);
+    $("sp-np-name").onkeydown = (e) => { if (e.key === "Enter") startProject($("sp-np-name").value); };
+    $("sp-np-name").focus();
+  }
+  // "+ New project…" is the last row of the project dropdown, not a button. Picking it opens the blank wizard.
+  const NEWPROJ = "__new__";
+  function isNewProj(e) {
+    if (e.target.value !== NEWPROJ) return false;
+    e.target.value = S.slug;
+    renderFirstProject(ensureSection());
+    return true;
+  }
+
+  // ---------- connect stock: pick an existing one, paste a Google Sheet link, or upload a file ----------
+  // A new stock is made with THIS project's name, so it is read by this project straight away. If it lands under another name
+  // (an old project whose folder name differs from its display name), it is bound to the project, never left dangling.
+  async function afterStockMade(j) {
+    const made = j && j.meta && j.meta.project_slug;
+    if (made && made !== S.slug) {
+      try { await jpost(api("/" + S.slug + "/stock"), { stock: made }); } catch (e) { toast("Stock made, but could not attach it here: " + briefErr(e)); }
+    }
+  }
+  async function postSync(link, name) {
+    const fd = new FormData(); fd.append("link", link); fd.append("project", name);
+    const r = await fetch("/api/sync-sheet", { method: "POST", body: fd });
+    if (!r.ok) throw Object.assign(new Error("http"), { status: r.status, body: await r.text() });
+    return r.json();
+  }
+  async function resyncStock(cur) {
+    toast("Re-reading the sheet…");
+    try { await postSync(cur.source_link, cur.name); toast("Stock updated."); await loadState(); }
+    catch (e) { toast("Re-sync failed: " + briefErr(e)); }
+  }
+
+  function openStockPicker(d) {
+    const cur = d.current && d.current.stock;
+    const hasOpts = d.options.length > 0;
+    let tab = hasOpts ? "pick" : "link";
+    const row = (o) => {
+      const l = o.links || {};
+      const linkTxt = l.saved ? `${l.found} of ${l.saved} saved links found in this stock` : "no saved links yet";
+      const warn = l.saved && l.found < l.saved ? ` style="color:#6e4205"` : "";
+      return `<label class="sp-stockopt" style="display:flex;gap:10px;align-items:flex-start;padding:10px 4px;border-top:1px solid var(--line,#eee);cursor:pointer">
+        <input type="radio" name="sp-stock-pick" value="${esc(o.stock)}" ${o.stock === cur ? "checked" : ""} style="margin-top:4px">
+        <span><b>${esc(o.name)}</b> <span class="sp-badge">${esc(o.kind)}</span>${o.stock === cur ? ` <span class="sp-badge">in use</span>` : ""}<br>
+        <span style="color:var(--ink3);font-size:12.5px">${o.filename ? esc(o.filename) + " · " : ""}${esc(String(o.created || "").slice(0, 16).replace("T", " "))}${o.materials != null ? " · " + o.materials + (o.materials === 1 ? " material" : " materials") : ""}</span><br>
+        <span${warn} style="font-size:12.5px;color:var(--ink3)">${esc(linkTxt)}</span></span></label>`;
+    };
+    const back = d.chosen
+      ? `<label class="sp-stockopt" style="display:flex;gap:10px;padding:10px 4px;border-top:1px solid var(--line,#eee);cursor:pointer"><input type="radio" name="sp-stock-pick" value="" style="margin-top:4px"><span>Back to the stock named like this project <span style="color:var(--ink3)">(${esc(d.project)})</span></span></label>`
+      : "";
+    const tabBtn = (k, t) => `<button type="button" class="sp-pill${tab === k ? " on" : ""}" data-sktab="${k}">${t}</button>`;
+    const panes = () => ({
+      pick: hasOpts
+        ? d.options.map(row).join("") + back + `<p style="color:var(--ink3);font-size:12.5px;margin:10px 4px 0">A saved link whose material is not in the chosen stock shows as not found. It is never moved to a similar name.</p>`
+        : `<p class="sub" style="margin:8px 4px">No stock exists yet. Use the other two tabs to connect one.</p>`,
+      link: `<p class="sub" style="margin:8px 4px">Stock will be named <b>${esc(projName())}</b>. Paste the published link of the sheet.</p>
+        <input id="sp-sk-link" class="ctl" placeholder="https://docs.google.com/spreadsheets/d/e/…/pub?output=xlsx" style="width:100%">
+        <p class="sub" style="margin:8px 4px 0">Google Sheets: File → Share → Publish to web → Entire document → Microsoft Excel (.xlsx) → Publish. The link ends with <b>output=xlsx</b>.</p>`,
+      file: `<p class="sub" style="margin:8px 4px">Stock will be named <b>${esc(projName())}</b>. Choose the stock register (.xlsx).</p>
+        <input type="file" id="sp-sk-file" accept=".xlsx,.xlsm,.xls">`,
+    });
+    const labels = { pick: "Use this stock", link: "Connect sheet", file: "Upload stock" };
+    modal("Stock for " + esc(projName()), "Site Progress, the BOQ, saved links and bills are not changed by connecting stock.",
+      `<div class="sp-pills" style="margin-bottom:8px">${tabBtn("pick", "Use existing")}${tabBtn("link", "Google Sheet link")}${tabBtn("file", "Upload file")}</div>
+       <div id="sp-sk-body"></div><div id="sp-sk-err" style="color:var(--red,#a02622);font-size:12.5px;margin:8px 4px 0"></div>`,
+      async () => {
+        const err = $("sp-sk-err"); err.textContent = "";
+        const btn = $("sp-modal-save");
+        const busy = (on, t) => { btn.disabled = on; btn.textContent = on ? t : labels[tab]; };
+        if (tab === "pick") {
+          const pick = document.querySelector('input[name="sp-stock-pick"]:checked');
+          if (!pick) { err.textContent = "Pick a stock first."; return; }
+          await jpost(api("/" + S.slug + "/stock"), { stock: pick.value || null });
+          closeModal(); toast("Stock changed."); await loadState(); return;
+        }
+        let j;
+        busy(true, "Connecting…");
+        try {
+          if (tab === "link") {
+            const link = ($("sp-sk-link").value || "").trim();
+            if (!link) { err.textContent = "Paste the sheet link first."; busy(false); return; }
+            j = await postSync(link, projName());
+          } else {
+            const f = $("sp-sk-file").files[0];
+            if (!f) { err.textContent = "Choose the stock file first."; busy(false); return; }
+            j = await upload("/api/upload", f, { project: projName() });
+          }
+        } catch (e) { err.textContent = briefErr(e); busy(false); return; }
+        await afterStockMade(j);
+        closeModal(); toast("Stock connected."); await loadState();
+      }, labels[tab], "min(640px,94vw)");
+    const paint = () => {
+      const m = $("sp-modal");
+      $("sp-sk-body").innerHTML = panes()[tab];
+      m.querySelectorAll("[data-sktab]").forEach((b) => b.classList.toggle("on", b.dataset.sktab === tab));
+      $("sp-modal-save").textContent = labels[tab];
+      $("sp-sk-err").textContent = "";
+    };
+    $("sp-modal").querySelectorAll("[data-sktab]").forEach((b) => { b.onclick = () => { tab = b.dataset.sktab; paint(); }; });
+    paint();
   }
 
   // ---------- DPR (Daily Progress Report) ----------
@@ -175,6 +336,7 @@
   // Called after every projBar() render (Setup/Overall/per-service), same
   // way $("sp-proj").onchange is already re-wired at each of those 3 sites.
   async function wireProjBar() {
+    wireStock();                                         // the "Stock: … · Change" line; independent of the DPR link below
     const where = $("sp-where");
     if (!where || !S.state || !S.state.has_boq) return;   // nothing to report before setup is done
     try {
@@ -401,7 +563,7 @@
             <span id="sp-open-hint" class="sub" style="margin-left:10px;color:var(--amber)"></span></div>
         </div>
       </div>`;
-    $("sp-proj").onchange = (e) => { S.slug = e.target.value; S.service = null; loadState(); };
+    $("sp-proj").onchange = (e) => { if (isNewProj(e)) return; S.slug = e.target.value; S.service = null; loadState(); };
     wireProjBar();
     $("sp-tmpl").querySelectorAll("button").forEach((b) => b.addEventListener("click", () => {
       $("sp-tmpl").querySelectorAll("button").forEach((x) => x.classList.remove("on"));
@@ -553,7 +715,7 @@
           <div id="sp-acts"></div>
         </div>
       </div>`;
-    $("sp-proj").onchange = (e) => { S.slug = e.target.value; S.service = null; loadState(); };
+    $("sp-proj").onchange = (e) => { if (isNewProj(e)) return; S.slug = e.target.value; S.service = null; loadState(); };
     wireProjBar();
     $("sp-refresh").onclick = () => loadService();
     $("sp-linkbtn").onclick = () => openLinkModal();
@@ -788,7 +950,7 @@
         <div class="sp-secttl"><span>By service — tap to see activities, tap an activity to see items</span></div>
         <div id="sp-ovlist">${svcRows}</div>
       </div>`;
-    $("sp-proj").onchange = (e) => { S.slug = e.target.value; S.service = null; S.room = null; loadState(); };
+    $("sp-proj").onchange = (e) => { if (isNewProj(e)) return; S.slug = e.target.value; S.service = null; S.room = null; loadState(); };
     wireProjBar();
     renderPills();
     $("sp-oring").style.setProperty("--p", (o.pct_value_done || 0).toFixed(1));

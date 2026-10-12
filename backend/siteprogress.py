@@ -375,9 +375,21 @@ def _log_dpr_change(d, service, room_id, item_code, frac=None):
     _save_dpr_log(d, log)
 
 
+def _stock_slug(slug):
+    """Which stock this project reads. Its own name, as always, unless the person picked another stock for it
+    (stock.json in the project folder, written by set_stock). Nothing picked = exactly the old behaviour."""
+    own = _slugify(slug)
+    try:
+        v = (_read_json(PROJECTS / own / "stock.json", {}) or {}).get("stock")
+    except Exception:
+        v = None
+    return _slugify(v) if v else own
+
+
 def _latest_run_for(slug):
-    """Newest forecast run whose meta.project_slug == slug (read-only)."""
-    slug = _slugify(slug)
+    """Newest forecast run of the stock this project reads (read-only): the stock the person picked for it,
+    else the runs whose meta.project_slug is the project's own name."""
+    slug = _stock_slug(slug)
     best, best_created = None, ""
     if not RUNS.exists():
         return None
@@ -642,6 +654,24 @@ def _service_view(d, service, room=None):
 
 
 # ----------------------------------------------------------------- routes
+@router.get("/projects-without-stock")
+def projects_without_stock():
+    """Projects that have Site Progress data but no stock run under their own name (e.g. the stock was deleted, or
+    never uploaded). /api/projects is built from stock runs only, so these are missing from it; the Site Progress and
+    Billing project lists add them so the work stays reachable. Name = the one the project was set up with."""
+    have = set(_stock_sources())
+    out = []
+    for d in sorted(PROJECTS.iterdir()) if PROJECTS.exists() else []:
+        if not d.is_dir() or d.name in have:
+            continue
+        st = _read_json(d / "structure.json", None)
+        if not isinstance(st, dict) and not (d / "boq.parquet").exists():
+            continue
+        name = (st or {}).get("name") if isinstance(st, dict) else None
+        out.append({"slug": d.name, "project": name or d.name, "runs": 0, "latest_run": None, "latest": None})
+    return out
+
+
 @router.get("/{slug}")
 def get_state(slug: str):
     """Top-level state: structure tree, services present, per-service progress %
@@ -2337,6 +2367,87 @@ def get_links(slug: str, service: str):
     return {"service": service, "has_run": run is not None, "run": run,
             "stock_names": names, "material_units": {n: (rows.get(linkage._norm(n)) or {}).get("unit") for n in names},
             "items": out_items}
+
+
+def _stock_sources():
+    """Every stock that exists, newest first: {stock_slug: {...of its latest run}}. A stock is what the Forecast tab made
+    from one upload or one Google Sheet link; its name is the project name it was given there."""
+    by = {}
+    if not RUNS.exists():
+        return by
+    for rd in RUNS.iterdir():
+        m = rd / "meta.json"
+        if not m.exists():
+            continue
+        try:
+            meta = json.loads(m.read_text())
+        except Exception:
+            continue
+        k = meta.get("project_slug")
+        if not k:
+            continue
+        e = by.setdefault(k, {"stock": k, "name": meta.get("project") or k, "runs": 0, "created": "", "run": None, "meta": {}})
+        e["runs"] += 1
+        if meta.get("created", "") >= e["created"]:
+            e.update(created=meta.get("created", ""), run=rd, meta=meta, name=meta.get("project") or k)
+    return by
+
+
+def _stock_option(d, e):
+    """One pick-list row: what the stock is, how fresh, and how many of THIS project's links it already carries."""
+    meta, run = e["meta"], e["run"]
+    out = {"stock": e["stock"], "name": e["name"], "runs": e["runs"], "created": e["created"], "run_id": meta.get("run_id") or run.name,
+           "kind": "Google Sheet" if meta.get("source_link") else "Upload",
+           "filename": None if meta.get("source_link") else meta.get("filename"),
+           "source_link": meta.get("source_link") or None,
+           "materials": None, "links": {"saved": 0, "found": 0}}
+    try:
+        fp = run / "forecast.parquet"
+        rows = _full_run_rows_cached(str(run), fp.stat().st_mtime_ns)
+        out["materials"] = len(rows)
+        saved = found = 0
+        for _svc, per in _load_links(d).items():
+            for _code, entries in per.items():
+                for en in _norm_link_entries(entries):
+                    saved += 1
+                    found += 1 if linkage._norm(en["material"]) in rows else 0
+        out["links"] = {"saved": saved, "found": found}
+    except Exception:
+        pass
+    return out
+
+
+def _stock_view(slug):
+    d = PROJECTS / _slugify(slug)
+    own, eff = _slugify(slug), _stock_slug(slug)
+    src = _stock_sources()
+    opts = [_stock_option(d, e) for e in sorted(src.values(), key=lambda x: x["created"], reverse=True)]
+    cur = next((o for o in opts if o["stock"] == eff), None)
+    return {"project": own, "stock": eff, "chosen": eff != own, "current": cur, "options": opts}
+
+
+@router.get("/{slug}/stock")
+def get_stock(slug: str):
+    """Which stock this project reads, and every stock it could read. Read-only."""
+    return _stock_view(slug)
+
+
+@router.post("/{slug}/stock")
+def set_stock(slug: str, payload: dict):
+    """Body {stock: "<stock slug>"} (or null = back to the stock named like the project). Only which stock the project
+    READS changes: Site Progress, the BOQ, saved links and every bill stay exactly as they are. A saved link whose
+    material is not in the chosen stock simply shows as not found; nothing is re-pointed to a similar name."""
+    d = _need(slug)
+    want = payload.get("stock")
+    p = d / "stock.json"
+    if not want or _slugify(want) == _slugify(slug):
+        p.unlink(missing_ok=True)
+        return _stock_view(slug)
+    want = _slugify(want)
+    if want not in _stock_sources():
+        raise HTTPException(404, "that stock does not exist (upload a stock register or sync a Google Sheet on the Forecast tab first)")
+    p.write_text(json.dumps({"stock": want, "at": dt.datetime.now().isoformat(timespec="seconds")}))
+    return _stock_view(slug)
 
 
 @router.post("/{slug}/links")

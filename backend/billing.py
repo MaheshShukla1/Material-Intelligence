@@ -839,6 +839,8 @@ def _bill(slug, d, store, ra):
     ot = {s: zero() for s in stages}
     tot = {s: zero() for s in stages}
     wo_g, wo_other = [0.0] * len(groups), 0.0
+    removed = set(ra.get("removed") or ())              # lines the person took out of THIS draft (see remove_line)
+    gone = []
     for ln in lines:
         code = ln["item_code"]
         gi = _group_of(groups, ln)
@@ -846,6 +848,9 @@ def _bill(slug, d, store, ra):
             wo_other += ln["rate"] * ln["boq_qty"]
         else:
             wo_g[gi] += ln["rate"] * ln["boq_qty"]
+        if code in removed:                             # not billed in this draft: no quantity, no amount, not counted as "unfilled"
+            gone.append({k: ln[k] for k in ("item_code", "desc", "unit")})
+            continue
         row = {k: ln[k] for k in ("item_code", "desc", "unit", "boq_qty", "rate", "internal_ref", "src_row", "sheet")}
         row["group"] = gi
         active = False
@@ -905,6 +910,7 @@ def _bill(slug, d, store, ra):
             "lines": rows, "groups": gout, "groups_confirmed": confirmed, "other": other,
             "totals": {s: {**tot[s], "total": tot[s]["prev"] + tot[s]["this"]} for s in stages},
             "this_total": this_total, "unfilled": unfilled, "warnings": warnings, "run": run,
+            "removed": gone,
             "contract_value": sum(ln["rate"] * ln["boq_qty"] for ln in lines)}
 
 
@@ -1780,8 +1786,37 @@ def set_line(slug: str, ra_id: str, payload: dict):
         if prev + q > ln["boq_qty"] + 1e-9:
             raise HTTPException(400, f"BOQ qty is {ln['boq_qty']:g} and {prev:g} is already billed. More than that cannot be billed.")
         ov.setdefault(code, {})[stage] = {"qty": q, "reason": reason}
+        if code in (ra.get("removed") or ()):           # "+ Add line" on a line that was taken out: it is back in the draft
+            ra["removed"] = [c for c in ra["removed"] if c != code]
     _save(d, store)
     return {"ok": True}
+
+
+@router.post("/{slug}/ra/{ra_id}/line/remove")
+def remove_line(slug: str, ra_id: str, payload: dict):
+    """Body {item_code, remove?: true|false}: take a line OUT of this draft (or put it back with remove=false).
+    Only this draft changes: the BOQ, Site Progress, other RAs and invoiced RAs are not touched. A removed line has no
+    quantity, no amount and is not counted as 'unfilled'; any quantity typed for it earlier is dropped, so putting it back
+    starts clean. Typing a quantity for it with '+ Add line' also puts it back."""
+    d = sp._need(slug)
+    store = _load(d)
+    ra = _ra(store, ra_id)
+    if ra["status"] != "draft":
+        raise HTTPException(409, "A locked RA cannot be changed. Reopen it first.")
+    code = str(payload.get("item_code"))
+    if not any(l["item_code"] == code for l in _lines(d, ra["service"])):
+        raise HTTPException(400, "this line is not a billable line of this service")
+    cur = [c for c in (ra.get("removed") or []) if c != code]
+    if payload.get("remove", True):
+        cur.append(code)
+        ov = ra.get("overrides") or {}
+        ov.pop(code, None)
+    if cur:
+        ra["removed"] = cur
+    else:
+        ra.pop("removed", None)
+    _save(d, store)
+    return {"ok": True, "removed": len(cur)}
 
 
 @router.post("/{slug}/ra/{ra_id}/lock")

@@ -46,7 +46,7 @@
   // a long list of blank details, cut after n with "+N more" (the full list is in the form itself)
   const brief = (list, n) => list.length > (n || 4) + 1 ? list.slice(0, n || 4).join(", ") + ` … +${list.length - (n || 4)} more` : list.join(", ");
 
-  const B = { slug: null, projects: [], view: "home", ov: null, bill: null, raId: null, setup: null, expanded: new Set(), seq: 0, live: null };
+  const B = { slug: null, projects: [], view: "home", ov: null, pre: null, bill: null, raId: null, setup: null, expanded: new Set(), seq: 0, live: null };
   const OV = { base: null, data: null, drafts: true, all: false };      // overall annexure screen
   // a Work Order is its own billing unit "Service › Name"; a plain service is its own unit
   const WOSEP = " \u203a ";
@@ -90,8 +90,16 @@
   }
 
   // ------------------------------------------------------------------ open
+  // What is on screen from the first moment: a skeleton (never a blank page) the first time, and on every later visit the last
+  // overview we have, painted at once and then refreshed in place by showHome (the numbers are never older than a second or two).
+  function skeleton() {
+    return `<div class="bl-head"><div><h2>Billing</h2><p class="bl-sub">Loading your bills…</p></div></div>
+      <div class="bl-kpis">${[0, 1, 2].map(() => `<div class="bl-kpi bl-sk"><span></span><b></b><i></i></div>`).join("")}</div>
+      <div class="bl-card bl-svcl bl-skl" aria-hidden="true">${[0, 1, 2, 3].map(() => `<div class="bl-skr"><span></span><span></span><span></span></div>`).join("")}</div>`;
+  }
   async function open() {
     const s = section();
+    if (!s.querySelector(".bl-head") && !(B.pre && B.projects.length)) s.innerHTML = skeleton();
     let projects = [];
     try { projects = await jget("/api/projects"); } catch (e) {}
     B.projects = projects;
@@ -104,6 +112,7 @@
       B.slug = (fromF && projects.find((p) => p.slug === fromF)) ? fromF : projects[0].slug;
     }
     B.view = "home";
+    if (!B.ov && B.pre && B.pre.slug === B.slug) paintHome(B.pre.ov);          // read after the page loaded: show it now, refresh below
     await showHome();
   }
 
@@ -160,6 +169,12 @@
     B.ov = ov;
     setBadge(ov);
     startLive();
+    paintHome(ov);
+  }
+
+  function paintHome(ov) {
+    const s = section();
+    B.view = "home";
     const anySet = ov.services.some((x) => x.set);
     const drafts = ov.ras.filter((r) => r.status === "draft");
     s.innerHTML = head("Billing",
@@ -232,7 +247,9 @@
       const fromF = (typeof META !== "undefined" && META && META.project_slug);
       const slug = B.slug && ps.find((p) => p.slug === B.slug) ? B.slug : (fromF && ps.find((p) => p.slug === fromF)) ? fromF : ps[0].slug;
       if (B.view === "home" && B.ov) return;             // Billing is open: showHome keeps it current
-      setBadge(await jget(api("/" + slug)));
+      const ov = await jget(api("/" + slug));
+      B.pre = { slug, ov };                              // so the first visit to Billing can paint at once (and the server has it warm)
+      setBadge(ov);
     } catch (e) { /* the badge is only a hint */ }
   }
 

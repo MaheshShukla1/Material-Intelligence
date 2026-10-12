@@ -49,7 +49,8 @@ async function boot(ov, opts) {
     else if (/\/challans\//.test(u) && method === "GET") res = CH.ch_empty;   // a real, empty challans payload (billing_challan_fixture.json)
     else if (u === P + "/ra" && method === "POST") res = { id: "newra1", label: "HVAC · Supply RA 1" };
     else if (/\/ra\/[^/]+$/.test(u) && method === "GET") res = FX.bills[u.split("/").pop()] || FX.bills[Object.keys(FX.bills)[0]];
-    return Promise.resolve({ ok: status < 400, status, json: async () => res, text: async () => JSON.stringify(res) });
+    const reply = { ok: status < 400, status, json: async () => res, text: async () => JSON.stringify(res) };
+    return opts.delay && u === P ? new Promise((r) => setTimeout(() => r(reply), opts.delay)) : Promise.resolve(reply);   // a slow server, for the loading tests
   };
   window.eval(fs.readFileSync(path.join(__dirname, "siteprogress.js"), "utf8"));
   window.eval(fs.readFileSync(path.join(__dirname, "billing.js"), "utf8"));
@@ -158,6 +159,28 @@ async function main() {
   const nb2 = d.querySelector('.spnav button[data-v="billing"] .bl-badge');
   ok(nb2 && nb2.textContent === "2", "badge is read once after the page opens, without opening Billing: " + (nb2 && nb2.textContent));
   ok(calls.filter((c) => c.u === P).length === 1, "one overview call for it");
+
+  // ---- opening Billing is never a blank page: skeleton while a slow server answers, then the real home
+  ({ window, d, calls } = await boot(clone(base), { delay: 400 }));
+  ok(!!d.querySelector("#billing .bl-sk") && /Loading your bills/.test(T(d.getElementById("billing"))) && !d.querySelector("#billing .bl-hr"), "slow server: a skeleton is on screen at once, not a blank page");
+  ok(d.getElementById("billing").textContent.trim().length > 0, "the section is never empty");
+  await sleep(520);
+  ok(!d.querySelector("#billing .bl-sk") && d.querySelectorAll("#billing .bl-hr").length === 7, "when the server answers the skeleton is replaced by the real rows");
+  // read in the background after the page loaded: the first visit paints that at once and refreshes behind it
+  ({ window, d, calls } = await boot(clone(base), { stayAway: true, badgeMs: 20, delay: 300 }));
+  await sleep(420);                                        // the background read has finished
+  [...d.querySelectorAll(".spnav button")].find((b) => b.dataset.v === "billing").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(60);                                         // the refresh (300 ms) is still on its way
+  ok(d.querySelectorAll("#billing .bl-hr").length === 7 && !d.querySelector("#billing .bl-sk"), "first visit: the rows are on screen before the refresh answers");
+  await sleep(450);
+  ok(d.querySelectorAll("#billing .bl-hr").length === 7 && calls.filter((c) => c.u === P).length === 2, "then refreshed in place: 2 overview calls in all (background + refresh)");
+  // later visits: the screen is not wiped while the refresh runs
+  const sec2 = d.getElementById("billing");
+  [...d.querySelectorAll(".spnav button")].find((b) => b.dataset.v === "siteprogress").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  [...d.querySelectorAll(".spnav button")].find((b) => b.dataset.v === "billing").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(40);
+  ok(sec2.querySelectorAll(".bl-hr").length === 7, "coming back to the tab: the rows stay while the refresh runs");
+  await sleep(450);
 
   console.log(`billing home UI: ${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);

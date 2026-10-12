@@ -55,7 +55,9 @@ Deploy together: billing.py + boq.py (the parser now also reads Internal Ref
 No and the sheet row) + api.py (one include). siteprogress.py is only read.
 """
 import io
+import os
 import re
+import time
 import json
 import functools
 import contextvars
@@ -237,6 +239,42 @@ def _ensure_refs(d, items):
     return items
 
 
+# What Billing computes from the project's data files only (BOQ lines, installation quantities) is remembered until one of those
+# files changes, so opening Billing does not re-read and re-compute the same BOQ for every service, series and RA. The stamp is the
+# name / modified-time / size of every file in the project folder except billing.json (billing's own state, rewritten on every
+# billing action; Work Order definitions live there and are applied AFTER the remembered part). A file written in the last second is
+# not trusted yet ("racily clean": two writes inside one timestamp tick could look identical), so right after an edit it simply
+# recomputes. Same numbers as before: only the repeated work is skipped.
+_DATA_CACHE = {}
+_RACY_NS = 1_000_000_000
+
+
+def _dsig(d):
+    try:
+        files = [(e.name, e.stat().st_mtime_ns, e.stat().st_size) for e in os.scandir(d) if e.is_file() and e.name != "billing.json"]
+    except OSError:
+        return None
+    if not files or max(f[1] for f in files) > time.time_ns() - _RACY_NS:
+        return None
+    return (str(d), tuple(sorted(files)))
+
+
+def _remember(kind, d, service, make):
+    sig = _dsig(d)
+    if sig is None:
+        return make()
+    key = (kind, service, sig)
+    if key not in _DATA_CACHE:
+        value = make()
+        if len(_DATA_CACHE) > 48:
+            for k in [k for k in _DATA_CACHE if k[2] != sig]:
+                _DATA_CACHE.pop(k, None)
+            if len(_DATA_CACHE) > 48:
+                _DATA_CACHE.clear()
+        _DATA_CACHE[key] = value
+    return _DATA_CACHE[key]
+
+
 def _lines(d, service):
     """Billable BOQ lines of one billing unit (a service, or one Work Order of it)."""
     base = _base(service)
@@ -251,6 +289,11 @@ def _lines(d, service):
 
 
 def _base_lines(d, service):
+    """Billable BOQ lines of one service (a copy: callers may change their dicts)."""
+    return [dict(l) for l in _remember("lines", d, service, lambda: _base_lines_raw(d, service))]
+
+
+def _base_lines_raw(d, service):
     """Billable BOQ lines of one service, in sheet order:
     qty > 0 and a real rate. Rate-only ("RO") lines have no qty and are not
     billable; quick-added stock items are not in the contract."""
@@ -285,6 +328,16 @@ _WHATIF_ZERO = contextvars.ContextVar("bl_whatif_zero", default=None)
 
 def _install_qty(d, service):
     service = _base(service)                # Site Progress knows the service, not the Work Order
+    out = dict(_remember("inst", d, service, lambda: _install_qty_raw(d, service)))
+    wh = _WHATIF_ZERO.get()
+    if wh:                                              # activity-delete preview only: pretend these items have no work
+        for code in wh.get(service, ()):
+            if code in out:
+                out[code] = 0.0
+    return out
+
+
+def _install_qty_raw(d, service):
     items = sp._load_boq(d, service)
     if items.empty:
         return {}
@@ -292,13 +345,7 @@ def _install_qty(d, service):
     prog = sp._item_prog(d).get(service, {})
     used = itemprog.compute(items, prog, sp._item_rooms(d).get(service, {}), all_rooms,
                             sp._planned(d, service), room_qty_groups=sp._item_room_qty(d).get(service, {}))
-    out = {str(r.item_code): float(r.used or 0) for r in used.itertuples()}
-    wh = _WHATIF_ZERO.get()
-    if wh:                                              # activity-delete preview only: pretend these items have no work
-        for code in wh.get(service, ()):
-            if code in out:
-                out[code] = 0.0
-    return out
+    return {str(r.item_code): float(r.used or 0) for r in used.itertuples()}
 
 
 def _material_use_counts(d):
@@ -886,6 +933,10 @@ def _need_setup(store, service, series):
 
 def _bases(d):
     """The BOQ services (as Site Progress knows them)."""
+    return list(_remember("bases", d, None, lambda: _bases_raw(d)))
+
+
+def _bases_raw(d):
     items = sp._load_boq(d)
     if items.empty or "service" not in items.columns:
         return []

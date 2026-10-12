@@ -711,3 +711,17 @@ body[data-view="billing"] #report{display:none !important}
   .bl-resv{gap:18px}
   #bl-modal .card.bl-pbcard .mact #bl-pbback{margin-right:0}
 }
+
+/* ---------------- loading skeleton: the Billing tab is never a blank page ---------------- */
+.bl-sk span,.bl-sk b,.bl-sk i,.bl-skr span{display:block;border-radius:6px;background:linear-gradient(90deg,#efede8 25%,#f7f5f1 50%,#efede8 75%);background-size:200% 100%;animation:bl-shim 1.2s linear infinite}
+.bl-sk span{width:46%;height:10px;margin-bottom:12px}
+.bl-sk b{width:68%;height:22px;margin-bottom:10px}
+.bl-sk i{width:38%;height:10px}
+.bl-skl{padding:6px 0}
+.bl-skr{display:grid;grid-template-columns:minmax(120px,1.7fr) minmax(90px,1.4fr) 110px;gap:24px;align-items:center;padding:20px 18px;border-top:1px solid var(--line2)}
+.bl-skr:first-child{border-top:0}
+.bl-skr span{height:12px}
+.bl-skr span:last-child{height:32px;border-radius:8px}
+@keyframes bl-shim{to{background-position:-200% 0}}
+@media (prefers-reduced-motion:reduce){.bl-sk span,.bl-sk b,.bl-sk i,.bl-skr span{animation:none}}
+@media(max-width:760px){.bl-skr{grid-template-columns:1fr 90px;gap:14px}.bl-skr span:nth-child(2){display:none}}

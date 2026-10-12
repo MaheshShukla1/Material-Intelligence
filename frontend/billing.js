@@ -185,7 +185,7 @@
       "The bill builds itself: installation from Site Progress, supply from delivery challans (or the stock register), rate from your BOQ sheet.",
       `<button class="btn" id="bl-setup">Billing setup</button>
        ${ov.ras.length ? `<button class="btn" id="bl-dl">Download</button>` : ""}
-       ${ov.services.some((x) => x.supply_source === "challan") ? `<button class="btn" id="bl-imph">Import challans</button>` : ""}
+       ${uploadUnits(ov).length ? `<button class="btn" id="bl-imph" title="Filled the downloaded RA workbook? Bring it back here: typed quantities and challans in one go">Upload filled sheet</button>` : ""}
        <button class="btn primary" id="bl-new" ${anySet ? "" : "disabled"}>+ New RA bill</button>`) + `
       <div class="bl-kpis bl-snap">
         <div class="bl-kpi"><span>Contract value</span><b title="${esc(inr(ov.contract_value))}"><em class="full">${inr(ov.contract_value)}</em><em class="cmp" aria-hidden="true">${inrShort(ov.contract_value)}</em></b><i>${basesOf(ov).length} services${ov.services.length > basesOf(ov).length ? " · " + ov.services.length + " Work Orders" : ""}</i></div>
@@ -578,7 +578,7 @@
        <button class="btn" id="bl-toverall" title="${esc(ra.base || unitBase(ra.service))}: every annexure group in one view">Overall annexure</button>
        ${stages.includes("supply") && ((B.ov && B.ov.services || []).find((y) => y.service === ra.service) || {}).supply_source === "challan" ? `<button class="btn" id="bl-tochallans">Challans</button>` : ""}
        <button class="btn" id="bl-dl" title="Invoice workbook, All services Excel — tick what you need">Download</button>
-       ${!locked && stages.includes("supply") && ((B.ov && B.ov.services || []).find((y) => y.service === ra.service) || {}).supply_source === "challan" ? `<button class="btn" id="bl-impra" title="Filled the CHALLAN sheet in the downloaded Excel? Bring it back here">Import challans</button>` : ""}
+       ${!locked ? `<button class="btn" id="bl-impra" title="Filled the downloaded Excel? Bring it back here: the quantities you typed and the challans, in one go">Upload filled sheet</button>` : ""}
        ${locked ? `<button class="btn" id="bl-reopen">Reopen</button>`
         : `<button class="btn danger" id="bl-del">Delete draft</button><button class="btn primary" id="bl-lock">Mark as invoiced</button>`}`) + `
       <div class="bl-kpis">
@@ -621,7 +621,7 @@
     if ($("bl-tochallans")) $("bl-tochallans").onclick = () => showChallans(ra.service);
     if ($("bl-toverall")) $("bl-toverall").onclick = () => showOverall(ra.base || unitBase(ra.service));
     $("bl-dl").onclick = async () => { if (B.invSaving) await B.invSaving(); openDownload([ra.id]); };
-    if ($("bl-impra")) $("bl-impra").onclick = () => importChallans(ra.service, () => showRA(id));
+    if ($("bl-impra")) $("bl-impra").onclick = () => uploadFilled(ra.service, () => showRA(id), id);
     wireInvStrip(ra, id);
     s.querySelectorAll(".bl-lr").forEach((row) => row.addEventListener("click", (e) => {
       if (e.target.closest("[data-edit]") || e.target.closest("[data-rm]")) return;
@@ -1409,7 +1409,7 @@
         : "Type each delivery in once. The qty, annexure, previous / this / total and the next RA follow from it.",
       `<button class="btn" id="bl-back">← Billing</button>
        ${j.wire && j.wire.available ? `<button class="btn" id="bl-chwire">Wire → points</button>` : ""}
-       <button class="btn" id="bl-chimp">Import from Excel</button>
+       <button class="btn" id="bl-chimp">Upload filled sheet</button>
        ${hasIb ? `<span class="bl-addm"><button class="btn primary" id="bl-chadd" aria-haspopup="true" aria-expanded="false">+ Add challan ▾</button>
          <div class="bl-menu" id="bl-chmenu" hidden>
            <button id="bl-chfrom"><b>From stock register</b> <span class="bl-chip stock">${IB.data.counts.waiting} waiting</span><small>Material that arrived on site. Recommended.</small></button>
@@ -1426,7 +1426,7 @@
       ${j.challans.length ? groupsDef.filter((g) => g.list.length).map((g) => `
         <h3 class="bl-h3">${esc(g.title)} <small>${esc(g.sub)}</small></h3>
         <div class="bl-card"><div class="bl-chs">${g.list.map(row).join("")}</div></div>`).join("")
-        : `<div class="bl-card"><div class="bl-none">${hasIb ? "No challan in an RA yet. Add deliveries from the stock register above, or “Import from Excel” to bring in the challans you already have in your invoice workbook." : "No challan yet. Click “+ Add challan”, or “Import from Excel” to bring in the challans you already have in your invoice workbook."}</div></div>`}
+        : `<div class="bl-card"><div class="bl-none">${hasIb ? "No challan in an RA yet. Add deliveries from the stock register above, or “Upload filled sheet” to bring in the challans you already have in your invoice workbook." : "No challan yet. Click “+ Add challan”, or “Upload filled sheet” to bring in the challans you already have in your invoice workbook."}</div></div>`}
       ${j.stock_check.length ? `<h3 class="bl-h3">Stock register check <small>${j.stock_check.length} line(s) where the stock register and the challans disagree — information only, the bill follows the challans</small></h3>
         <div class="bl-card bl-scroll"><div class="bl-sc">
           <div class="bl-sch"><div>Line</div><div class="n">Challans</div><div class="n">Stock register</div><div class="n">Difference</div></div>
@@ -1449,7 +1449,7 @@
       if (!B.menuClose) { B.menuClose = true; document.addEventListener("click", () => { const m = $("bl-chmenu"); if (m) m.hidden = true; }); }
       drawInbox();
     } else $("bl-chadd").onclick = () => editChallan(null);
-    $("bl-chimp").onclick = () => importChallans();
+    $("bl-chimp").onclick = () => uploadFilled();
     s.querySelectorAll("[data-resync]").forEach((el) => el.onclick = async () => {
       try { await jsend(api("/" + B.slug + "/challans/" + encodeURIComponent(service) + "/" + el.dataset.resync + "/resync")); toast("Quantity taken from the stock register."); showChallans(service); }
       catch (e) { toast(briefErr(e)); }
@@ -1721,20 +1721,35 @@
     if (!c) $("bl-cno").focus();
   }
 
-  // Opens from the Challans screen, the draft RA screen and Billing home (next to Download): the service is passed in,
-  // the "already submitted?" info is loaded for it, and `done` brings the person back to the screen they started on.
-  function importChallans(service = B.svc, done = null) {
+  // "Upload filled sheet": the one way back for the downloaded RA workbook. It brings in, together, the quantities typed into
+  // the THIS BILL QTY column (Supply / Installation) and the challans of the CHALLAN sheet. Opens from the Challans screen, the
+  // draft RA screen (raId = that draft) and Billing home (next to Download): the service is passed in, the "already submitted?"
+  // info is loaded for it, and `done` brings the person back to the screen they started on.
+  const typedHtml = (all) => {
+    const t = all && all.typed;
+    if (!all) return "";
+    const off = t ? t.problems.length + t.unpaired.length : 0;
+    return `${t ? `<div class="bl-imp">
+        <div class="bl-impk"><div><span>Sheet read</span><b>${esc(t.sheet)}</b></div><div><span>Typed quantities to import</span><b>${t.changes.length}</b></div><div><span>Not imported</span><b class="${off ? "neg" : ""}">${off}</b></div></div>
+        ${t.changes.length ? `<div class="bl-lbl">Quantities you typed in the sheet (MI now → your sheet)</div><div class="bl-unm" id="bl-typed">${t.changes.slice(0, 60).map((c) => `<div><b>${esc(c.ra_label)}${c.together ? " · " + esc(c.stage_name) : ""}</b> · ${esc(c.desc.slice(0, 80))} · ${qn(c.now)} → <b>${qn(c.sheet)}</b> ${esc(c.unit)}</div>`).join("")}${t.changes.length > 60 ? `<div>… and ${t.changes.length - 60} more</div>` : ""}</div>
+          <div class="bl-hint">Each one becomes the typed quantity of that line in the draft, the same as typing it on the RA screen. If Site Progress moved after you downloaded the file, check the “MI now” numbers before importing.</div>`
+          : `<div class="bl-hint">No typed quantity found. Only a number you typed over a THIS BILL QTY cell counts; cells left as they were are ignored.</div>`}
+        ${t.problems.length ? `<div class="bl-callout">${t.problems.map(esc).join("<br>")}</div>` : ""}
+        ${t.unpaired.length ? `<div class="bl-lbl">Not paired with a BOQ line (not imported — type these on the RA screen)</div><div class="bl-unm">${t.unpaired.slice(0, 40).map((u) => `<div><b>${esc(u.ra)}</b> · ${qn(u.qty)} · ${esc(u.desc.slice(0, 100))}</div>`).join("")}</div>` : ""}
+      </div>` : ""}${all.challan_note ? `<div class="bl-callout">${esc(all.challan_note)}</div>` : ""}`;
+  };
+  function uploadFilled(service = B.svc, done = null, raId = "") {
     let file = null, lock = 0, last = null, info = B.ch && B.svc === service ? B.ch : null;
     const view = () => {
       const mb = $("bl-modal").querySelector(".bl-mbody");
-      const r = last;
+      const r = last && last.challans;
       if (!$("bl-file")) {
-        mb.innerHTML = `<p class="bl-hint">Choose the invoice workbook (or its CHALLAN sheet). MI reads the challan columns — number, date, RA tag and the quantity against each line — and pairs every row with a BOQ line. Nothing is saved until you press Import.</p>
+        mb.innerHTML = `<p class="bl-hint">Choose the RA workbook you downloaded from Billing, after filling it in. MI reads two things: the quantities you typed in the THIS BILL QTY column (Supply and Installation), and the challan columns of its CHALLAN sheet — number, date, RA tag and the quantity against each line. Every row is paired with a BOQ line by its exact description and unit. Nothing is saved until you press Import.</p>
           <input id="bl-file" type="file" accept=".xlsx,.xlsm" class="ctl"><div id="bl-impres"></div>`;
         $("bl-file").onchange = async () => { file = $("bl-file").files[0] || null; lock = 0; if (file) await check(false); };
       }
-      $("bl-impres").innerHTML = `${r ? `<div class="bl-imp">
-          <div class="bl-impk"><div><span>Sheet read</span><b>${esc(r.sheet)}</b></div><div><span>Challans to import</span><b>${r.new}</b></div><div><span>Already in MI</span><b>${r.skipped_duplicate}</b></div><div><span>Rows not paired</span><b class="${r.unmatched.length ? "neg" : ""}">${r.unmatched.length}</b></div></div>
+      $("bl-impres").innerHTML = `${typedHtml(last)}${r ? `<div class="bl-imp">
+          <div class="bl-impk"><div><span>Challan sheet read</span><b>${esc(r.sheet)}</b></div><div><span>Challans to import</span><b>${r.new}</b></div><div><span>Already in MI</span><b>${r.skipped_duplicate}</b></div><div><span>Rows not paired</span><b class="${r.unmatched.length ? "neg" : ""}">${r.unmatched.length}</b></div></div>
           ${r.by_ra.length ? `<div class="bl-lbl">What these challans come to${r.pct == null ? "" : " at " + r.pct + "%"} — compare with your submitted bill</div>
             ${r.by_ra.map((x) => `<div class="bl-erow"><span>${raL(x.ra)} · ${x.lines} lines</span><b>${x.value == null ? "set the Supply % first" : inr(x.value, true)}</b></div>`).join("")}` : ""}
           ${r.over_boq.length ? `<div class="bl-callout">${r.over_boq.length} line(s) have more challan qty than the BOQ qty (e.g. ${esc(r.over_boq[0].desc.slice(0, 60))}: ${qn(r.over_boq[0].challan)} vs ${qn(r.over_boq[0].boq_qty)}). A bill is capped at the BOQ qty.</div>` : ""}
@@ -1750,31 +1765,40 @@
     };
     const check = async (commit) => {
       if (!file) { toast("Choose a file first."); return null; }
-      const fd = new FormData(); fd.append("file", file); fd.append("commit", commit ? "true" : "false"); fd.append("lock_upto", String(lock));
-      const res = await fetch(api("/" + B.slug + "/challans/" + encodeURIComponent(service) + "/import"), { method: "POST", body: fd });
+      const fd = new FormData(); fd.append("file", file); fd.append("commit", commit ? "true" : "false"); fd.append("lock_upto", String(lock)); fd.append("ra_id", raId || "");
+      const res = await fetch(api("/" + B.slug + "/import-sheet/" + encodeURIComponent(service)), { method: "POST", body: fd });
       if (!res.ok) { const t = await res.text(); try { toast(JSON.parse(t).detail || t); } catch (_) { toast(t); } return null; }
       const r = await res.json();
       if (!commit) { last = r; view(); }
       return r;
     };
-    modal("Import challans from Excel", "One-time or any time: re-importing the same file adds nothing twice.", "", [
+    modal("Upload filled sheet", "One-time or any time: uploading the same file again adds nothing twice.", "", [
       { label: "Cancel", run: closeModal },
       { label: "Import", cls: "primary", id: "bl-doimp", run: async () => {
-        if (!last || !last.new) { toast("Check a file with new challans first."); return; }
+        const nCh = last && last.challans ? last.challans.new : 0, nTy = last && last.typed ? last.typed.changes.length : 0;
+        if (!last || !(nCh || nTy)) { toast("Choose a file with new challans or typed quantities first."); return; }
         const r = await check(true); if (!r) return;
-        closeModal(); toast(r.new + " challan" + (r.new === 1 ? "" : "s") + " imported."); done ? done() : showChallans(service);
+        const bits = [];
+        if (r.challans && r.challans.new) bits.push(r.challans.new + " challan" + (r.challans.new === 1 ? "" : "s"));
+        if (r.applied) bits.push(r.applied + " typed quantit" + (r.applied === 1 ? "y" : "ies"));
+        closeModal(); toast(bits.join(" and ") + " imported."); done ? done() : showChallans(service);
       } }], "min(760px,96vw)");
     view();
     if (!info) jget(api("/" + B.slug + "/challans/" + encodeURIComponent(service))).then((j) => { info = j; if (last) view(); }).catch(() => {});
   }
 
-  // Billing home: one button next to Download. One challan-billed unit -> straight to the file picker; several -> pick the unit first.
+  // Billing home: one button next to Download. A unit is eligible when it is billed from challans or has an open draft RA
+  // (typed quantities go into a draft). One eligible unit -> straight to the file picker; several -> pick the unit first.
+  const uploadUnits = (ov) => {
+    const drafts = new Set((ov.ras || []).filter((r) => r.status === "draft").map((r) => r.service));
+    return (ov.services || []).filter((x) => x.supply_source === "challan" || drafts.has(x.service));
+  };
   function importFromHome() {
-    const us = (B.ov ? B.ov.services : []).filter((x) => x.supply_source === "challan");
-    if (!us.length) { toast("No service is billed from delivery challans."); return; }
-    const go = (u) => importChallans(u, showHome);
+    const us = uploadUnits(B.ov || { services: [], ras: [] });
+    if (!us.length) { toast("Nothing to upload into yet: no draft RA and no service billed from challans."); return; }
+    const go = (u) => uploadFilled(u, showHome);
     if (us.length === 1) return go(us[0].service);
-    modal("Import challans", "Which service is this Excel for?", `<div class="bl-pick">${us.map((x) => `<button class="btn bl-pickb" data-u="${esc(x.service)}">${esc(x.service)}</button>`).join("")}</div>`,
+    modal("Upload filled sheet", "Which service is this Excel for?", `<div class="bl-pick">${us.map((x) => `<button class="btn bl-pickb" data-u="${esc(x.service)}">${esc(x.service)}</button>`).join("")}</div>`,
       [{ label: "Cancel", run: closeModal }]);
     $("bl-modal").querySelectorAll("[data-u]").forEach((b) => { b.onclick = () => { closeModal(); go(b.dataset.u); }; });
   }

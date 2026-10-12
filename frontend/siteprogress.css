@@ -568,3 +568,6 @@ body[data-view="inventory"] #leadwrap{display:none !important}
 .sp-stock a{color:var(--violet,#5b3fd1);text-decoration:underline;cursor:pointer}
 .sp-badge{display:inline-block;padding:1px 8px;border-radius:20px;font-size:11.5px;font-weight:600;background:#efeee9;color:#55544f}
 @media (max-width:640px){.sp-crumb{flex-wrap:wrap}.sp-stock{flex-basis:100%}.sp-stockopt{padding:14px 4px !important}}
+
+/* amber count on the toolbar's Link stock (saved links with no material in the connected stock) */
+.sp-amb{display:inline-block;min-width:16px;padding:0 6px;border-radius:20px;background:var(--amberbg,#fbf1da);color:var(--amber,#6e4205);font-size:11px;font-weight:600;line-height:16px;text-align:center;text-decoration:none}

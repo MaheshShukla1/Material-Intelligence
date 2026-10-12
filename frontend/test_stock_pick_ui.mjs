@@ -40,6 +40,7 @@ function route(url, o) {
   if (p === "/api/siteprogress/thoth-mall/service/Electrical") return svcState();
   if (p === "/api/siteprogress/thoth-mall/pnl/Electrical") return { service: "Electrical", room: null, project: { done_value: 0, remaining_value: 0, pct_value_done: 1 }, by_activity: {}, waste: { available: false }, rated_items: 0, total_items: 0, unmapped_value: { items: 0 } };
   if (p === "/api/siteprogress/thoth-mall/realistic/Electrical") return { service: "Electrical", has_run: !!server.chosen, items: [] };
+  if (p === "/api/siteprogress/thoth-mall/links/Electrical") return { service: "Electrical", has_run: !!server.chosen, stock_names: [], material_units: {}, items: [] };
   if (p === "/api/siteprogress/thoth-mall/dpr/today") return { count: 0 };
   throw new Error("unmocked route: " + p);
 }
@@ -63,12 +64,13 @@ async function main() {
   ok([...document.querySelectorAll("#sp-proj option")].map((o) => o.value).join() === "thoth-mall,__new__", "Thoth Mall is in the project dropdown");
   ok(!/No project yet/.test(T(document.getElementById("siteprogress"))), "no 'No project yet' message");
   // 2. stock line: not connected, with a way to connect
-  ok(/Stock:\s*not connected/.test(T(document.getElementById("sp-stock"))), "says Stock: not connected -> " + T(document.getElementById("sp-stock")));
-  ok(T(document.getElementById("sp-stock-change")) === "Connect stock", "link reads Connect stock");
+  ok(!document.getElementById("sp-stock") && !/Stock:/.test(T(document.getElementById("siteprogress"))), "no stock line on the top bar");
+  ok(T(document.getElementById("sp-linkbtn")) === "Connect stock", "toolbar word reads Connect stock when none is connected -> " + T(document.getElementById("sp-linkbtn")));
+  ok(!document.getElementById("sp-linklost"), "no amber count without a stock");
   // 3. picker lists both stocks with kind / materials / links found
-  document.getElementById("sp-stock-change").click(); await flush(3);
+  document.getElementById("sp-linkbtn").click(); await flush(5);
   const m = document.getElementById("sp-modal");
-  ok(m, "picker opens");
+  ok(m, "Connect stock opens the picker (no dead-end toast)");
   const t = T(m);
   ok(/Live Sheet 4F2A/.test(t) && /Google Sheet/.test(t) && /1204 materials/.test(t) && /142 of 148 saved links found/.test(t), "sheet row: name, kind, materials, links found -> " + t);
   ok(/Hyatt stock/.test(t) && /Upload/.test(t) && /stock_aug\.xlsx/.test(t) && /0 of 148 saved links found/.test(t), "upload row: name, kind, filename, links found");
@@ -83,10 +85,14 @@ async function main() {
   ok(JSON.stringify(server.posts) === JSON.stringify([{ stock: "live-sheet-4f2a" }]), "POSTs exactly {stock: live-sheet-4f2a}");
   ok(!document.getElementById("sp-modal"), "modal closes");
   ok(server.loads > before, "project re-read after the pick");
-  ok(/Stock:\s*Live Sheet 4F2A · Google Sheet/.test(T(document.getElementById("sp-stock"))), "line now names the sheet -> " + T(document.getElementById("sp-stock")));
-  ok(T(document.getElementById("sp-stock-change")) === "Change", "link reads Change");
-  // 6. reopening: current is checked and marked, a way back to the default is offered
-  document.getElementById("sp-stock-change").click(); await flush(3);
+  ok(!document.getElementById("sp-stock"), "bar still has no stock line");
+  ok(/^Link stock\s*6$/.test(T(document.getElementById("sp-linkbtn"))) && T(document.getElementById("sp-linklost")) === "6", "toolbar reads Link stock + amber 6 (148 saved, 142 found) -> " + T(document.getElementById("sp-linkbtn")));
+  // 6. Link stock now shows where the stock comes from; Change stock… reopens the picker: current is checked and marked
+  document.getElementById("sp-linkbtn").click(); await flush(10);
+  const src = document.getElementById("sp-lk-src");
+  ok(src && /Reading from\s*Live Sheet 4F2A · Google Sheet · read 2026-10-12 10:05 · 1204 materials/.test(T(src)) && /6 saved links have no material in this stock\. They stay saved\./.test(T(src)), "Link stock dialog names the stock + the lost links -> " + T(src));
+  ok(!document.getElementById("sp-lk-resync"), "no Re-sync for a stock without a sheet link");
+  document.getElementById("sp-lk-change").click(); await flush(5);
   const m2 = document.getElementById("sp-modal");
   ok(m2.querySelector('input[value="live-sheet-4f2a"]').checked, "current stock pre-selected");
   ok(/in use/.test(T(m2)), "current stock marked in use");
@@ -94,7 +100,7 @@ async function main() {
   m2.querySelector('input[value=""]').checked = true;
   document.getElementById("sp-modal-save").click(); await flush(30);
   ok(server.posts[1].stock === null, "back-to-default posts stock:null");
-  ok(/not connected/.test(T(document.getElementById("sp-stock"))), "line back to not connected");
+  ok(T(document.getElementById("sp-linkbtn")) === "Connect stock" && !document.getElementById("sp-linklost"), "toolbar back to Connect stock");
   // 7. the stock endpoint failing must not break the page
   server.stockFails = true;
   document.querySelector("#sp-proj").dispatchEvent(new window.Event("change")); await flush(30);

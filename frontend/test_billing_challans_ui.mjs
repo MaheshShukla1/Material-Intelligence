@@ -51,9 +51,10 @@ async function boot(over) {
     else if (u === P) res = state.ov;
     else if (u === P + "/setup" && method === "GET") res = state.setup;
     else if (u === P + "/setup") res = { ok: true };
-    else if (u === P + "/challans/HVAC/import") {
-      res = form.lock_upto !== "0" ? clone(FX.preview_lock) : clone(state.preview);
-      if (form.commit === "true") res.committed = true;
+    else if (u === P + "/import-sheet/HVAC") {
+      const ch = form.lock_upto !== "0" ? clone(FX.preview_lock) : clone(state.preview);
+      if (form.commit === "true") ch.committed = true;
+      res = { challans: ch, challan_note: null, typed: state.typed || null, committed: form.commit === "true", applied: state.typed ? state.typed.changes.length : 0 };
     }
     else if (u === P + "/challans/HVAC" && method === "GET") res = state.ch;
     else if (u === P + "/challans/HVAC" && method === "POST") {
@@ -161,7 +162,7 @@ async function main() {
   const f = d.getElementById("bl-file");
   Object.defineProperty(f, "files", { value: [new window.File(["x"], "HVAC_MAIN_INVOICE_SHEET.xlsx")], configurable: true });
   change(window, f); await sleep(60);
-  const pv = calls.find((c) => /import$/.test(c.u));
+  const pv = calls.find((c) => /import-sheet\/HVAC$/.test(c.u));
   ok(pv && pv.form.commit === "false" && pv.form.lock_upto === "0" && pv.form.file && pv.form.file.name === "HVAC_MAIN_INVOICE_SHEET.xlsx", "choosing a file sends a PREVIEW (commit=false) and saves nothing");
   const m = d.getElementById("bl-modal").textContent;
   ok(/Challanstoimport12/.test(m.replace(/\s+/g, "")) && /Rowsnotpaired0/.test(m.replace(/\s+/g, "")), "preview shows 12 challans to import, 0 rows not paired");
@@ -170,9 +171,9 @@ async function main() {
   const lock = d.getElementById("bl-lock");
   ok(!!lock && [...lock.options].map((o) => o.value).join() === "0,1", "an 'already submitted' choice is offered for RA-01");
   lock.value = "1"; change(window, lock); await sleep(60);
-  ok(calls.filter((c) => /import$/.test(c.u)).pop().form.lock_upto === "1" && /RA-01: ₹/.test(d.getElementById("bl-modal").textContent), "choosing it re-checks with lock_upto=1 and shows the opening RA total");
+  ok(calls.filter((c) => /import-sheet\/HVAC$/.test(c.u)).pop().form.lock_upto === "1" && /RA-01: ₹/.test(d.getElementById("bl-modal").textContent), "choosing it re-checks with lock_upto=1 and shows the opening RA total");
   click(window, [...d.querySelectorAll("#bl-modal .mact .btn")].find((b) => b.textContent === "Import")); await sleep(80);
-  const cm = calls.filter((c) => /import$/.test(c.u)).pop();
+  const cm = calls.filter((c) => /import-sheet\/HVAC$/.test(c.u)).pop();
   ok(cm.form.commit === "true" && cm.form.lock_upto === "1", "Import commits with lock_upto=1");
 
   // ---- RA bill screen: invoice workbook link, challans source, jump to challans
@@ -188,9 +189,9 @@ async function main() {
 
   // ---- import from Billing home and from the draft RA screen (next to Download), not only inside Challans
   ({ window, d, calls } = await boot());
-  ok(!!d.getElementById("bl-imph") && d.getElementById("bl-imph").previousElementSibling === d.getElementById("bl-dl"), "Billing home: 'Import challans' sits right next to Download");
+  ok(!!d.getElementById("bl-imph") && d.getElementById("bl-imph").previousElementSibling === d.getElementById("bl-dl"), "Billing home: 'Upload filled sheet' sits right next to Download");
   click(window, d.getElementById("bl-imph")); await sleep(80);
-  ok(!!d.getElementById("bl-file") && /Import challans from Excel/.test(d.getElementById("bl-modal").textContent), "one challan-billed service -> straight to the file picker, no extra question");
+  ok(!!d.getElementById("bl-file") && /Upload filled sheet/.test(d.getElementById("bl-modal").textContent), "one challan-billed service -> straight to the file picker, no extra question");
   ok(calls.some((c) => c.u === "/api/billing/thoth-mall/challans/HVAC" && c.method === "GET"), "the service's own 'already submitted?' info is loaded (not borrowed from another screen)");
   const fh = d.getElementById("bl-file");
   Object.defineProperty(fh, "files", { value: [new window.File(["x"], "HVAC_MAIN_INVOICE_SHEET.xlsx")], configurable: true });
@@ -198,10 +199,13 @@ async function main() {
   ok(!!d.getElementById("bl-lock") && [...d.getElementById("bl-lock").options].map((o) => o.value).join() === "0,1", "opened from Billing home it still offers the 'RA-01 already submitted' choice");
   const nRa0 = calls.length;
   click(window, [...d.querySelectorAll("#bl-modal .mact .btn")].find((b) => b.textContent === "Import")); await sleep(120);
-  ok(calls.slice(nRa0).some((c) => /import$/.test(c.u) && c.form.commit === "true"), "Import from Billing home commits");
+  ok(calls.slice(nRa0).some((c) => /import-sheet\/HVAC$/.test(c.u) && c.form.commit === "true"), "Import from Billing home commits");
   ok(!!d.getElementById("bl-new") && !/Challans · HVAC/.test(txt(d, "#billing h2")), "after importing you land back on Billing home, not inside Challans");
   ({ window, d, calls } = await boot({ ov: Object.assign(clone(FX.ov_open), { services: clone(FX.ov_open.services).map((x) => ({ ...x, supply_source: "stock" })) }) }));
-  ok(!d.getElementById("bl-imph"), "no challan-billed service -> the button is not shown at all");
+  ok(!!d.getElementById("bl-imph") && /Upload filled sheet/.test(d.getElementById("bl-imph").textContent), "stock-register services with open drafts still get the button: typed quantities go into a draft");
+  { const ov0 = clone(FX.ov_open); ov0.services.forEach((x) => { x.supply_source = "stock"; }); ov0.ras = ov0.ras.filter((r) => r.status !== "draft");
+    ({ window, d, calls } = await boot({ ov: ov0 }));
+    ok(!d.getElementById("bl-imph"), "no challan-billed service and no open draft -> nothing to upload into, so no button"); }
   { const ov2 = clone(FX.ov_open); ov2.services.find((x) => x.service === "Fire").supply_source = "challan";
     ({ window, d, calls } = await boot({ ov: ov2 }));
     click(window, d.getElementById("bl-imph")); await sleep(40);
@@ -212,7 +216,7 @@ async function main() {
   ({ window, d, calls } = await boot());
   click(window, d.querySelector(".bl-rar")); await sleep(80);
   const ir = d.getElementById("bl-impra");
-  ok(ir && ir.previousElementSibling === d.getElementById("bl-dl"), "draft RA screen: 'Import challans' sits right next to Download");
+  ok(ir && ir.previousElementSibling === d.getElementById("bl-dl"), "draft RA screen: 'Upload filled sheet' sits right next to Download");
   click(window, ir); await sleep(80);
   ok(!!d.getElementById("bl-file"), "RA screen button opens the file picker");
   const fr = d.getElementById("bl-file");
@@ -224,6 +228,42 @@ async function main() {
     ({ window, d, calls } = await boot({ bill: b2 }));
     click(window, d.querySelector(".bl-rar")); await sleep(80);
     ok(!d.getElementById("bl-impra"), "an invoiced RA has no import button (it is frozen)"); }
+
+  // ---- typed quantities in the same upload (THIS BILL QTY column of the downloaded RA workbook)
+  { const typed = { sheet: "Annexure B-BOQ", problems: ["GI pipe 100mm: BOQ qty is 100 and 0 is already billed, so 130 cannot be billed; skipped."],
+      unpaired: [{ ra: "RA-01 Supply", row: 12, desc: "Some other pipe", qty: 33 }],
+      changes: [{ ra: FX.raid, ra_label: "HVAC · Supply RA 1", stage: "supply", stage_name: "Supply", item_code: "3", desc: "GI pipe 100mm", unit: "Rmt", now: 20, sheet: 35 },
+                { ra: FX.raid, ra_label: "HVAC · Supply RA 1", together: true, stage: "install", stage_name: "Installation", item_code: "2", desc: "Butterfly valve 150mm", unit: "Nos", now: 2, sheet: 3 }] };
+    ({ window, d, calls } = await boot({ typed }));
+    click(window, d.querySelector(".bl-rar")); await sleep(80);
+    click(window, d.getElementById("bl-impra")); await sleep(60);
+    ok(/Upload filled sheet/.test(d.querySelector("#bl-modal h3, #bl-modal .mhead, #bl-modal").textContent) && !/Import challans/.test(d.getElementById("bl-modal").textContent), "RA screen: the dialog is called Upload filled sheet, no 'Import challans' left");
+    const fx = d.getElementById("bl-file");
+    Object.defineProperty(fx, "files", { value: [new window.File(["x"], "RA1_filled.xlsx")], configurable: true });
+    change(window, fx); await sleep(80);
+    const pv2 = calls.filter((c) => /import-sheet\/HVAC$/.test(c.u)).pop();
+    ok(pv2.form.commit === "false" && pv2.form.ra_id === FX.raid, "opened from a draft RA, the upload names that RA (ra_id) and is a PREVIEW");
+    const tm = d.getElementById("bl-modal").textContent.replace(/\s+/g, " ");
+    ok(/Typed quantities to import\s*2/.test(tm) && /Not imported\s*2/.test(tm), "preview counts 2 typed quantities and 2 not imported");
+    ok(/HVAC · Supply RA 1 · GI pipe 100mm · 20 → 35 Rmt/.test(tm) && /HVAC · Supply RA 1 · Installation · Butterfly valve 150mm · 2 → 3 Nos/.test(tm), "each typed quantity is listed as MI now → your sheet; the stage is named only inside a Supply + Installation RA");
+    ok(/BOQ qty is 100/.test(tm) && /Some other pipe/.test(tm), "refused and unpaired lines are named, not hidden");
+    ok(/Challans to import/.test(tm), "the challans of the same file are still read in the same preview");
+    click(window, [...d.querySelectorAll("#bl-modal .mact .btn")].find((b) => b.textContent === "Import")); await sleep(100);
+    ok(calls.filter((c) => /import-sheet\/HVAC$/.test(c.u)).pop().form.commit === "true", "Import commits once");
+    // only typed quantities, no challan sheet at all (an Installation RA download): Import must be enabled
+    const typedOnly = { challans: null, challan_note: null, typed, committed: false, applied: 0 };
+    ({ window, d, calls } = await boot({ typed }));
+    const f0 = window.fetch;
+    window.fetch = (u, o) => (/import-sheet\/HVAC$/.test(String(u)) && !(o.body.get("commit") === "true") ? Promise.resolve({ ok: true, status: 200, json: async () => typedOnly, text: async () => JSON.stringify(typedOnly) }) : f0(u, o));
+    click(window, d.querySelector(".bl-rar")); await sleep(80);
+    click(window, d.getElementById("bl-impra")); await sleep(60);
+    const f2 = d.getElementById("bl-file");
+    Object.defineProperty(f2, "files", { value: [new window.File(["x"], "RA1_install.xlsx")], configurable: true });
+    change(window, f2); await sleep(80);
+    const t2 = d.getElementById("bl-modal").textContent.replace(/\s+/g, " ");
+    ok(/Typed quantities to import\s*2/.test(t2) && !/Challans to import/.test(t2), "a file with no challan sheet shows only the typed quantities");
+    click(window, [...d.querySelectorAll("#bl-modal .mact .btn")].find((b) => b.textContent === "Import")); await sleep(100);
+    ok(calls.filter((c) => /import-sheet\/HVAC$/.test(c.u) && c.form && c.form.commit === "true").length === 1, "typed-only file can be imported (button is not blocked by 'no new challans')"); }
 
   // ---- setup: supply source
   ({ window, d, calls } = await boot());

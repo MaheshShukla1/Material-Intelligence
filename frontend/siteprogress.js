@@ -171,27 +171,38 @@
   function projBar() {
     return `<div class="sp-crumb" style="display:flex;gap:10px;align-items:center;margin-bottom:14px">
       <select id="sp-proj" class="ctl">${S.projects.map((p) => `<option value="${esc(p.slug)}" ${p.slug === S.slug ? "selected" : ""}>${esc(p.project)}</option>`).join("")}<option value="${NEWPROJ}">+ New project…</option></select>
-      <span id="sp-stock" class="sp-stock" style="color:var(--ink3)"></span>
       <span id="sp-where" style="color:var(--ink3);cursor:default"></span></div>`;
   }
 
   // ---------- Stock: which uploaded / Google-Sheet stock this project reads ----------
   // The Forecast tab makes stocks (one per upload or Google Sheet link). A project reads the stock named like itself
   // unless one is picked here. Picking changes ONLY which stock is read: BOQ, progress, saved links and bills are not touched.
+  const getStockView = async () => { try { const d = await jget(api("/" + S.slug + "/stock")); return d && Array.isArray(d.options) ? d : null; } catch (e) { return null; } };
+  const readTime = (c) => (c ? String(c).slice(0, 16).replace("T", " ") : "");
+  // Stock is not shown on the top bar. The one door to it is the toolbar's "Link stock": when no stock is connected the word
+  // becomes "Connect stock"; when some saved links have no material in the connected stock, a small amber count shows.
   async function wireStock() {
-    const el = $("sp-stock");
-    if (!el) return;
-    let d; try { d = await jget(api("/" + S.slug + "/stock")); } catch (e) { return; }
-    if (!d || !Array.isArray(d.options)) return;
+    const d = await getStockView();
+    S.stockView = d;
+    const b = $("sp-linkbtn");
+    if (!b || !d) return;
     const cur = d.current;
-    const when = (c) => (c ? String(c).slice(0, 16).replace("T", " ") : "");
-    el.innerHTML = cur
-      ? `Stock: <b>${esc(cur.name)}</b> · ${esc(cur.kind)}${cur.filename ? " · " + esc(cur.filename) : ""}${cur.created ? " · " + esc(when(cur.created)) : ""} · <a href="#" id="sp-stock-change">Change</a>${cur.source_link ? ` · <a href="#" id="sp-stock-resync">Re-sync</a>` : ""}`
-      : `Stock: <b>not connected</b> · <a href="#" id="sp-stock-change">Connect stock</a>`;
-    $("sp-stock-change").onclick = (e) => { e.preventDefault(); openStockPicker(d); };
-    if ($("sp-stock-resync")) $("sp-stock-resync").onclick = (e) => { e.preventDefault(); resyncStock(cur); };
+    if (!cur) { b.textContent = "Connect stock"; b.title = "No stock is connected. Connect a Google Sheet or a stock file; Site Progress works without it."; return; }
+    const l = cur.links || {};
+    const lost = (l.saved || 0) - (l.found || 0);
+    b.textContent = "Link stock";
+    if (lost > 0) {
+      const n = document.createElement("span");
+      n.className = "sp-amb"; n.textContent = String(lost); n.id = "sp-linklost";
+      n.title = `${lost} saved link${lost === 1 ? " has" : "s have"} no material in this stock. They stay saved.`;
+      b.appendChild(document.createTextNode(" ")); b.appendChild(n);
+    }
   }
-
+  // Used by Link stock / + Add item when there is nothing to read from: open the connect dialog right here.
+  async function openConnectStock() {
+    const d = await getStockView();
+    if (d) openStockPicker(d); else toast("Could not read the stock list. Try again.");
+  }
   // ---------- new project (no stock needed) ----------
   // Same slug rule as the server (siteprogress._slugify / api.safe_slug), so a stock later connected under this name lands on this project.
   const slugOf = (n) => (String(n || "").trim().replace(/[^A-Za-z0-9]+/g, "-").replace(/^-+|-+$/g, "").toLowerCase() || "untitled");
@@ -213,7 +224,7 @@
     sp.innerHTML = `${have ? projBar() : ""}
       <div class="sp-setup">
         <h2>Set up Site Progress</h2>
-        <p class="sub">Three quick steps, once per project. Stock is optional: connect it any time from the Stock line at the top.</p>
+        <p class="sub">Three quick steps, once per project. Stock is optional: connect it any time from Link stock inside Site Progress.</p>
         <div class="sp-step" id="sp-np-box">
           <h3>Project name</h3>
           <div class="body" style="margin-left:0;margin-top:10px"><input id="sp-np-name" class="ctl" placeholder="e.g. Thoth Mall" style="min-width:240px" autocomplete="off">
@@ -718,7 +729,7 @@
     $("sp-proj").onchange = (e) => { if (isNewProj(e)) return; S.slug = e.target.value; S.service = null; loadState(); };
     wireProjBar();
     $("sp-refresh").onclick = () => loadService();
-    $("sp-linkbtn").onclick = () => openLinkModal();
+    $("sp-linkbtn").onclick = () => ((S.stockView && !S.stockView.current) ? openConnectStock() : openLinkModal());
     $("sp-rates").onclick = () => openRatesModal();
     $("sp-newact").onclick = () => newActivity();
     $("sp-reboq").onclick = () => $("sp-reboq-file").click();
@@ -1162,6 +1173,7 @@
     $("sp-acts").querySelectorAll("[data-linkedit]").forEach((b) => b.addEventListener("click", () => editItemLink(b.dataset.linkedit)));
     $("sp-acts").querySelectorAll("[data-roomsedit]").forEach((b) => b.addEventListener("click", () => openRoomsModal(b.dataset.roomsedit)));
     $("sp-acts").querySelectorAll("[data-histedit]").forEach((b) => b.addEventListener("click", () => openShortageHistoryPopover(b.dataset.histedit)));
+    $("sp-acts").querySelectorAll("[data-overundo]").forEach((b) => b.addEventListener("click", () => backToBoq(b.dataset.overundo)));
     $("sp-acts").querySelectorAll("[data-removeitem]").forEach((b) => b.addEventListener("click", () => removeItemFromActivity(b.dataset.removeitem, b.dataset.removeact)));
     $("sp-acts").querySelectorAll("[data-fx]").forEach((b) => b.addEventListener("click", () => openDrawer(b.dataset.fx)));
   }
@@ -1193,6 +1205,13 @@
     return `<button class="sp-linkchip ${cls}" data-histedit="${esc(code)}" title="${h.episodes} shortage ${h.episodes === 1 ? "event" : "events"} tracked for this item, automatically">🕘 ${esc(label)}</button>`;
   }
 
+  // Work recorded above the BOQ quantity: amber tag + one link back. Not for items added from stock (they have no BOQ quantity).
+  function overBoq(it) {
+    if (S.room || it.quick || !(it.boq_planned > 0)) return "";
+    const ex = (it.used || 0) - it.boq_planned;
+    if (!(ex > 0.005)) return "";
+    return `<span class="sp-tag rev" data-over="${esc(it.code)}" title="Planned moved to ${esc(qf(it.planned, it.unit))} to match. The BOQ quantity is ${esc(qf(it.boq_planned, it.unit))}. Billing still bills up to the BOQ quantity only.">Over BOQ +${esc(qf(ex, it.unit))} ${esc(it.unit)}</span><button class="sp-linkchip" data-overundo="${esc(it.code)}">Back to BOQ qty</button>`;
+  }
   function rowHTML(it, activity) {
     const rl = realOf(it.code); const alert = rl && rl.verdict === "SHORTAGE";
     const links = rl && rl.links ? rl.links : [];
@@ -1214,6 +1233,7 @@
       <div class="sp-bname"><span class="code">${esc(it.code)}</span>${esc(short(it.desc))}
         <div class="sp-bmeta"><span class="sp-tag">${esc(it.sub)}</span>${cons}${roomBadge}
           ${it.quick ? `<span class="sp-tag" title="added straight from the stock register, not the BOQ file">from stock</span>` : ""}
+          ${overBoq(it)}
           ${alert ? `<span class="sp-tag rev">shortage</span>` : ""}
           <button class="sp-linkchip ${linked ? "on" : ""}" data-linkedit="${esc(it.code)}">${linked ? "🔗 linked · edit" : "＋ link stock"}</button>
           ${S.room ? "" : `<button class="sp-linkchip" data-roomsedit="${esc(it.code)}">🏠 ${esc(roomsChipLabel(it.code))}</button>`}
@@ -1747,6 +1767,21 @@
       await loadService();
     } catch (e) { toast("Save failed: " + briefErr(e)); }
   }
+  async function saveQty(code, qty) {
+    try {
+      await jpost(api("/" + S.slug + "/progress/item-qty"), { service: S.service, item_code: code, qty });
+      flashSaved(code);
+      await loadService();
+    } catch (e) { toast("Save failed: " + briefErr(e)); }
+  }
+  // "Back to BOQ qty": the server puts the planned figure back exactly as it was before the raise and sits the item at 100% of it.
+  async function backToBoq(code) {
+    try {
+      await jpost(api("/" + S.slug + "/progress/item-qty/undo"), { service: S.service, item_code: code });
+      toast("Back to the BOQ quantity.");
+      await loadService();
+    } catch (e) { toast("Failed: " + briefErr(e)); }
+  }
   // the only control for setting an item's progress: type the real
   // installed quantity, in the item's own unit -- % is derived from this.
   // A drag-slider ("quick, rough") used to sit alongside this as a
@@ -1759,9 +1794,13 @@
       const it = S._byCode[code]; if (!it) return;
       let v = Number(inp.value);
       if (isNaN(v) || v < 0) v = 0;
-      if (it.planned > 0 && v > it.planned) v = it.planned;   // can't install more than planned
+      // Whole-project entry: more than planned is KEPT (the server raises planned to match and marks the row "Over BOQ").
+      // Inside a single room/zone the plan is that room's own, and an item whose quantity is set zone by zone has no project-wide plan to raise: both still stop at the plan.
+      const over = !S.room && !it.has_room_groups && it.planned > 0 && v > it.planned;
+      if (!over && it.planned > 0 && v > it.planned) v = it.planned;
       v = Math.round(v * 100) / 100;
       inp.value = v;
+      if (over) { saveQty(code, v); return; }
       const pct = it.planned > 0 ? (v / it.planned) * 100 : 0;
       applyLocalQty(code, v, pct);
       saveFrac(code, pct);
@@ -1937,7 +1976,11 @@
       catch (e) { toast(briefErr(e)); data = { available: false, materials: [] }; }
     };
     await fetchData();
-    if (!data.available) return toast(data.reason || "Upload the stock register on the Forecast tab first.");
+    if (!data.available) {
+      const sv = await getStockView();
+      if (sv && !sv.current) return openStockPicker(sv);                       // nothing connected: connect it right here
+      return toast(data.reason || "No stock materials to pick from yet.");
+    }
 
     const renderList = (filter) => {
       const f = (filter || "").trim().toLowerCase();
@@ -2125,7 +2168,12 @@
   // separate multi-add UI to switch into — the same row just grows.
   async function openLinkModal(focusCode) {
     let data; try { data = await jget(api("/" + S.slug + "/links/" + encodeURIComponent(S.service))); } catch (e) { return toast(briefErr(e)); }
-    if (!data.has_run) return toast("Upload the stock register on the Forecast tab first, then link.");
+    if (!data.has_run) return openConnectStock();
+    const sv = await getStockView(); const cur = sv && sv.current;
+    const lostN = cur && cur.links ? Math.max(0, (cur.links.saved || 0) - (cur.links.found || 0)) : 0;
+    const srcBlock = cur ? `<div id="sp-lk-src" style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 12px;padding:10px 12px;border-radius:10px;background:var(--slatebg,#faf9f7);border:1px solid var(--line,#e7e5df);font-size:12.5px">
+        <span>Reading from <b>${esc(cur.name)}</b> · ${esc(cur.kind)}${cur.filename ? " · " + esc(cur.filename) : ""} · read ${esc(readTime(cur.created))}${cur.materials != null ? " · " + cur.materials + (cur.materials === 1 ? " material" : " materials") : ""}${lostN ? `<br><span style="color:#6e4205">${lostN} saved link${lostN === 1 ? " has" : "s have"} no material in this stock. They stay saved.</span>` : ""}</span>
+        <span style="display:flex;gap:8px">${cur.source_link ? `<button type="button" class="btn" id="sp-lk-resync">Re-sync</button>` : ""}<button type="button" class="btn" id="sp-lk-change">Change stock…</button></span></div>` : "";
     const opts = data.stock_names.map((n) => `<option value="${esc(n)}">`).join("");
     const list = focusCode ? data.items.filter((i) => i.code === focusCode) : data.items;
     const matUnits = data.material_units || {};
@@ -2152,7 +2200,7 @@
 
     modal(focusCode ? `Link stock → ${esc(focusCode)}` : "Link BOQ items → stock",
       "A BOQ item can consume more than one register material (e.g. wire + conduit). Pick or type a material, then press + (or Enter) to add it. If a material's unit doesn't match this item's own unit, tell it how much of that material one unit of this item needs (e.g. Rmt of pipe per Nos of point) — otherwise the shortage forecast can't compare them.",
-      `<datalist id="sp-stocklist">${opts}</datalist><div class="sp-linkgrid">${rows}</div>`,
+      `${srcBlock}<datalist id="sp-stocklist">${opts}</datalist><div class="sp-linkgrid">${rows}</div>`,
       async () => {
         // Commit whatever's still sitting in each text box before saving --
         // this is the actual bug: typing a material then clicking "Save
@@ -2175,6 +2223,8 @@
         }
         closeModal(); await loadService(); toast("Links saved.");
       }, "Save links", "min(920px,96vw)");
+    if ($("sp-lk-change")) $("sp-lk-change").onclick = () => { closeModal(); openStockPicker(sv); };
+    if ($("sp-lk-resync")) $("sp-lk-resync").onclick = () => { closeModal(); resyncStock(cur); };
 
     function mismatch(code, material) {
       const itemUnit = (document.querySelector(`.sp-linkinput[data-code="${cssA(code)}"]`) || {}).dataset?.unit || "";

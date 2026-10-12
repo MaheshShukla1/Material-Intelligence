@@ -859,6 +859,9 @@ def _bill(slug, d, store, ra):
             pq, pa = prevs[stage].get(code, (0.0, 0.0))
             if stage == "install":
                 utd, source, note = min(inst.get(code, 0.0), ln["boq_qty"]), "progress", "Work done, from Site Progress"
+                if inst.get(code, 0.0) > ln["boq_qty"] + 1e-9:
+                    warnings.append({"item_code": code, "stage": stage, "msg":
+                        f"{ln['desc'][:70]}: Site Progress shows {inst[code]:g} {ln['unit']} done, {inst[code] - ln['boq_qty']:g} {ln['unit']} above the BOQ qty of {ln['boq_qty']:g}. Billed only up to the BOQ qty."})
             else:
                 q, source, note = sup.get(code, (None, "manual", ""))
                 utd = None if q is None else min(q, ln["boq_qty"])
@@ -2305,6 +2308,200 @@ async def import_challans(slug: str, service: str, file: UploadFile = File(...),
             res["committed"] = True
     return res
 
+
+
+# ------------------------------------------------------------------ one upload: typed quantities + challans
+def parse_typed_sheet(raw):
+    """Read the quantities a person TYPED into the downloaded RA workbook: the 'THIS BILL QTY' column of its B-BOQ sheet
+    (one block for a Supply or an Installation RA, two for Supply + Installation). Only a plain number counts as typed;
+    a cell that is still the workbook's own formula (a supply quantity that follows the challans) is left alone.
+    The block's stage is read from its rate header ('70% RATE OF SUPPLY' / '30% RATE OF INSTALLATION') and its RA number
+    from the 'RA-01' label above it. None when the file has no such sheet."""
+    import openpyxl
+    wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True, data_only=False)
+
+    def lab(v):
+        return re.sub(r"\s+", " ", v).strip().lower() if isinstance(v, str) else ""
+
+    for ws in wb.worksheets:
+        rows = list(ws.iter_rows(min_row=1, max_row=4000, max_col=40, values_only=True))
+        hr = next((i for i, r in enumerate(rows[:25]) if any(lab(v) == "this bill qty" for v in r) and any(lab(v) == "description" for v in r)), None)
+        if hr is None:
+            continue
+        hdr = rows[hr]
+
+        def cell(i, j):
+            return rows[i][j] if 0 <= i < len(rows) and 0 <= j < len(rows[i]) else None
+
+        pos = {"sr": 0, "desc": next(j for j, v in enumerate(hdr) if lab(v) == "description")}
+        pos["unit"] = next((j for j, v in enumerate(hdr) if lab(v) == "unit"), 2)
+        pos["qty"] = next((j for j, v in enumerate(hdr) if lab(v) == "qty"), 3)
+        pos["sr"] = next((j for j, v in enumerate(hdr) if lab(v) in ("sr. no", "sr no", "sr.no", "sr.no.", "sr. no.")), 0)
+        blocks = []
+        for j, v in enumerate(hdr):
+            if lab(v) != "this bill qty":
+                continue
+            rate = lab(cell(hr, j - 2))
+            stage = "supply" if "supply" in rate else ("install" if "install" in rate else None)
+            if stage is None:
+                continue
+            ra_no = None
+            for i in range(hr - 1, max(hr - 4, -1), -1):
+                m = re.match(r"\s*ra[\s-]*0*(\d+)", str(cell(i, j - 2) or ""), re.I)
+                if m:
+                    ra_no = int(m.group(1))
+                    break
+            blocks.append({"stage": stage, "ra": ra_no, "col": j})
+        if not blocks:
+            continue
+        items, typed = [], {}
+        for i in range(hr + 1, len(rows)):
+            desc, unit, q = cell(i, pos["desc"]), cell(i, pos["unit"]), _num(cell(i, pos["qty"]))
+            if not isinstance(desc, str) or not desc.strip() or unit in (None, "") or q is None or q <= 0:
+                continue
+            items.append({"row": i + 1, "sr": cell(i, pos["sr"]), "desc": desc, "unit": str(unit), "qty": q})
+            for bi, b in enumerate(blocks):
+                v = cell(i, b["col"])
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    typed[(bi, i + 1)] = float(v)
+        return {"sheet": ws.title, "items": items, "blocks": blocks, "typed": typed}
+    return None
+
+
+def _typed_changes(slug, d, store, service, parsed, ra_id):
+    """What the typed quantities of an uploaded sheet would change. Nothing is written here.
+    -> {sheet, ra, changes[], problems[], unpaired[], new_overrides: [(ra, code, stage, qty)]}.
+    Rules (never a guess): the sheet's RA number and stage must match an OPEN draft of this service (and the draft the person
+    came from, if any); a typed number counts only where it differs from what the draft shows now; a line is paired by exactly
+    the same narrow rules as the challan import (_pair_lines); a quantity that would take the line above its BOQ quantity is
+    refused and listed."""
+    lines = _lines(d, service)
+    pairs = _pair_lines(parsed["items"], lines)
+    by_row = {it["row"]: it for it in parsed["items"]}
+    changes, problems, unpaired, apply_, seen = [], [], [], [], set()
+    bills = {}
+    for bi, blk in enumerate(parsed["blocks"]):
+        stage, nm = blk["stage"], STAGE_NAME[blk["stage"]]
+        tag = f"RA-{blk['ra']:02d} {nm}" if blk["ra"] else nm
+        cands = [r for r in store["ras"] if r["service"] == service and stage in STAGES[r["series"]] and (blk["ra"] is None or r["no"] == blk["ra"])]
+        ra = next((r for r in cands if r["status"] == "draft" and (ra_id is None or r["id"] == ra_id)), None)
+        if ra is None:
+            locked = next((r for r in cands if r["status"] == "locked"), None)
+            if ra_id and any(r["id"] == ra_id for r in store["ras"]) and not any(r["id"] == ra_id for r in cands):
+                mine = _fmt_ra(_ra(store, ra_id))
+                why = f"this sheet is for {tag}, but you are in {mine}"
+            elif locked:
+                why = f"{tag} is already invoiced, so it is not changed"
+            else:
+                why = f"there is no open draft for {tag}"
+            if any(v for (b2, _r), v in parsed["typed"].items() if b2 == bi and v):
+                problems.append(f"Quantities in the {tag} columns were not imported: {why}.")
+            continue
+        if ra["id"] not in bills:
+            bills[ra["id"]] = _bill(slug, d, store, ra)
+        b = bills[ra["id"]]
+        cur = {r["item_code"]: r for r in b["lines"]}
+        gone = {c for c in (ra.get("removed") or ())}
+        prev = _prev(store, service, stage, ra["id"])
+        for (b2, row), v in sorted(parsed["typed"].items(), key=lambda kv: kv[0][1]):
+            if b2 != bi:
+                continue
+            ln = pairs.get(row)
+            it = by_row[row]
+            if ln is None:
+                if v:
+                    unpaired.append({"ra": tag, "row": row, "desc": it["desc"], "qty": v})
+                continue
+            code = ln["item_code"]
+            if (ra["id"], code, stage) in seen:
+                continue
+            seen.add((ra["id"], code, stage))
+            if code in gone:
+                if v:
+                    problems.append(f"{ln['desc'][:60]}: taken out of this draft, so the typed {v:g} was not imported.")
+                continue
+            if v < 0:
+                problems.append(f"{ln['desc'][:60]}: a quantity cannot be below 0 ({v:g}); skipped.")
+                continue
+            now = ((cur.get(code) or {}).get(stage) or {}).get("this")
+            now = 0.0 if now is None and code not in cur else now
+            if now is not None and abs(now - v) < 1e-9:
+                continue
+            before = prev.get(code, (0.0, 0.0))[0]
+            if before + v > ln["boq_qty"] + 1e-9:
+                problems.append(f"{ln['desc'][:60]}: BOQ qty is {ln['boq_qty']:g} and {before:g} is already billed, so {v:g} cannot be billed; skipped.")
+                continue
+            changes.append({"ra": ra["id"], "ra_label": _fmt_ra(ra), "together": len(STAGES[ra["series"]]) > 1, "stage": stage, "stage_name": nm, "item_code": code,
+                            "desc": ln["desc"], "unit": ln["unit"], "now": now, "sheet": v})
+            apply_.append((ra["id"], code, stage, v))
+    return {"sheet": parsed["sheet"], "changes": changes, "problems": problems, "unpaired": unpaired, "apply": apply_}
+
+
+class _Bytes:
+    """Just enough of an UploadFile for import_challans to read the bytes it was given."""
+    def __init__(self, raw):
+        self.raw = raw
+
+    async def read(self):
+        return self.raw
+
+
+@router.post("/{slug}/import-sheet/{service}")
+async def import_sheet(slug: str, service: str, file: UploadFile = File(...), commit: bool = Form(False),
+                       lock_upto: int = Form(0), ra_id: str = Form("")):
+    """ONE upload for the downloaded RA workbook, filled in. It brings back, together:
+      - the challans of its CHALLAN sheet (only for a service billed from challans; exactly the challan import), and
+      - the quantities typed into its 'THIS BILL QTY' column, for Supply and/or Installation, which become the typed
+        quantity of that line in the matching open draft RA (the same thing as typing it on the RA screen).
+    commit=false only reads and reports; commit=true saves. Re-uploading the same file adds nothing twice."""
+    d = sp._need(slug)
+    _svc_check(d, service)
+    raw = await file.read()
+    try:
+        has_ch = True
+        try:
+            parse_challan_workbook(raw)
+        except HTTPException as e:
+            if e.status_code == 400 and str(e.detail).startswith("No challan sheet"):
+                has_ch = False
+            else:
+                raise
+        parsed = parse_typed_sheet(raw)
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(400, "This file could not be read as an Excel workbook.")
+    if not has_ch and parsed is None:
+        raise HTTPException(400, "Nothing to read in this file. It needs the challan columns, or the THIS BILL QTY column of an RA workbook downloaded from Billing.")
+    store = _load(d)
+    chres, chnote = None, None
+    if has_ch:
+        ok = (store["setup"].get(service) or {}).get("mode") and _source(store, service) == "challan"
+        if ok:
+            chres = await import_challans(slug, service, _Bytes(raw), commit=False, lock_upto=lock_upto)
+        else:
+            chnote = f"The CHALLAN sheet in this file was not read: {service} takes its supply quantity from the stock register, not from challans."
+    typed = _typed_changes(slug, d, store, service, parsed, ra_id or None) if parsed else None
+    res = {"challans": chres, "challan_note": chnote, "committed": False,
+           "typed": None if typed is None else {k: v for k, v in typed.items() if k != "apply"}, "applied": 0}
+    if not commit:
+        return res
+    n_typed = len(typed["apply"]) if typed else 0
+    if not ((chres and (chres["new"] or lock_upto)) or n_typed):
+        raise HTTPException(409, "Nothing new to import.")
+    if chres and (chres["new"] or lock_upto):
+        res["challans"] = await import_challans(slug, service, _Bytes(raw), commit=True, lock_upto=lock_upto)
+    if n_typed:
+        store2 = _load(d)
+        for rid, code, stage, v in typed["apply"]:
+            r = _ra(store2, rid)
+            if r["status"] != "draft":
+                continue
+            r.setdefault("overrides", {}).setdefault(code, {})[stage] = {"qty": v, "reason": "Typed in the uploaded Excel"}
+        _save(d, store2)
+        res["applied"] = n_typed
+    res["committed"] = True
+    return res
 
 
 @router.post("/{slug}/challans/{service}/{cid}")

@@ -536,6 +536,14 @@ def _service_view_core(d, service, items, used, prog, rooms_cfg, room_qty_groups
         except Exception:
             return None
 
+    # Work recorded above the BOQ quantity (see set_item_qty): the planned figure as it was BEFORE the raise, per item. A record
+    # only counts while the item's planned override is still the value the raise set (a later manual edit takes over).
+    over_rec = (_read_json(d / "over_boq.json", {}) or {}).get(service, {})
+
+    def _boq_planned(c, planned_now):
+        r = over_rec.get(c)
+        return r["boq"] if r and c in planned_over and abs(float(planned_over[c]) - float(r["raised"])) < 1e-6 else planned_now
+
     rows = []
     for _, it in ip.iterrows():
         c = str(it.item_code)
@@ -555,6 +563,7 @@ def _service_view_core(d, service, items, used, prog, rooms_cfg, room_qty_groups
             "room_done": rb["done"], "room_progress": rb["in_progress"],
             "room_pending": rb["not_started"], "room_total": rb["total"],
             "planned_override": c in planned_over,
+            "boq_planned": fv(_boq_planned(c, it.planned_total)),
             "has_room_groups": bool(it.get("has_room_groups", False)),
         })
 
@@ -875,6 +884,82 @@ def set_item_progress(slug: str, payload: dict):
     return _service_view(d, svc, room=payload.get("room"))
 
 
+@router.post("/{slug}/progress/item-qty")
+def set_item_qty(slug: str, payload: dict):
+    """Record the real installed quantity of one item for the whole project. Body: {"service","item_code","qty"}.
+
+    Up to the item's planned quantity this is exactly the usual progress (frac = qty / planned). ABOVE it (for items without zone-wise quantities) the number is kept,
+    not cut back: the item's planned quantity is raised to the typed quantity (the same project-wide override the "planned"
+    pencil sets) and the item sits at 100%. The planned figure from before the first raise is remembered (over_boq.json) so the
+    screen can mark the excess and "Back to BOQ qty" can restore it exactly. The BOQ itself never changes, Billing bills up to
+    the BOQ quantity only, and every progress figure stays inside 0..100%."""
+    d = _need(slug)
+    svc, code = payload.get("service"), payload.get("item_code")
+    if not svc or code is None:
+        raise HTTPException(400, "service and item_code are required")
+    try:
+        qty = max(0.0, float(payload.get("qty")))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "qty must be a number")
+    code = str(code)
+    items = _load_boq(d, svc)
+    prog = _item_prog(d).get(svc, {})
+    allp = _read_json(d / "planned.json", {}) or {}
+    cur = itemprog.compute(items, prog, _item_rooms(d).get(svc, {}), _all_room_ids(d), allp.get(svc, {}),
+                           room=None, room_qty_groups=_item_room_qty(d).get(svc, {}))
+    row = cur[cur["item_code"].astype(str) == code]
+    if row.empty:
+        raise HTTPException(404, "that item is not in this service")
+    planned = float(row.iloc[0]["planned_total"] or 0.0)
+    if planned <= 0:
+        frac = 0.0
+    elif qty <= planned + 1e-9 or (_item_room_qty(d).get(svc, {}) or {}).get(code):
+        # within the plan -- or an item whose quantity is set zone by zone (those groups ARE its plan; a project-wide override is
+        # ignored for it by itemprog), so it stays capped exactly as before
+        frac = min(1.0, qty / planned)
+    else:
+        over = _read_json(d / "over_boq.json", {}) or {}
+        rec = over.setdefault(svc, {}).get(code)
+        if not rec or abs(float(allp.get(svc, {}).get(code, -1)) - float(rec["raised"])) > 1e-6:
+            rec = {"boq": planned, "prior": allp.get(svc, {}).get(code)}      # first raise (or the old record went stale)
+        rec["raised"] = round(qty, 4)
+        over[svc][code] = rec
+        (d / "over_boq.json").write_text(json.dumps(over, ensure_ascii=False))
+        allp.setdefault(svc, {})[code] = round(qty, 4)
+        (d / "planned.json").write_text(json.dumps(allp, ensure_ascii=False))
+        frac = 1.0
+    store = _item_prog(d)
+    itemprog.set_progress(store, svc, code, frac, room=None)
+    (d / "item_progress.json").write_text(json.dumps(store, ensure_ascii=False))
+    _log_dpr_change(d, svc, None, code, frac=frac)
+    return _service_view(d, svc, room=None)
+
+
+@router.post("/{slug}/progress/item-qty/undo")
+def undo_item_over(slug: str, payload: dict):
+    """"Back to BOQ qty": put the item's planned figure back exactly as it was before it was raised above the BOQ, and sit the
+    item at 100% of that. Body: {"service","item_code"}. Nothing to undo => 404."""
+    d = _need(slug)
+    svc, code = payload.get("service"), str(payload.get("item_code"))
+    over = _read_json(d / "over_boq.json", {}) or {}
+    rec = (over.get(svc) or {}).get(code)
+    if not rec:
+        raise HTTPException(404, "this item has no quantity above the BOQ to undo")
+    allp = _read_json(d / "planned.json", {}) or {}
+    if rec.get("prior") is None:
+        allp.setdefault(svc, {}).pop(code, None)
+    else:
+        allp.setdefault(svc, {})[code] = rec["prior"]
+    (d / "planned.json").write_text(json.dumps(allp, ensure_ascii=False))
+    over[svc].pop(code, None)
+    (d / "over_boq.json").write_text(json.dumps(over, ensure_ascii=False))
+    store = _item_prog(d)
+    itemprog.set_progress(store, svc, code, 1.0, room=None)
+    (d / "item_progress.json").write_text(json.dumps(store, ensure_ascii=False))
+    _log_dpr_change(d, svc, None, code, frac=1.0)
+    return _service_view(d, svc, room=None)
+
+
 @router.post("/{slug}/progress/activity")
 def set_activity_progress(slug: str, payload: dict):
     """Labour-only activity progress -- no BOQ item involved at all (Zari
@@ -1039,6 +1124,131 @@ def mark_rooms_done(slug: str, payload: dict, room: str = None):
     if done:   # an undo is not "work done today" -- never logged as one
         for rid in room_ids:
             _log_dpr_change(d, svc, rid, code, frac=1.0)
+    return _service_view(d, svc, room=room)
+
+
+def _item_plan(d, service, item_code):
+    """(rooms, plan, unit) for ONE item: the rooms it applies to, and each
+    room's own planned quantity -- resolved with exactly itemprog.compute()'s
+    rules, so the per-room numbers the Rooms/Zones dialog shows always add up
+    to the item row's own planned/used (test_room_done_qty.py asserts this).
+
+      - item has quantity groups: a room in a group uses that group's qty,
+        any other applicable room uses the item's own BOQ qty (compute's
+        `_rq`). Applicability is the explicit item_rooms list unioned with the
+        group rooms, or the group rooms alone when no list is set.
+      - no groups: the whole-project planned override (else qty x rooms)
+        shared equally across the applicable rooms.
+
+    A room whose quantity is not a positive number is None, never a guess.
+    ([], {}, None) when the item is not in this service's BOQ.
+
+    Deliberately NOT built on _applicable_rooms()/_qty_for_room(): those feed
+    the DPR and still treat "no item_rooms list" as every room even for an
+    item with quantity groups, which compute() no longer does."""
+    code = str(item_code)
+    boqdf = _load_boq(d, service)
+    row = boqdf[boqdf.item_code.astype(str) == code]
+    if row.empty:
+        return [], {}, None
+    unit = row.iloc[0].get("unit")
+    qty = itemprog._f(row.iloc[0].get("qty"))
+    all_ids = _all_room_ids(d)
+    room_set = set(all_ids)
+    room_qty, group_appl = itemprog._room_qty_from_groups(_item_room_qty(d).get(service, {}).get(code), room_set)
+    explicit = _item_rooms(d).get(service, {}).get(code)
+    if room_qty is not None:
+        base = ([r for r in explicit if r in room_set] or all_ids) if explicit else list(group_appl)
+        appl = list(dict.fromkeys(base + group_appl))
+        plan = {r: room_qty.get(r, qty) for r in appl}
+    else:
+        appl = explicit or all_ids
+        appl = [r for r in appl if r in room_set] or all_ids
+        over = _planned(d, service).get(code)
+        per = (itemprog._f(over) / len(appl) if appl else None) if over is not None else qty
+        plan = {r: per for r in appl}
+    plan = {str(r): (v if v is not None and v > 0 else None) for r, v in plan.items()}
+    return [str(r) for r in appl], plan, unit
+
+
+@router.get("/{slug}/item-room-plan")
+def item_room_plan(slug: str, service: str, item_code: str):
+    """What the Rooms/Zones dialog needs to let an engineer record a REAL
+    quantity per room instead of a plain tick: for every room this item
+    applies to, that room's own planned quantity and how much of it is
+    recorded done. Rooms the item does not apply to are not listed -- their
+    planned quantity would be invented. `planned` is null when it cannot be
+    known (never a guess); the UI then offers the plain tick only.
+
+    service/item_code are query parameters, not path segments: real item
+    codes can contain "/" (e.g. QI8/13.2.1), which would break a path route."""
+    d = _need(slug)
+    appl, plan, unit = _item_plan(d, service, item_code)
+    node = _item_prog(d).get(service, {}).get(str(item_code))
+    rooms = {}
+    for rid in appl:
+        p = plan.get(rid)
+        rooms[rid] = {"planned": (round(p, 4) if p is not None else None),
+                      "frac": itemprog.frac_for(node, rid)}
+    return {"unit": unit, "rooms": rooms}
+
+
+@router.post("/{slug}/progress/rooms")
+def set_rooms_progress(slug: str, payload: dict, room: str = None):
+    """Record a REAL installed quantity for several rooms of one item in one
+    call -- the partial-progress counterpart of /mark-rooms-done (which can
+    only say 0% or 100%). Body: {"service","item_code","entries":[{"room":
+    room_id,"qty":number}, ...]}.
+
+    Reported case: a Thoth jet fan planned at 9 Nos in Zone 5 but only 5
+    actually fitted -- ticking the zone could only ever say 9. Each room
+    gets its OWN per-room override via itemprog.set_progress(..., room=rid)
+    (never the room=None '*' path), so no other room's recorded state can be
+    wiped, exactly like /mark-rooms-done. The stored value stays a fraction
+    of that room's planned qty (frac = qty / room_planned, clamped to [0,1]),
+    so every existing reader of item_progress.json keeps working unchanged;
+    a quantity at/above the room's plan is stored as exactly 1.0 so the room
+    counts as done.
+
+    All entries are validated before ANYTHING is written (one bad room =
+    nothing saved). A room whose planned quantity is unknown is refused, not
+    guessed. Logged to the DPR like any other room update (frac > 0 only --
+    setting a room back to 0 is not "work done today", same as undo)."""
+    d = _need(slug)
+    svc = payload.get("service")
+    code = payload.get("item_code")
+    entries = payload.get("entries") or []
+    if not svc or code is None:
+        raise HTTPException(400, "service and item_code are required")
+    if not entries:
+        raise HTTPException(400, "at least one room entry is required")
+    appl_list, plan, _unit = _item_plan(d, svc, code)
+    appl = set(appl_list)
+    todo = []
+    for e in entries:
+        e = e or {}
+        rid = str(e.get("room"))
+        if rid not in appl:
+            raise HTTPException(400, f"room {rid} is not one of this item's rooms")
+        try:
+            qty = float(e.get("qty"))
+        except (TypeError, ValueError):
+            raise HTTPException(400, f"quantity for room {rid} must be a number")
+        if qty != qty or qty < 0:
+            raise HTTPException(400, f"quantity for room {rid} must be 0 or more")
+        planned = plan.get(rid)
+        if planned is None or planned <= 0:
+            raise HTTPException(400, f"planned quantity for room {rid} is not set, so a partial quantity "
+                                     "cannot be recorded -- set the plan first, or just tick it")
+        frac = 1.0 if qty >= planned * (1 - 1e-9) else round(qty / planned, 6)
+        todo.append((rid, frac))
+    store = _item_prog(d)
+    for rid, frac in todo:
+        itemprog.set_progress(store, svc, code, frac, room=rid)
+    (d / "item_progress.json").write_text(json.dumps(store, ensure_ascii=False))
+    for rid, frac in todo:
+        if frac > 0:
+            _log_dpr_change(d, svc, rid, code, frac=frac)
     return _service_view(d, svc, room=room)
 
 
@@ -1346,6 +1556,9 @@ def save_planned(slug: str, payload: dict, room: str = None):
         raise HTTPException(400, "service and item_code are required")
     allp = _read_json(d / "planned.json", {}) or {}
     p = payload.get("planned")
+    over = _read_json(d / "over_boq.json", {}) or {}
+    if (over.get(svc) or {}).pop(str(code), None) is not None:        # a manual planned edit takes over from "above the BOQ"
+        (d / "over_boq.json").write_text(json.dumps(over, ensure_ascii=False))
     if p is None:
         allp.setdefault(svc, {}).pop(str(code), None)
     else:

@@ -201,7 +201,7 @@
         <div class="bl-rah"><div>RA</div><div>Cut-off</div><div>Status</div><div>What is inside</div><div class="n">This bill</div><div class="n">Up to date</div><div></div></div>
         ${ov.ras.length ? ov.ras.map((r) => `
         <div class="bl-rar" data-ra="${esc(r.id)}" tabindex="0" role="button">
-          <div><b>${esc(r.service)} · RA ${r.no}</b><small>${esc(SERIES[r.series])} · ${r.lines} line${r.lines === 1 ? "" : "s"}</small></div>
+          <div><b>${esc(r.service)} · RA ${r.no}</b><small>${esc(SERIES[r.series])} · ${r.lines} line${r.lines === 1 ? "" : "s"}${xChip(r)}</small></div>
           <div>${esc(r.cutoff || "")}</div>
           <div><span class="bl-chip ${r.status}">${r.status === "draft" ? "Draft" : "Invoiced"}</span></div>
           <div class="ins">${stageChips(r)}</div>
@@ -371,6 +371,9 @@
       <div class="lks">${ch}${wire}<button class="bl-link" data-overall="${esc(b.base)}">Annexure →</button></div>
       <div class="mn"><button class="bl-dots" data-menu="${esc(b.base)}" data-split="${split ? 1 : 0}" aria-label="More for ${name}" aria-haspopup="true">···</button></div></div>`;
   }
+  // quantity above the BOQ, on a Billing-home row: only a pointer (the details and the accept live inside that draft)
+  const xChip = (r) => r.status === "draft" && r.over_n ? ` <span class="bl-xchip" title="Open the draft to review">${r.over_n} above BOQ</span>`
+    : r.extra_n ? ` <span class="bl-xchip ok" title="Billed above the BOQ quantity, accepted">Extra · ${r.extra_n}</span>` : "";
   // "What is inside" of an RA: both stages, a stage that carries nothing is greyed (never hidden, never a made-up 0)
   function stageChips(r) {
     const t = r.stage_this || {};
@@ -542,6 +545,44 @@
     draw();
   }
 
+  // ------------------------------------------------------------- quantity above the BOQ
+  // Billed only up to the BOQ until the person accepts the extra, line by line. The strip is the only thing on the draft (it never opens
+  // by itself); the pop-up is the one place where the decision is made, whether it comes from the strip, a typed quantity or an upload.
+  const xSum = (xs) => (xs.length && xs.every((x) => x.amount != null) ? xs.reduce((a, x) => a + x.amount, 0) : null);
+  const xStrip = (xs) => `<div class="bl-xstrip" id="bl-xstrip"><div><b>${xs.length} line${xs.length === 1 ? " is" : "s are"} above the BOQ quantity</b>
+      <small>Extra${xSum(xs) == null ? "" : " worth " + inr(xSum(xs))} · billed only up to the BOQ for now. Works the same for challans and Site Progress.</small></div>
+      <button class="btn primary" id="bl-xreview">Review extra →</button></div>`;
+  function extraDialog(items, o) {
+    const sel = new Set(items.map((_, i) => i));
+    const srcName = (x) => (x.source === "progress" ? "Done" : x.source === "typed" ? "You typed" : "Challans");
+    const rows = () => items.map((x, i) => `<label class="bl-xr ${sel.has(i) ? "on" : ""}">
+        <input type="checkbox" data-xi="${i}" ${sel.has(i) ? "checked" : ""} aria-label="Accept the extra on this line">
+        <span class="d"><span class="t">${esc((x.desc || "").slice(0, 110))}</span><small>${x.stage_name ? esc(x.stage_name) + " · " : ""}${esc(x.unit || "")}</small></span>
+        <span class="n" data-l="BOQ"><small>BOQ</small>${qn(x.boq_qty)}</span>
+        <span class="n" data-l="${srcName(x)}"><small>${srcName(x)}</small>${qn(x.have)}</span>
+        <span class="n" data-l="Extra"><small>Extra</small><b class="bl-xe">+${qn(x.extra)}</b></span>
+        <span class="n" data-l="Value"><small>Value</small>${inr(x.amount)}</span></label>`).join("");
+    const paint = () => {
+      $("bl-xlist").innerHTML = rows();
+      document.querySelectorAll("#bl-xlist [data-xi]").forEach((el) => el.onchange = () => { el.checked ? sel.add(+el.dataset.xi) : sel.delete(+el.dataset.xi); paint(); });
+      const b = $("bl-xgo"); if (b) { b.textContent = sel.size ? `Accept ${sel.size} and include in bill` : "Nothing ticked"; b.disabled = !sel.size; }
+    };
+    modal(o.title || "Extra over BOQ", o.sub || "", `<div class="bl-xlist" id="bl-xlist"></div>
+      <p class="bl-hint">Ticked lines are added to this bill at the same rate and ${items.some((x) => x.stage === "install") && !items.some((x) => x.stage === "supply") ? "installation" : "supply / installation"} % as the rest, and are marked <span class="bl-xtag">Extra</span>. Unticked lines stay at the BOQ quantity. You can take each one back later.</p>`, [
+      { label: o.keepLabel || "Keep to BOQ", id: "bl-xkeep", run: async () => { if (o.keep) await o.keep(); closeModal(); } },
+      { label: "Accept", cls: "primary", id: "bl-xgo", run: async () => {
+        const picked = items.filter((_, i) => sel.has(i));
+        if (!picked.length) return;
+        const r = await o.accept(picked);
+        closeModal();
+        const tot = picked.every((x) => x.amount != null) ? " · " + inr(picked.reduce((a, x) => a + x.amount, 0)) + " added" : "";
+        toast(picked.length + " line" + (picked.length === 1 ? "" : "s") + " accepted as Extra over BOQ" + tot + ".");
+        const y = window.scrollY; await showRA(B.raId); window.scrollTo(0, y);
+        return r;
+      } }], "min(760px,96vw)");
+    paint();
+  }
+
   // ------------------------------------------------------------- RA bill
   async function showRA(id) {
     const s = section();
@@ -568,7 +609,7 @@
           return `<div class="n" data-l="${STAGE[st]} before">${qn(c.prev)}</div>
             <div class="n" data-l="${STAGE[st]} to date">${c.utd == null ? "—" : qn(c.utd)}<small class="bl-src ${src[1]}">${esc(src[0])}</small></div>
             <div class="n" data-l="${STAGE[st]} this bill">${locked ? `<b class="${c.this < 0 ? "neg" : ""}">${qn(c.this)}</b>`
-              : `<button class="bl-qtybtn ${c.this == null ? "need" : ""} ${c.this < 0 ? "neg" : ""}" data-edit="${esc(l.item_code)}" data-stage="${st}" title="Type a quantity">${c.this == null ? "Type qty" : qn(c.this)}</button>`}</div>
+              : `<button class="bl-qtybtn ${c.this == null ? "need" : ""} ${c.this < 0 ? "neg" : ""}" data-edit="${esc(l.item_code)}" data-stage="${st}" title="Type a quantity">${c.this == null ? "Type qty" : qn(c.this)}</button>`}${c.extra ? `<span class="bl-xtag" title="Above the BOQ quantity of ${qn(l.boq_qty)} ${esc(l.unit)}">Extra +${qn(c.extra)}</span>` : ""}${!locked && c.accepted ? `<button class="bl-xback" data-xback="${esc(l.item_code)}" data-stage="${st}" title="Bill only up to the BOQ quantity again">Back to BOQ qty</button>` : ""}</div>
             <div class="n" data-l="${STAGE[st]} amount"><b class="${c.amount < 0 ? "neg" : ""}">${inr(c.amount)}</b></div>`; }).join("")}
         ${locked ? "" : `<div class="rm"><button class="bl-rm" data-rm="${esc(l.item_code)}" aria-label="Remove this line from the draft" title="Remove this line from this draft (Site Progress is not changed)">✕<span> Remove from this draft</span></button></div>`}
         <div class="x" style="grid-column:1/-1">${stages.map((st) => { const c = l[st]; if (!c) return "";
@@ -590,7 +631,7 @@
        ${locked ? `<button class="btn" id="bl-reopen">Reopen</button>`
         : `<button class="btn danger" id="bl-del">Delete draft</button><button class="btn primary" id="bl-lock">Mark as invoiced</button>`}`) + `
       <div class="bl-kpis">
-        <div class="bl-kpi"><span>This bill</span><b>${inr(b.this_total)}</b><i>${stages.map((k) => STAGE[k] + " " + inr(b.totals[k].this)).join(" · ")}</i></div>
+        <div class="bl-kpi"><span>This bill</span><b>${inr(b.this_total)}</b><i>${stages.map((k) => STAGE[k] + " " + inr(b.totals[k].this)).join(" · ")}</i>${b.extra_total > 0 ? `<i class="bl-xi" id="bl-xsum">of which <span class="bl-xtag">Extra over BOQ ${inr(b.extra_total)}</span> · ${b.extra_lines.length} line${b.extra_lines.length === 1 ? "" : "s"}</i>` : ""}</div>
         <div class="bl-kpi"><span>Billed before</span><b>${inr(stages.reduce((a, k) => a + b.totals[k].prev, 0))}</b><i>from invoiced RAs</i></div>
         <div class="bl-kpi"><span>Contract value (service)</span><b>${inr(b.contract_value)}</b><i>${stages.map((k) => STAGE[k] + " " + (b.pct[k] == null ? "—" : b.pct[k] + "%")).join(" · ")}</i></div>
       </div>
@@ -603,7 +644,8 @@
           <button class="btn" id="bl-idet">Company, client &amp; GST details</button></div>
         <p class="bl-invm" id="bl-invm">${(ra.inv_missing || []).length ? "Blank on the Tax Invoice sheet: " + esc(brief(ra.inv_missing)) + "." : "Everything the Tax Invoice sheet needs is filled in."}</p>
       </div>
-      ${b.warnings.length ? `<div class="bl-notes">${b.warnings.map((w) => `<div class="bl-note over"><b>Check</b>${esc(w.msg)}</div>`).join("")}</div>` : ""}
+      ${!locked && (b.excess || []).length ? xStrip(b.excess) : ""}
+      ${b.warnings.filter((w) => w.over === undefined).length ? `<div class="bl-notes">${b.warnings.filter((w) => w.over === undefined).map((w) => `<div class="bl-note over"><b>Check</b>${esc(w.msg)}</div>`).join("")}</div>` : ""}
       ${!locked && Object.values(b.unfilled).some((n) => n) ? `<div class="bl-callout">${stages.filter((k) => b.unfilled[k]).map((k) =>
         `${b.unfilled[k]} ${STAGE[k].toLowerCase()} lines have no quantity yet (not linked to stock, or not safe to compute). Use “+ Add line” to type them in. Nothing is guessed.`).join("<br>")}</div>` : ""}
       ${stages.includes("install") && b.totals.install.this === 0 && b.totals.install.prev === 0 ? `<div class="bl-callout soft" id="bl-noinst">${locked
@@ -632,10 +674,22 @@
     if ($("bl-impra")) $("bl-impra").onclick = () => uploadFilled(ra.service, () => showRA(id), id);
     wireInvStrip(ra, id);
     s.querySelectorAll(".bl-lr").forEach((row) => row.addEventListener("click", (e) => {
-      if (e.target.closest("[data-edit]") || e.target.closest("[data-rm]")) return;
+      if (e.target.closest("[data-edit]") || e.target.closest("[data-rm]") || e.target.closest("[data-xback]")) return;
       const c = row.dataset.code; B.expanded.has(c) ? B.expanded.delete(c) : B.expanded.add(c); row.classList.toggle("open");
     }));
     s.querySelectorAll("[data-edit]").forEach((el) => el.onclick = () => editQty(el.dataset.edit, el.dataset.stage));
+    s.querySelectorAll("[data-xback]").forEach((el) => el.onclick = async (e) => {
+      e.stopPropagation();
+      try { await jsend(api("/" + B.slug + "/ra/" + id + "/accept-excess"), { items: [{ item_code: el.dataset.xback, stage: el.dataset.stage }], accept: false }); }
+      catch (er) { toast(briefErr(er)); return; }
+      const y = window.scrollY; await showRA(id); window.scrollTo(0, y); toast("Back to the BOQ quantity.");
+    });
+    if ($("bl-xreview")) $("bl-xreview").onclick = () => extraDialog(b.excess.map((x) => ({ ...x, stage_name: stages.length > 1 ? STAGE[x.stage] : "" })), {
+      title: "Extra over BOQ", sub: ra.label + " · these lines have more quantity than the BOQ",
+      accept: async (picked) => {
+        const r = await jsend(api("/" + B.slug + "/ra/" + id + "/accept-excess"), { items: picked.map((x) => ({ item_code: x.item_code, stage: x.stage })), accept: true });
+        return r;
+      } });
     if (!locked) {
       // take a line out of THIS draft (or put it back): only this draft changes, so no "are you sure" -- Restore is right under the lines
       const setRemoved = async (code, remove) => {
@@ -655,7 +709,8 @@
         "Quantities, rates and % freeze as of now. Later progress or rate changes never move an invoiced bill.",
         `<div class="bl-lockbox"><div><span>This bill</span><b>${inr(b.this_total)}</b></div>
           ${Object.values(b.unfilled).some((n) => n) ? `<p class="bl-warn">${Object.values(b.unfilled).reduce((a, n) => a + n, 0)} lines still have no quantity and will not be in this bill.</p>` : ""}
-          ${b.warnings.length ? `<p class="bl-warn">${b.warnings.length} line(s) are negative (over-billed earlier).</p>` : ""}
+          ${b.warnings.filter((w) => w.over === undefined).length ? `<p class="bl-warn">${b.warnings.filter((w) => w.over === undefined).length} line(s) are negative (over-billed earlier).</p>` : ""}
+          ${(b.excess || []).length ? `<p class="bl-warn">${b.excess.length} line${b.excess.length === 1 ? " is" : "s are"} above the BOQ quantity and not accepted: billed only up to the BOQ.</p>` : ""}
           <p>You can reopen only the last invoiced RA of a series.</p></div>`, [
           { label: "Cancel", run: closeModal },
           { label: "Mark as invoiced", cls: "primary", run: async () => { await jsend(api("/" + B.slug + "/ra/" + id + "/lock"), {}); closeModal(); toast(ra.label + " marked as invoiced."); showRA(id); } }]);
@@ -667,10 +722,11 @@
   function editQty(code, stage) {
     const l = B.bill.lines.find((x) => x.item_code === code); const c = l[stage];
     const max = Math.max(0, l.boq_qty - c.prev);
+    const allowed = Math.max(l.boq_qty, c.prev);                           // the most the BOQ allows in all (an earlier RA's extra stays)
     modal("Quantity for this bill", l.desc.slice(0, 120),
       `<div class="bl-edit"><div class="bl-erow"><span>${STAGE[stage]} · before</span><b>${qn(c.prev)} ${esc(l.unit)}</b></div>
         <div class="bl-erow"><span>${c.source === "manual" ? "No automatic quantity" : "Automatic, to date"}</span><b>${c.utd == null ? "—" : qn(c.utd) + " " + esc(l.unit)}</b></div>
-        <div class="bl-erow"><span>Most you can bill now (BOQ ${qn(l.boq_qty)})</span><b>${qn(max)} ${esc(l.unit)}</b></div>
+        <div class="bl-erow"><span>${c.accepted ? "Extra over BOQ accepted for this line" : `Most you can bill now (BOQ ${qn(l.boq_qty)})`}</span><b>${c.accepted ? "no limit" : qn(max) + " " + esc(l.unit)}</b></div>
         <label>This bill (${esc(l.unit)})<input id="bl-q" class="ctl" type="number" step="any" value="${c.this == null ? "" : c.this}" inputmode="decimal"></label>
         <label>Reason (shown as a note in the Excel)<input id="bl-r" class="ctl" type="text" value="${esc(c.reason || "")}" placeholder="e.g. gate pass 44, received 12 Oct"></label></div>`, [
         { label: "Cancel", run: closeModal },
@@ -678,7 +734,18 @@
         { label: "Save", cls: "primary", run: async () => {
           const v = $("bl-q").value;
           if (v === "") { toast("Type a quantity, or use Back to automatic."); return; }
-          await jsend(api("/" + B.slug + "/ra/" + B.raId + "/line"), { item_code: code, stage, qty: Number(v), reason: $("bl-r").value });
+          const reason = $("bl-r").value, line = (extra) => jsend(api("/" + B.slug + "/ra/" + B.raId + "/line"), { item_code: code, stage, qty: Number(v), reason, ...extra });
+          if (!c.accepted && c.prev + Number(v) > allowed + 1e-9) {          // above the BOQ: the same accept pop-up, never a bare refusal
+            const ex = c.prev + Number(v) - allowed;
+            closeModal();
+            return extraDialog([{ item_code: code, stage, desc: l.desc, unit: l.unit, boq_qty: l.boq_qty, have: c.prev + Number(v), extra: ex, source: "typed",
+              amount: c.pct == null ? null : l.rate * ex * c.pct / 100, stage_name: B.bill.ra.stages.length > 1 ? STAGE[stage] : "" }], {
+              title: "Above the BOQ quantity", sub: "You typed " + qn(Number(v)) + " " + l.unit + ", BOQ is " + qn(l.boq_qty) + ".",
+              keepLabel: "Bill only up to BOQ",
+              keep: async () => { await jsend(api("/" + B.slug + "/ra/" + B.raId + "/line"), { item_code: code, stage, qty: Math.max(0, allowed - c.prev), reason }); await showRA(B.raId); },
+              accept: () => line({ accept_excess: true }) });
+          }
+          await line({});
           closeModal(); showRA(B.raId);
         } }]);
   }
@@ -1430,7 +1497,7 @@
       </div>
       ${j.source !== "challan" ? `<div class="bl-callout">This service takes its supply quantity from the stock register. Choose “Delivery challans” in Billing setup to bill from challans.</div>` : ""}
       <div id="bl-ib"></div>
-      ${j.over.length ? `<div class="bl-notes">${j.over.map((o) => `<div class="bl-note over"><b>Check</b>${esc(o.desc.slice(0, 90))}: challans total ${qn(o.challan)} ${esc(o.unit)}, BOQ qty is ${qn(o.boq_qty)}. A bill is capped at the BOQ qty.</div>`).join("")}</div>` : ""}
+      ${j.over.length ? `<div class="bl-notes">${j.over.map((o) => `<div class="bl-note over"><b>Check</b>${esc(o.desc.slice(0, 90))}: challans total ${qn(o.challan)} ${esc(o.unit)}, BOQ qty is ${qn(o.boq_qty)}. The bill takes the BOQ qty; accept the extra inside the RA.</div>`).join("")}</div>` : ""}
       ${j.challans.length ? groupsDef.filter((g) => g.list.length).map((g) => `
         <h3 class="bl-h3">${esc(g.title)} <small>${esc(g.sub)}</small></h3>
         <div class="bl-card"><div class="bl-chs">${g.list.map(row).join("")}</div></div>`).join("")
@@ -1733,21 +1800,28 @@
   // the THIS BILL QTY column (Supply / Installation) and the challans of the CHALLAN sheet. Opens from the Challans screen, the
   // draft RA screen (raId = that draft) and Billing home (next to Download): the service is passed in, the "already submitted?"
   // info is loaded for it, and `done` brings the person back to the screen they started on.
-  const typedHtml = (all) => {
+  const xKey = (c) => c.ra + "|" + c.item_code + "|" + c.stage;
+  const typedHtml = (all, accSet) => {
     const t = all && all.typed;
     if (!all) return "";
     const off = t ? t.problems.length + t.unpaired.length : 0;
+    const over = t ? t.changes.filter((c) => c.over) : [];
+    const plain = t ? t.changes.filter((c) => !c.over) : [];
     return `${t ? `<div class="bl-imp">
-        <div class="bl-impk"><div><span>Sheet read</span><b>${esc(t.sheet)}</b></div><div><span>Typed quantities to import</span><b>${t.changes.length}</b></div><div><span>Not imported</span><b class="${off ? "neg" : ""}">${off}</b></div></div>
-        ${t.changes.length ? `<div class="bl-lbl">Quantities you typed in the sheet (MI now → your sheet)</div><div class="bl-unm" id="bl-typed">${t.changes.slice(0, 60).map((c) => `<div><b>${esc(c.ra_label)}${c.together ? " · " + esc(c.stage_name) : ""}</b> · ${esc(c.desc.slice(0, 80))} · ${qn(c.now)} → <b>${qn(c.sheet)}</b> ${esc(c.unit)}</div>`).join("")}${t.changes.length > 60 ? `<div>… and ${t.changes.length - 60} more</div>` : ""}</div>
+        <div class="bl-impk"><div><span>Sheet read</span><b>${esc(t.sheet)}</b></div><div><span>Typed quantities to import</span><b>${plain.length + over.filter((c) => accSet && accSet.has(xKey(c))).length}</b></div><div><span>Not imported</span><b class="${off ? "neg" : ""}">${off}</b></div></div>
+        ${over.length ? `<div class="bl-xup" id="bl-xup"><div class="bl-lbl">Above the BOQ quantity (${over.length})</div>${over.map((c) => `<label class="bl-xur"><input type="checkbox" data-xk="${esc(xKey(c))}" ${accSet && accSet.has(xKey(c)) ? "checked" : ""}>
+          <span><b>${esc(c.ra_label)}${c.together ? " · " + esc(c.stage_name) : ""}</b> · ${esc(c.desc.slice(0, 80))} · BOQ ${qn(c.boq_qty)} · you typed <b>${qn(c.sheet)}</b> · <span class="bl-xtag">Extra +${qn(c.extra)} ${esc(c.unit)}</span></span></label>`).join("")}
+          <div class="bl-hint">Ticked here because you typed these numbers on purpose. An unticked line is not imported. Accepted lines are billed as Extra over BOQ.</div></div>` : ""}
+        ${plain.length ? `<div class="bl-lbl">Quantities you typed in the sheet (MI now → your sheet)</div><div class="bl-unm" id="bl-typed">${plain.slice(0, 60).map((c) => `<div><b>${esc(c.ra_label)}${c.together ? " · " + esc(c.stage_name) : ""}</b> · ${esc(c.desc.slice(0, 80))} · ${qn(c.now)} → <b>${qn(c.sheet)}</b> ${esc(c.unit)}</div>`).join("")}${plain.length > 60 ? `<div>… and ${plain.length - 60} more</div>` : ""}</div>
           <div class="bl-hint">Each one becomes the typed quantity of that line in the draft, the same as typing it on the RA screen. If Site Progress moved after you downloaded the file, check the “MI now” numbers before importing.</div>`
-          : `<div class="bl-hint">No typed quantity found. Only a number you typed over a THIS BILL QTY cell counts; cells left as they were are ignored.</div>`}
+          : over.length ? "" : `<div class="bl-hint">No typed quantity found. Only a number you typed over a THIS BILL QTY cell counts; cells left as they were are ignored.</div>`}
         ${t.problems.length ? `<div class="bl-callout">${t.problems.map(esc).join("<br>")}</div>` : ""}
         ${t.unpaired.length ? `<div class="bl-lbl">Not paired with a BOQ line (not imported — type these on the RA screen)</div><div class="bl-unm">${t.unpaired.slice(0, 40).map((u) => `<div><b>${esc(u.ra)}</b> · ${qn(u.qty)} · ${esc(u.desc.slice(0, 100))}</div>`).join("")}</div>` : ""}
       </div>` : ""}${all.challan_note ? `<div class="bl-callout">${esc(all.challan_note)}</div>` : ""}`;
   };
   function uploadFilled(service = B.svc, done = null, raId = "") {
-    let file = null, lock = 0, last = null, info = B.ch && B.svc === service ? B.ch : null;
+    const unt = new Set();     // extra lines the person unticked: they stay unticked when the file is re-read
+    let file = null, lock = 0, last = null, info = B.ch && B.svc === service ? B.ch : null, acc = new Set();
     const view = () => {
       const mb = $("bl-modal").querySelector(".bl-mbody");
       const r = last && last.challans;
@@ -1756,11 +1830,11 @@
           <input id="bl-file" type="file" accept=".xlsx,.xlsm" class="ctl"><div id="bl-impres"></div>`;
         $("bl-file").onchange = async () => { file = $("bl-file").files[0] || null; lock = 0; if (file) await check(false); };
       }
-      $("bl-impres").innerHTML = `${typedHtml(last)}${r ? `<div class="bl-imp">
+      $("bl-impres").innerHTML = `${typedHtml(last, acc)}${r ? `<div class="bl-imp">
           <div class="bl-impk"><div><span>Challan sheet read</span><b>${esc(r.sheet)}</b></div><div><span>Challans to import</span><b>${r.new}</b></div><div><span>Already in MI</span><b>${r.skipped_duplicate}</b></div><div><span>Rows not paired</span><b class="${r.unmatched.length ? "neg" : ""}">${r.unmatched.length}</b></div></div>
           ${r.by_ra.length ? `<div class="bl-lbl">What these challans come to${r.pct == null ? "" : " at " + r.pct + "%"} — compare with your submitted bill</div>
             ${r.by_ra.map((x) => `<div class="bl-erow"><span>${raL(x.ra)} · ${x.lines} lines</span><b>${x.value == null ? "set the Supply % first" : inr(x.value, true)}</b></div>`).join("")}` : ""}
-          ${r.over_boq.length ? `<div class="bl-callout">${r.over_boq.length} line(s) have more challan qty than the BOQ qty (e.g. ${esc(r.over_boq[0].desc.slice(0, 60))}: ${qn(r.over_boq[0].challan)} vs ${qn(r.over_boq[0].boq_qty)}). A bill is capped at the BOQ qty.</div>` : ""}
+          ${r.over_boq.length ? `<div class="bl-callout">${r.over_boq.length} line(s) have more challan qty than the BOQ qty (e.g. ${esc(r.over_boq[0].desc.slice(0, 60))}: ${qn(r.over_boq[0].challan)} vs ${qn(r.over_boq[0].boq_qty)}). Those lines are billed up to the BOQ qty; accept the extra inside the RA.</div>` : ""}
           ${r.problems.length ? `<div class="bl-callout">${r.problems.map(esc).join("<br>")}</div>` : ""}
           ${r.unmatched.length ? `<div class="bl-lbl">Not paired with a BOQ line (not imported — add these by hand)</div><div class="bl-unm">${r.unmatched.slice(0, 40).map((u) => `<div><b>Challan ${esc(u.challan)}</b> · ${qn(u.qty)} · ${esc(u.desc.slice(0, 100))}</div>`).join("")}</div>` : ""}
           ${r.challans.length ? `<div class="bl-lbl">Challans found</div><div class="bl-unm">${r.challans.map((c) => `<div><b>${esc(c.no)}</b> · ${esc(c.date)} · ${c.ra == null ? "no RA tag (on hold)" : raL(c.ra)} · ${c.lines} lines${c.duplicate ? " · already in MI" : ""}${c.unmatched ? " · " + c.unmatched + " not paired" : ""}</div>`).join("")}</div>` : ""}
@@ -1770,20 +1844,28 @@
             ${r.opening_totals ? `<div class="bl-hint">${Object.entries(r.opening_totals).map(([n, v]) => `${raL(Number(n))}: ${inr(v, true)}`).join(" · ")}</div>` : ""}` : ""}
         </div>` : ""}`;
       if ($("bl-lock")) $("bl-lock").onchange = async () => { lock = Number($("bl-lock").value); await check(false); };
+      document.querySelectorAll("#bl-xup [data-xk]").forEach((el) => el.onchange = () => { if (el.checked) { acc.add(el.dataset.xk); unt.delete(el.dataset.xk); } else { acc.delete(el.dataset.xk); unt.add(el.dataset.xk); } view(); });
+      const nOver = acc.size, go = $("bl-doimp");
+      if (go) go.textContent = nOver ? `Import and accept ${nOver} extra` : "Import";
     };
     const check = async (commit) => {
       if (!file) { toast("Choose a file first."); return null; }
       const fd = new FormData(); fd.append("file", file); fd.append("commit", commit ? "true" : "false"); fd.append("lock_upto", String(lock)); fd.append("ra_id", raId || "");
+      if (commit) fd.append("accept_over", JSON.stringify([...acc].map((k) => { const [ra, item_code, stage] = k.split("|"); return { ra, item_code, stage }; })));
       const res = await fetch(api("/" + B.slug + "/import-sheet/" + encodeURIComponent(service)), { method: "POST", body: fd });
       if (!res.ok) { const t = await res.text(); try { toast(JSON.parse(t).detail || t); } catch (_) { toast(t); } return null; }
       const r = await res.json();
-      if (!commit) { last = r; view(); }
+      if (!commit) {
+        last = r;
+        acc = new Set((r.typed ? r.typed.changes.filter((c) => c.over) : []).map(xKey).filter((k) => !unt.has(k)));   // typed on purpose: ticked from the start
+        view();
+      }
       return r;
     };
     modal("Upload filled sheet", "One-time or any time: uploading the same file again adds nothing twice.", "", [
       { label: "Cancel", run: closeModal },
       { label: "Import", cls: "primary", id: "bl-doimp", run: async () => {
-        const nCh = last && last.challans ? last.challans.new : 0, nTy = last && last.typed ? last.typed.changes.length : 0;
+        const nCh = last && last.challans ? last.challans.new : 0, nTy = last && last.typed ? last.typed.changes.filter((c) => !c.over || acc.has(xKey(c))).length : 0;
         if (!last || !(nCh || nTy)) { toast("Choose a file with new challans or typed quantities first."); return; }
         const r = await check(true); if (!r) return;
         const bits = [];

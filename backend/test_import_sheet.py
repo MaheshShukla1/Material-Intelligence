@@ -182,15 +182,24 @@ def test_an_invoiced_ra_is_never_changed(env):
     assert j["typed"]["changes"] == [] and any("already invoiced" in x for x in j["typed"]["problems"])
 
 
-def test_a_quantity_above_the_boq_is_refused_and_listed_not_saved(env):
+def test_a_quantity_above_the_boq_is_listed_as_extra_and_saved_only_when_accepted(env):
+    import json
     client, d, tmp = prepared(env)
     ra = new_ra(client, "install")
     p = filled(client, ra, tmp, typed=[("GI pipe 100mm", 0, 130), ("Butterfly valve 150mm", 0, 3)])
-    j = up(client, p, ra).json()
-    assert [c["desc"] for c in j["typed"]["changes"]] == ["Butterfly valve 150mm"]
-    assert any("GI pipe 100mm" in x and "BOQ qty is 100" in x for x in j["typed"]["problems"])
-    up(client, p, ra, commit=True)
+    j = up(client, p, ra).json()                                         # preview: both are listed, the big one flagged as extra
+    by = {c["desc"]: c for c in j["typed"]["changes"]}
+    assert set(by) == {"Butterfly valve 150mm", "GI pipe 100mm"}
+    assert by["GI pipe 100mm"]["over"] is True and by["GI pipe 100mm"]["extra"] == 30 and "over" not in by["Butterfly valve 150mm"]
+    j = up(client, p, ra, commit=True).json()                            # nothing ticked: the extra is NOT taken, the rest is
+    assert any("GI pipe 100mm" in x and "not accepted" in x for x in j["typed"]["problems"])
     assert line(bill(client, ra), "3")["install"]["this"] == 20
+    acc = json.dumps([{"ra": ra, "item_code": "3", "stage": "install"}])
+    j = up(client, p, ra, commit=True, accept_over=acc).json()           # ticked: taken, and the line is marked Extra
+    assert j["committed"] is True
+    b = bill(client, ra)
+    assert line(b, "3")["install"]["this"] == 130 and line(b, "3")["install"]["extra"] == 30 and line(b, "3")["install"]["accepted"] is True
+    assert b["excess"] == []
 
 
 def test_a_negative_number_is_refused(env):

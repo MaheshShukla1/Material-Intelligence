@@ -136,7 +136,7 @@ async function main() {
   ({ window, d, calls } = await boot({ fail: "BOQ qty is 2 and 1 is already billed. More than that cannot be billed." }));
   click(window, [...d.querySelectorAll(".spnav button")].find((x) => x.dataset.v === "billing")); await sleep(80);
   click(window, d.querySelector(".bl-rar")); await sleep(60);
-  click(window, d.querySelector("[data-edit]")); await sleep(10); d.getElementById("bl-q").value = "9";
+  click(window, d.querySelector("[data-edit]")); await sleep(10); d.getElementById("bl-q").value = "1";
   click(window, d.querySelector("#bl-modal .mact .primary")); await sleep(60);
   ok(/BOQ qty is 2/.test(d.getElementById("bl-toast").textContent), "server rejection reason shown in a toast");
 

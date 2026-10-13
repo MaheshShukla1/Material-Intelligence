@@ -722,6 +722,11 @@ def _prev(store, service, stage, exclude_id):
     return prev
 
 
+def _accepted(ra, code, stage):
+    """True when the person accepted, in THIS draft, billing above the BOQ qty for this line and stage."""
+    return bool((((ra.get("accept_excess") or {}).get(code)) or {}).get(stage))
+
+
 def _fmt_ra(ra):
     return f"{ra['service']} · {SERIES_NAME[ra['series']]} RA {ra['no']}"
 
@@ -857,18 +862,25 @@ def _bill(slug, d, store, ra):
         for stage in stages:
             pct = _stage_pct(setup, code, stage)
             pq, pa = prevs[stage].get(code, (0.0, 0.0))
+            ov = ((ra.get("overrides") or {}).get(code) or {}).get(stage)
+            # The cap is the BOQ qty. Extra that an EARLIER RA already billed stays billed (so the next RA never goes negative),
+            # and a line the person ACCEPTED in this draft has no cap: nothing goes above the BOQ without that explicit step.
+            acc = _accepted(ra, code, stage)
+            cap = float("inf") if acc else max(ln["boq_qty"], pq)
+            have = None
             if stage == "install":
-                utd, source, note = min(inst.get(code, 0.0), ln["boq_qty"]), "progress", "Work done, from Site Progress"
-                if inst.get(code, 0.0) > ln["boq_qty"] + 1e-9:
-                    warnings.append({"item_code": code, "stage": stage, "msg":
-                        f"{ln['desc'][:70]}: Site Progress shows {inst[code]:g} {ln['unit']} done, {inst[code] - ln['boq_qty']:g} {ln['unit']} above the BOQ qty of {ln['boq_qty']:g}. Billed only up to the BOQ qty."})
+                have = inst.get(code, 0.0)
+                utd, source, note = min(have, cap), "progress", "Work done, from Site Progress"
+                if have > cap + 1e-9:
+                    warnings.append({"item_code": code, "stage": stage, "over": ov is None, "have": have, "cap": cap, "source": "progress", "msg":
+                        f"{ln['desc'][:70]}: Site Progress shows {have:g} {ln['unit']} done, {have - ln['boq_qty']:g} {ln['unit']} above the BOQ qty of {ln['boq_qty']:g}. Billed only up to the BOQ qty."})
             else:
                 q, source, note = sup.get(code, (None, "manual", ""))
-                utd = None if q is None else min(q, ln["boq_qty"])
-                if source == "challan" and q is not None and q > ln["boq_qty"] + 1e-9:
-                    warnings.append({"item_code": code, "stage": stage, "msg":
+                have = q
+                utd = None if q is None else min(q, cap)
+                if source == "challan" and q is not None and q > cap + 1e-9:
+                    warnings.append({"item_code": code, "stage": stage, "over": ov is None, "have": q, "cap": cap, "source": "challan", "msg":
                         f"{ln['desc'][:70]}: challans total {q:g} {ln['unit']} but the BOQ qty is {ln['boq_qty']:g}. Billed only up to the BOQ qty."})
-            ov = ((ra.get("overrides") or {}).get(code) or {}).get(stage)
             if ov is not None:
                 this, reason = ov["qty"], ov.get("reason", "")
                 if source == "manual":
@@ -879,6 +891,12 @@ def _bill(slug, d, store, ra):
             amount = None if (this is None or pct is None) else ln["rate"] * this * pct / 100.0
             c = {"pct": pct, "prev": round(pq, 4), "prev_amount": pa, "utd": utd, "this": this, "amount": amount,
                  "source": source, "overridden": ov is not None, "reason": reason, "note": note}
+            if this is not None and pq + this > max(ln["boq_qty"], pq) + 1e-9:       # qty above the BOQ that THIS bill carries
+                xq = round(pq + this - max(ln["boq_qty"], pq), 4)
+                c["extra"] = xq
+                c["extra_amount"] = None if pct is None else ln["rate"] * xq * pct / 100.0
+            if acc:
+                c["accepted"] = True
             if stage == "supply" and code in stk:
                 c["stock_qty"] = stk[code]
             row[stage] = c
@@ -908,7 +926,26 @@ def _bill(slug, d, store, ra):
         other = {"wo_amount": wo_other, "stages": {s: {"prev": ot[s]["prev"], "this": ot[s]["this"],
                                                        "total": ot[s]["prev"] + ot[s]["this"]} for s in stages}}
     this_total = sum(tot[s]["this"] for s in stages)
-    return {"ra": _ra_summary(ra, this_total),
+    # quantity above the BOQ: what is NOT billed yet (waiting for the person's accept) and what IS billed as extra
+    excess, extra_lines = [], []
+    for w_ in warnings:
+        if not w_.get("over"):
+            continue
+        ln_ = next(x for x in lines if x["item_code"] == w_["item_code"])
+        pct_ = _stage_pct(setup, w_["item_code"], w_["stage"])
+        ex = round(w_["have"] - w_["cap"], 4)
+        excess.append({"item_code": w_["item_code"], "stage": w_["stage"], "desc": ln_["desc"], "unit": ln_["unit"],
+                       "boq_qty": ln_["boq_qty"], "have": w_["have"], "extra": ex, "source": w_["source"], "rate": ln_["rate"],
+                       "pct": pct_, "amount": None if pct_ is None else ln_["rate"] * ex * pct_ / 100.0})
+    for r_ in rows:
+        for s_ in stages:
+            c_ = r_.get(s_) or {}
+            if c_.get("extra"):
+                extra_lines.append({"item_code": r_["item_code"], "stage": s_, "desc": r_["desc"], "unit": r_["unit"],
+                                    "boq_qty": r_["boq_qty"], "extra": c_["extra"], "amount": c_.get("extra_amount"),
+                                    "accepted": bool(c_.get("accepted"))})
+    extra_total = sum(x["amount"] or 0.0 for x in extra_lines)
+    return {"ra": _ra_summary(ra, this_total), "excess": excess, "extra_lines": extra_lines, "extra_total": extra_total,
             "pct": {s: _num(setup.get(s + "_pct")) for s in stages},
             "lines": rows, "groups": gout, "groups_confirmed": confirmed, "other": other,
             "totals": {s: {**tot[s], "total": tot[s]["prev"] + tot[s]["this"]} for s in stages},
@@ -1456,17 +1493,20 @@ def overview(slug: str):
         if r["status"] == "locked":
             billed += r["snap"]["this_total"]
             ras.append(_ra_summary(r, r["snap"]["this_total"]) | {"lines": len(r["snap"]["lines"]), "up_to_date": None,
-                                                                   "stage_this": _stage_this(r["snap"])})
+                                                                   "stage_this": _stage_this(r["snap"]),
+                                                                   "extra_n": len(r["snap"].get("extra_lines") or [])})
         else:
             b = _bill(slug, d, store, r)
             for w in b["warnings"]:
-                notes.append({"kind": "over", "ra": r["id"], "msg": w["msg"]})
+                if w.get("over") is None:               # anything but quantity above the BOQ: that one is shown inside the draft
+                    notes.append({"kind": "over", "ra": r["id"], "msg": w["msg"]})
             n_un = sum(b["unfilled"].values())
             if n_un:
                 notes.append({"kind": "manual", "ra": r["id"],
                               "msg": f"{_fmt_ra(r)}: {n_un} lines need a quantity typed in (not linked to stock, or not safe to compute). Quantities are never guessed."})
             ras.append(_ra_summary(r, b["this_total"]) | {"lines": len(b["lines"]), "up_to_date": None,
-                                                          "stage_this": _stage_this(b)})
+                                                          "stage_this": _stage_this(b),
+                                                          "over_n": len(b["excess"]), "extra_n": len(b["extra_lines"])})
     # up-to-date per RA = everything locked up to and including it in its stages (+ own draft)
     for r in ras:
         raw = _ra(store, r["id"])
@@ -1786,13 +1826,59 @@ def set_line(slug: str, ra_id: str, payload: dict):
             raise HTTPException(400, "qty must be a number")
         reason = (payload.get("reason") or "").strip()
         prev = _prev(store, ra["service"], stage, ra["id"]).get(code, (0.0, 0.0))[0]
-        if prev + q > ln["boq_qty"] + 1e-9:
-            raise HTTPException(400, f"BOQ qty is {ln['boq_qty']:g} and {prev:g} is already billed. More than that cannot be billed.")
+        if prev + q > max(ln["boq_qty"], prev) + 1e-9 and not _accepted(ra, code, stage):
+            if not payload.get("accept_excess"):
+                raise HTTPException(400, f"BOQ qty is {ln['boq_qty']:g} and {prev:g} is already billed. More than that cannot be billed.")
+            ra.setdefault("accept_excess", {}).setdefault(code, {})[stage] = True      # the person accepted the extra in the pop-up
         ov.setdefault(code, {})[stage] = {"qty": q, "reason": reason}
         if code in (ra.get("removed") or ()):           # "+ Add line" on a line that was taken out: it is back in the draft
             ra["removed"] = [c for c in ra["removed"] if c != code]
     _save(d, store)
     return {"ok": True}
+
+
+@router.post("/{slug}/ra/{ra_id}/accept-excess")
+def accept_excess(slug: str, ra_id: str, payload: dict):
+    """Body {items: [{item_code, stage}], accept?: true|false}. Accept = bill the quantity above the BOQ in THIS draft
+    (same rate and %, shown as Extra); accept=false takes it back to the BOQ quantity. Nothing is accepted by default.
+    Only a draft changes: the BOQ, Site Progress and invoiced RAs are never touched. A later RA starts after what this one
+    billed, so the extra is never billed twice."""
+    d = sp._need(slug)
+    store = _load(d)
+    ra = _ra(store, ra_id)
+    if ra["status"] != "draft":
+        raise HTTPException(409, "A locked RA cannot be changed. Reopen it first.")
+    items = payload.get("items") or []
+    if not items:
+        raise HTTPException(400, "Nothing to accept.")
+    accept = payload.get("accept", True)
+    codes = {l["item_code"] for l in _lines(d, ra["service"])}
+    acc = ra.setdefault("accept_excess", {})
+    n = 0
+    for it in items:
+        code, stage = str(it.get("item_code")), it.get("stage")
+        if code not in codes or stage not in STAGES[ra["series"]]:
+            raise HTTPException(400, "this line or stage is not part of this RA")
+        if accept:
+            acc.setdefault(code, {})[stage] = True
+        else:
+            acc.get(code, {}).pop(stage, None)
+            if code in acc and not acc[code]:
+                acc.pop(code)
+            # a typed quantity that only stood because of the acceptance goes too: the line is back to the BOQ qty
+            ln = next(l for l in _lines(d, ra["service"]) if l["item_code"] == code)
+            o = ((ra.get("overrides") or {}).get(code) or {}).get(stage)
+            prev = _prev(store, ra["service"], stage, ra["id"]).get(code, (0.0, 0.0))[0]
+            if o is not None and prev + o["qty"] > max(ln["boq_qty"], prev) + 1e-9:
+                ra["overrides"][code].pop(stage, None)
+                if not ra["overrides"][code]:
+                    ra["overrides"].pop(code)
+        n += 1
+    if not acc:
+        ra.pop("accept_excess", None)
+    _save(d, store)
+    b = _bill(slug, d, store, ra)
+    return {"ok": True, "n": n, "extra_total": b["extra_total"], "excess": len(b["excess"])}
 
 
 @router.post("/{slug}/ra/{ra_id}/line/remove")
@@ -2368,13 +2454,14 @@ def parse_typed_sheet(raw):
     return None
 
 
-def _typed_changes(slug, d, store, service, parsed, ra_id):
+def _typed_changes(slug, d, store, service, parsed, ra_id, accept=None):
     """What the typed quantities of an uploaded sheet would change. Nothing is written here.
     -> {sheet, ra, changes[], problems[], unpaired[], new_overrides: [(ra, code, stage, qty)]}.
     Rules (never a guess): the sheet's RA number and stage must match an OPEN draft of this service (and the draft the person
     came from, if any); a typed number counts only where it differs from what the draft shows now; a line is paired by exactly
     the same narrow rules as the challan import (_pair_lines); a quantity that would take the line above its BOQ quantity is
-    refused and listed."""
+    listed as 'over' (extra) and is imported ONLY when the person accepted it (`accept`: a set of (ra id, item code, stage)),
+    otherwise it is skipped and said so."""
     lines = _lines(d, service)
     pairs = _pair_lines(parsed["items"], lines)
     by_row = {it["row"]: it for it in parsed["items"]}
@@ -2428,12 +2515,16 @@ def _typed_changes(slug, d, store, service, parsed, ra_id):
             if now is not None and abs(now - v) < 1e-9:
                 continue
             before = prev.get(code, (0.0, 0.0))[0]
-            if before + v > ln["boq_qty"] + 1e-9:
-                problems.append(f"{ln['desc'][:60]}: BOQ qty is {ln['boq_qty']:g} and {before:g} is already billed, so {v:g} cannot be billed; skipped.")
-                continue
-            changes.append({"ra": ra["id"], "ra_label": _fmt_ra(ra), "together": len(STAGES[ra["series"]]) > 1, "stage": stage, "stage_name": nm, "item_code": code,
-                            "desc": ln["desc"], "unit": ln["unit"], "now": now, "sheet": v})
-            apply_.append((ra["id"], code, stage, v))
+            over = before + v > max(ln["boq_qty"], before) + 1e-9 and not _accepted(ra, code, stage)
+            ch = {"ra": ra["id"], "ra_label": _fmt_ra(ra), "together": len(STAGES[ra["series"]]) > 1, "stage": stage, "stage_name": nm, "item_code": code,
+                  "desc": ln["desc"], "unit": ln["unit"], "now": now, "sheet": v}
+            if over:
+                ch.update({"over": True, "boq_qty": ln["boq_qty"], "extra": round(before + v - max(ln["boq_qty"], before), 4)})
+                if accept is not None and (ra["id"], code, stage) not in accept:
+                    problems.append(f"{ln['desc'][:60]}: {v:g} is above the BOQ qty of {ln['boq_qty']:g}; not accepted, so it was not imported.")
+                    continue
+            changes.append(ch)
+            apply_.append((ra["id"], code, stage, v, over))
     return {"sheet": parsed["sheet"], "changes": changes, "problems": problems, "unpaired": unpaired, "apply": apply_}
 
 
@@ -2448,7 +2539,7 @@ class _Bytes:
 
 @router.post("/{slug}/import-sheet/{service}")
 async def import_sheet(slug: str, service: str, file: UploadFile = File(...), commit: bool = Form(False),
-                       lock_upto: int = Form(0), ra_id: str = Form("")):
+                       lock_upto: int = Form(0), ra_id: str = Form(""), accept_over: str = Form("")):
     """ONE upload for the downloaded RA workbook, filled in. It brings back, together:
       - the challans of its CHALLAN sheet (only for a service billed from challans; exactly the challan import), and
       - the quantities typed into its 'THIS BILL QTY' column, for Supply and/or Installation, which become the typed
@@ -2481,7 +2572,13 @@ async def import_sheet(slug: str, service: str, file: UploadFile = File(...), co
             chres = await import_challans(slug, service, _Bytes(raw), commit=False, lock_upto=lock_upto)
         else:
             chnote = f"The CHALLAN sheet in this file was not read: {service} takes its supply quantity from the stock register, not from challans."
-    typed = _typed_changes(slug, d, store, service, parsed, ra_id or None) if parsed else None
+    acc = None
+    if commit:                                    # what the person ticked as "accept this extra over the BOQ" (JSON list); nothing ticked = nothing accepted
+        try:
+            acc = {(str(a["ra"]), str(a["item_code"]), str(a["stage"])) for a in json.loads(accept_over or "[]")}
+        except Exception:
+            raise HTTPException(400, "accept_over must be a JSON list of {ra, item_code, stage}.")
+    typed = _typed_changes(slug, d, store, service, parsed, ra_id or None, acc) if parsed else None
     res = {"challans": chres, "challan_note": chnote, "committed": False,
            "typed": None if typed is None else {k: v for k, v in typed.items() if k != "apply"}, "applied": 0}
     if not commit:
@@ -2493,11 +2590,13 @@ async def import_sheet(slug: str, service: str, file: UploadFile = File(...), co
         res["challans"] = await import_challans(slug, service, _Bytes(raw), commit=True, lock_upto=lock_upto)
     if n_typed:
         store2 = _load(d)
-        for rid, code, stage, v in typed["apply"]:
+        for rid, code, stage, v, over in typed["apply"]:
             r = _ra(store2, rid)
             if r["status"] != "draft":
                 continue
-            r.setdefault("overrides", {}).setdefault(code, {})[stage] = {"qty": v, "reason": "Typed in the uploaded Excel"}
+            if over:
+                r.setdefault("accept_excess", {}).setdefault(code, {})[stage] = True
+            r.setdefault("overrides", {}).setdefault(code, {})[stage] = {"qty": v, "reason": "Typed in the uploaded Excel" + (" (extra over BOQ, accepted)" if over else "")}
         _save(d, store2)
         res["applied"] = n_typed
     res["committed"] = True
@@ -3935,12 +4034,16 @@ def _write_ra(wb, slug, d, store, ra, names, want):
             this_q = c["this"] if c and c["this"] is not None else 0.0
             this_v = c["amount"] if c and c["amount"] is not None else 0.0
             fig[code][s] = {"pct": pct, "rate": rate, "pq": pq, "pa": pa, "tq": this_q, "tv": this_v,
+                            "xq": (c or {}).get("extra") or 0.0, "xv": (c or {}).get("extra_amount") or 0.0,
+                            "acc": bool((c or {}).get("accepted")),
                             "ov": bool(c and c["overridden"]), "reason": (c or {}).get("reason", ""),
                             "ratepct": None if pct is None else rate * pct / 100.0}
 
     GREEN = PatternFill("solid", fgColor="C6E0B4")
     PEACH = PatternFill("solid", fgColor="FCE4D6")
     DRAFT_F = PatternFill("solid", fgColor="FFF2CC")
+    EXTRA_F = PatternFill("solid", fgColor="FFE699")
+    extra_rows = []
     BOLD, NORM = Font(name="Calibri", bold=True, size=11), Font(name="Calibri", size=11)
     thin = Side(style="thin", color="000000")
     BOX = Border(left=thin, right=thin, top=thin, bottom=thin)
@@ -4099,7 +4202,13 @@ def _write_ra(wb, slug, d, store, ra, names, want):
             ws[f"{H}{r}"] = f_["pq"]
             chain = (use_ch and s == "supply" and not f_["ov"])
             if chain:
-                put(ws, f"{I}{r}", f_["tq"], f"MIN(D{r},'{ABS_N}'!{L(abs_tot)}{r})-{H}{r}")
+                # the cap is the BOQ qty (or what an earlier RA already billed); a line the person accepted above the BOQ has none
+                if f_["acc"]:
+                    put(ws, f"{I}{r}", f_["tq"], f"'{ABS_N}'!{L(abs_tot)}{r}-{H}{r}")
+                elif f_["pq"] > ln["boq_qty"] + 1e-9:
+                    put(ws, f"{I}{r}", f_["tq"], f"MIN(MAX(D{r},{H}{r}),'{ABS_N}'!{L(abs_tot)}{r})-{H}{r}")
+                else:
+                    put(ws, f"{I}{r}", f_["tq"], f"MIN(D{r},'{ABS_N}'!{L(abs_tot)}{r})-{H}{r}")
             else:
                 ws[f"{I}{r}"] = f_["tq"]
             put(ws, f"{J}{r}", f_["pq"] + f_["tq"], f"{H}{r}+{I}{r}")
@@ -4116,6 +4225,12 @@ def _write_ra(wb, slug, d, store, ra, names, want):
                 ws[f"{col}{r}"].number_format = _INR2
             if f_["ov"] and f_["reason"]:
                 ws[f"{I}{r}"].comment = Comment(f_["reason"], "MI")
+            if f_["xq"] > 0:                                   # extra over the BOQ: yellow, with a note saying how much
+                for col in (I, Lc):
+                    ws[f"{col}{r}"].fill = EXTRA_F
+                note = f"Extra over BOQ: {f_['xq']:g} {ln['unit']} above the BOQ quantity of {ln['boq_qty']:g}. Accepted in Material Intelligence."
+                ws[f"{I}{r}"].comment = Comment(note + (f"\n{f_['reason']}" if f_["ov"] and f_["reason"] else ""), "MI")
+                extra_rows.append((e["sr"], e["desc"], e["unit"], ln["boq_qty"], f_["pq"] + f_["tq"], f_["xq"], f_["ratepct"], f_["xv"], s))
             if f_["tq"] < 0:
                 ws[f"{I}{r}"].font = Font(color="A02622", bold=True)
         if use_ch:
@@ -4272,6 +4387,72 @@ def _write_ra(wb, slug, d, store, ra, names, want):
             del wb[names[k]]
     if ws_wire is not None and live:
         ws_wire.sheet_properties.tabColor = "FFD966"
+    if extra_rows and "boq" in want:
+        _fill_extra_sheet(wb.create_sheet(_extra_sheet_name(names, wb.sheetnames)), extra_rows, stages, bill, service, meta, live)
+
+
+def _extra_sheet_name(names, taken):
+    """'Extra over BOQ' in the plain layout; else the BOQ tab's own prefix + ' EXTRA' (never a clash, 31 characters at most)."""
+    base = "Extra over BOQ" if names["boq"] == "Annexure B-BOQ" else _sheet_safe(names["boq"][:-len("BOQ")].rstrip() + " EXTRA")
+    n, i, low = base, 2, {x.lower() for x in taken}
+    while n.lower() in low:
+        n = base[:28] + f" {i}"
+        i += 1
+    return n
+
+
+def _fill_extra_sheet(ws, rows, stages, bill, service, meta, live):
+    """One page for the client: the lines billed above their BOQ quantity in this RA (values only, it is a record, not a calculation).
+    Only exists when something was accepted."""
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    BOLD = Font(name="Calibri", bold=True, size=11)
+    thin = Side(style="thin", color="000000")
+    BOX = Border(left=thin, right=thin, top=thin, bottom=thin)
+    ws["A1"] = meta.get("client") or ""
+    ws["A1"].font = Font(name="Calibri", bold=True, size=13)
+    ws["A2"], ws["B2"] = "Work", f"{_unit_text(service)} works"
+    ws["A3"], ws["B3"] = "Subject", f"Quantity billed above the BOQ quantity, RA-{bill['ra']['no']:02d}"
+    ws["A4"], ws["B4"] = "Contractor", meta.get("contractor") or ""
+    for r_ in (2, 3, 4):
+        ws.cell(r_, 1).font = BOLD
+    if live:
+        ws.cell(5, 2, "DRAFT — not invoiced yet, numbers can still change").font = Font(name="Calibri", bold=True, color="A02622")
+    heads = ["Sr. No", "Description", "Unit", "BOQ qty", "Billed up to this bill", "Extra over BOQ", "Rate (as billed)", "Extra amount"]
+    multi = len(stages) > 1
+    if multi:
+        heads.insert(3, "Stage")
+    for j, t in enumerate(heads, start=1):
+        c = ws.cell(7, j, t)
+        c.font, c.border = BOLD, BOX
+        c.fill = PatternFill("solid", fgColor="FCE4D6")
+        c.alignment = Alignment(wrap_text=True, horizontal="center", vertical="center")
+    r = 8
+    total = 0.0
+    for sr, desc, unit, boq, billed, xq, ratepct, xv, stage in rows:
+        vals = [sr if sr != "" else None, desc, unit] + ([STAGE_NAME[stage]] if multi else []) + [boq, billed, xq, ratepct, xv]
+        for j, v in enumerate(vals, start=1):
+            c = ws.cell(r, j, v)
+            c.border = BOX
+            c.alignment = Alignment(wrap_text=(j == 2), vertical="top")
+        base_j = 4 + (1 if multi else 0)
+        for j in (base_j, base_j + 1, base_j + 2):
+            ws.cell(r, j).number_format = "#,##0.00"
+        ws.cell(r, base_j + 2).fill = PatternFill("solid", fgColor="FFE699")
+        ws.cell(r, base_j + 3).number_format = _INR2
+        ws.cell(r, base_j + 4).number_format = _INR2
+        total += xv or 0.0
+        r += 1
+    last = len(heads)
+    ws.cell(r, 2, "Total extra").font = BOLD
+    ws.cell(r, last, total).number_format = _INR2
+    for j in range(1, last + 1):
+        ws.cell(r, j).border = BOX
+        ws.cell(r, j).font = BOLD
+    for col, wd in zip("ABCDEFGHI", (8, 70, 8, 11, 14, 14, 14, 15, 15)):
+        ws.column_dimensions[col].width = wd
+    ws.row_dimensions[7].height = 34
+    ws.sheet_view.showGridLines = False
+    ws.sheet_properties.tabColor = "FFD966"
 
 
 def _wire_sheet_name(names, taken):

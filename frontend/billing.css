@@ -122,7 +122,8 @@
 .bl-meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;align-items:end}
 .bl-gwrap{overflow:auto}
 .bl-gt{border-collapse:collapse;width:100%;font-size:13px}
-.bl-gt th{text-align:left;font-size:11.5px;color:var(--ink2);padding:4px 6px}
+.bl-gt th{position:static;text-align:left;font-size:11.5px;color:var(--ink2);padding:4px 6px}
+.bl-gt thead th{background:transparent;border-bottom:1px solid var(--line2)}     /* the app-wide sticky th (top:var(--hdr)) sat 64px down inside this dialog and covered the first rows */
 .bl-gt td{padding:3px 4px}
 .bl-gt .ctl{width:100%}
 .bl-lpl{display:grid;gap:8px;margin-bottom:12px}

@@ -1396,7 +1396,8 @@
       `<div id="bl-gbody" class="bl-gwrap"></div>`, [
         { label: "Cancel", run: closeModal },
         { label: "Use sheet’s own rows", run: async () => { await jsend(api("/" + B.slug + "/groups/" + encodeURIComponent(x.service)), { groups: [] }); closeModal(); toast("Back to the sheet’s own rows."); showSetup(); } },
-        { label: "Save groups", cls: "primary", run: async () => { await jsend(api("/" + B.slug + "/groups/" + encodeURIComponent(x.service)), { groups: rows }); closeModal(); toast("Groups saved."); showSetup(); } }], "min(860px,96vw)");
+        { label: "Save groups", cls: "primary", run: async () => { await jsend(api("/" + B.slug + "/groups/" + encodeURIComponent(x.service)), { groups: rows }); closeModal(); toast("Groups saved."); showSetup(); } }], "min(1000px,96vw)");
+    $("bl-modal").querySelector(".card").classList.add("bl-dlcard");        // header and Save stay in view, the rows scroll
     draw();
   }
 

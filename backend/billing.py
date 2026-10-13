@@ -1361,8 +1361,14 @@ def save_packages(slug: str, base: str, payload: dict):
                 if any(_unit_state(store, u).values()) and taken & {l["item_code"] for l in _lines(d, u)}:
                     raise HTTPException(409, f"Some of these groups already sit in {_unit_text(u)}, which has RAs or challans.")
     plain_state = _unit_state(store, base) if not old else {"ras": 0, "challans": 0}
-    if not old and (store.get("wire") or {}).get(base):
-        raise HTTPException(409, f"{base} already has wire challans, so it cannot be split into Work Orders now. "
+    # Only real wire blocks the first split: a wire challan, or metres already given to point lines. The service's wire
+    # record can exist without either (the source was chosen, a challan was typed and deleted, "Save metres" was pressed
+    # with nothing given): that holds no data, so it must not stop the split. It is dropped below, as the base unit goes away.
+    wire_base = (store.get("wire") or {}).get(base) or {}
+    if not old and (wire_base.get("challans") or wire_base.get("alloc")):
+        n_w = len(wire_base.get("challans") or [])
+        what = f"{n_w} wire challan{'s' if n_w != 1 else ''}" if n_w else "wire metres given to point lines"
+        raise HTTPException(409, f"{base} already has {what}, so it cannot be split into Work Orders now. "
                                  "Split it first, then enter the wire in the Work Order that holds the point wiring.")
 
     # ---- first split of a service that already has RAs / challans: plan everything before touching the store
@@ -1409,6 +1415,7 @@ def save_packages(slug: str, base: str, payload: dict):
         base_setup = store["setup"].pop(base, None)
         base_groups = store["groups"].pop(base, None)
         store["challans"].pop(base, None)
+        (store.get("wire") or {}).pop(base, None)        # the empty wire record of the unit that no longer exists
         (store.get("auto_skip") or {}).pop(base, None)
         for u in new_units:
             if base_setup is not None:

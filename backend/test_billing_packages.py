@@ -318,3 +318,56 @@ def test_downloads_and_the_all_services_excel_work_with_two_work_orders(env):
     reg = wb["RA Register"]
     svc = {reg.cell(i, 1).value for i in range(5, 12)}
     assert PUMPS in svc and HYD in svc
+
+
+# ------------------------------------------- the wire record of a service that has NO wire must not stop the split
+# Reported on Thoth Electrical: no challan, no wire delivery, "Wire -> points" empty, yet Save Work Orders said
+# "Electrical already has wire challans, so it cannot be split into Work Orders now". The guard looked at whether the
+# service's wire record EXISTS, not at whether it holds any wire.
+def wire_rec(client):
+    st = billing._load(__import__("backend.siteprogress", fromlist=["x"])._need("test-thoth"))
+    return (st.get("wire") or {}).get("Fire")
+
+
+def test_choosing_the_wire_source_leaves_a_record_and_the_split_still_works(env):
+    client, d, _ = env
+    cs(client)
+    assert client.put(f"{B}/wire/Fire/source", json={"source": "stock"}).status_code == 200
+    assert wire_rec(client) is not None                       # the record exists, but holds no wire
+    r = split(client)
+    assert r["ok"] is True and r["units"] == [PUMPS, HYD]
+    assert wire_rec(client) is None                           # the empty record of the unit that no longer exists is gone
+    assert client.get(f"{B}/wire/{PUMPS}").status_code == 200  # the Work Orders have their own (empty) wire state
+
+
+def test_a_wire_challan_typed_and_deleted_again_does_not_stop_the_split(env):
+    client, d, _ = env
+    cs(client)
+    r = client.post(f"{B}/wire/Fire/challans", json={"no": "W1", "date": "2026-07-04", "sizes": [{"size": "1.5", "colours": {"RED": 100}}]})
+    assert r.status_code == 200, r.text
+    cid = client.get(f"{B}/wire/Fire").json()["challans"][0]["id"]
+    assert client.delete(f"{B}/wire/Fire/challans/{cid}").status_code == 200
+    assert client.get(f"{B}/wire/Fire").json()["challans"] == []
+    assert wire_rec(client) is not None
+    split(client)
+
+
+def test_save_metres_with_nothing_given_does_not_stop_the_split(env):
+    client, d, _ = env
+    cs(client)
+    assert client.put(f"{B}/wire/Fire/alloc", json={"rows": []}).status_code == 200
+    split(client)
+
+
+def test_real_wire_still_blocks_the_split_and_the_message_says_what_it_is(env):
+    client, d, _ = env
+    cs(client)
+    r = client.post(f"{B}/wire/Fire/challans", json={"no": "W1", "date": "2026-07-04", "sizes": [{"size": "1.5", "colours": {"RED": 100}}]})
+    assert r.status_code == 200, r.text
+    g = groups(client)
+    r = client.post(f"{B}/packages/Fire", json={"items": [
+        {"name": "Pumps", "groups": [{"sheet": g[0]["sheet"], "from": g[0]["from"], "to": g[0]["to"]}]}, {"name": "Hydrants", "rest": True}]})
+    assert r.status_code == 409
+    assert "already has 1 wire challan," in r.json()["detail"] and "cannot be split" in r.json()["detail"]
+    assert wire_rec(client) is not None                       # nothing was changed
+    assert client.get(f"{B}/packages/Fire").json()["split"] is False

@@ -27,13 +27,16 @@ The engine, its routes and its files are never written here.
 """
 import json
 import io
+import os
+import hmac
+import time
 import shutil
 import datetime as dt
 import functools
 from pathlib import Path
 
 import pandas as pd
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile, Response, Query
+from fastapi import APIRouter, File, Form, Header, HTTPException, UploadFile, Response, Query
 
 from . import structure, boq, activity, progress, pnl, linkage, schema, subcat, realtime, itemprog, dpr, shortage_history
 
@@ -1938,8 +1941,34 @@ def export_dpr(slug: str, start: str, end: str = None, service: str = None,
         headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
 
+# ------------------------------------------------------------ admin lock
+# Rebuilding the structure wipes ALL recorded progress of the project. The Rebuild button is hidden for everybody (the page only shows it
+# after the owner's secret hold / Ctrl+Shift+A). OPTIONAL extra lock: if the environment variable MI_ADMIN_PASSWORD is set on the server
+# (start.bat / the host's settings), Rebuild also needs that password: the browser sends it in the X-Mi-Admin header (URL-encoded) and the
+# server compares it in constant time. NOT set => no password is asked (hiding the button is then the only protection).
+ADMIN_ENV = "MI_ADMIN_PASSWORD"
+
+
+def _require_admin(supplied):
+    from urllib.parse import unquote
+    pw = os.environ.get(ADMIN_ENV, "")
+    if not pw:
+        return                                           # no password configured: nothing to check
+    if not supplied or not hmac.compare_digest(unquote(supplied).encode("utf-8"), pw.encode("utf-8")):
+        time.sleep(0.4)                                  # slows down guessing
+        raise HTTPException(403, "Wrong admin password.")
+
+
+@router.post("/{slug}/admin/check")
+def admin_check(slug: str, x_mi_admin: str | None = Header(default=None)):
+    """Does this password open the admin lock? `protected` says whether the server has a password at all (the UI then skips the dialog)."""
+    _need(slug)
+    _require_admin(x_mi_admin)
+    return {"ok": True, "protected": bool(os.environ.get(ADMIN_ENV, ""))}
+
+
 @router.post("/{slug}/structure/reset")
-def reset_structure(slug: str):
+def reset_structure(slug: str, x_mi_admin: str | None = Header(default=None)):
     """Wipe the structure so the setup wizard's template picker (hotel / mall /
     hospital / custom / from-tracker) can run again — e.g. the engineer picked
     the wrong shape, or wants to rebuild after big changes on site.
@@ -1958,6 +1987,7 @@ def reset_structure(slug: str):
     measured against. This clears every service in one pass, since
     item_progress.json is a single project-wide file, not split per service."""
     d = _need(slug)
+    _require_admin(x_mi_admin)                           # wipes every recorded progress of the project
     (d / "structure.json").unlink(missing_ok=True)
     (d / "item_rooms.json").unlink(missing_ok=True)
     (d / "item_progress.json").unlink(missing_ok=True)
@@ -2046,7 +2076,7 @@ def _prune_deleted_rooms(d, valid_room_ids):
 
 
 @router.post("/{slug}/structure/template")
-def structure_from_template(slug: str, payload: dict):
+def structure_from_template(slug: str, payload: dict, x_mi_admin: str | None = Header(default=None)):
     """Build the structure from a named template so the app is not hotel-only.
 
     Body: {"kind":"hotel|mall|hospital|custom", "name":..., plus the template's
@@ -2060,6 +2090,8 @@ def structure_from_template(slug: str, payload: dict):
                                  f"one of {list(structure.TEMPLATES)}")
     d = _dir(slug)
     d.mkdir(parents=True, exist_ok=True)
+    if (d / "structure.json").exists():                  # replacing a structure that is already there = the same damage as a rebuild
+        _require_admin(x_mi_admin)
     fn = structure.TEMPLATES[kind]
     # pass through only the kwargs this template accepts
     import inspect

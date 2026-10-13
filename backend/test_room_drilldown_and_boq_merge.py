@@ -441,7 +441,8 @@ def test_structure_reset_clears_all_progress_but_keeps_everything_else(tmp_path,
         {"Electrical": {"2.1": {"*": 0.5, room_ids[0]: 1.0}}}))
     (d / "item_rooms.json").write_text(json.dumps({"Electrical": {"2.1": room_ids}}))
 
-    r = client.post(f"/api/siteprogress/{slug}/structure/reset")
+    monkeypatch.setenv("MI_ADMIN_PASSWORD", "owner-pw")          # Rebuild is behind the admin password (see test_admin_lock.py)
+    r = client.post(f"/api/siteprogress/{slug}/structure/reset", headers={"X-Mi-Admin": "owner-pw"})
     assert r.status_code == 200
 
     assert not (d / "structure.json").exists()
@@ -470,7 +471,8 @@ def test_structure_reset_clears_every_service_at_once(tmp_path, monkeypatch):
         "Plumbing": {"5.1": {"*": 0.8}},
         "HVAC": {"9.1": {"*": 0.3}},
     }))
-    r = client.post(f"/api/siteprogress/{slug}/structure/reset")
+    monkeypatch.setenv("MI_ADMIN_PASSWORD", "owner-pw")          # Rebuild is behind the admin password (see test_admin_lock.py)
+    r = client.post(f"/api/siteprogress/{slug}/structure/reset", headers={"X-Mi-Admin": "owner-pw"})
     assert r.status_code == 200
     assert not (d / "item_progress.json").exists(), \
         "must clear progress for every service in one pass, not just the first one"

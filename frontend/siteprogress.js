@@ -29,8 +29,8 @@
     if (!r.ok) throw Object.assign(new Error("http"), { status: r.status, body: await r.text() });
     return r.json();
   }
-  async function jpost(u, b) {
-    const r = await fetch(u, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(b) });
+  async function jpost(u, b, hdr) {
+    const r = await fetch(u, { method: "POST", headers: { "Content-Type": "application/json", ...(hdr || {}) }, body: JSON.stringify(b) });
     if (!r.ok) throw Object.assign(new Error("http"), { status: r.status, body: await r.text() });
     return r.json();
   }
@@ -706,9 +706,10 @@
     sp.innerHTML = `${projBar()}
       <div class="sp-layout">
         <aside class="sp-rail">
-          <div class="sp-railhd"><span>Structure</span><span><button class="linkbtn" id="sp-addfloor">+ Add</button> &nbsp;·&nbsp; <button class="linkbtn" id="sp-rebuildstruct">Rebuild</button></span></div>
+          <div class="sp-railhd"><span id="sp-railttl" class="sp-railttl">Structure</span><span><button class="linkbtn" id="sp-addfloor">+ Add</button><span id="sp-railact"></span></span></div>
           <div class="sp-tree" id="sp-tree"></div>
           <p class="sub" style="margin:10px 4px">Type: ${esc((st.structure && st.structure.kind) || "custom")} · ${st.rooms} ${curLeafPluralLower(st.rooms)}. Hover a row to rename/delete.</p>
+          <p class="sub sp-adminrow" id="sp-adminrow"></p>
         </aside>
         <div class="sp-main">
           <div class="sp-pills" id="sp-pills"></div>
@@ -736,7 +737,7 @@
     $("sp-reboq-file").onchange = reuploadBoq;
     const ar = $("sp-allrooms"); if (ar) ar.onclick = () => clearRoom();
     $("sp-addfloor").onclick = () => addNode(S.state.structure.id, topChildType());
-    $("sp-rebuildstruct").onclick = () => rebuildStructure();
+    paintAdmin();
     renderTree(); renderPills(); renderActs(); renderHero();
   }
 
@@ -870,6 +871,69 @@
     (function rm(parent) { parent.children = (parent.children || []).filter((c) => c.id !== id); parent.children.forEach(rm); })(S.state.structure);
     saveTree();
   }
+  // ---------- admin lock ----------
+  // Rebuild wipes every recorded progress of the project, so it is hidden until the owner unlocks it (with the server's
+  // MI_ADMIN_PASSWORD, if the server has one). It is kept for this browser tab only; when the server has a password it checks it on every Rebuild.
+  const adminGet = () => { try { return sessionStorage.getItem("mi_admin") || ""; } catch (e) { return ""; } };
+  const adminSet = (v) => { try { v ? sessionStorage.setItem("mi_admin", v) : sessionStorage.removeItem("mi_admin"); } catch (e) { /* private window: stays locked after reload */ } S.adminPw = v || ""; };
+  const adminHdr = () => ({ "X-Mi-Admin": encodeURIComponent(S.adminPw || "") });
+  function paintAdmin() {
+    if (S.adminPw == null) S.adminPw = adminGet();
+    const act = $("sp-railact"), row = $("sp-adminrow");
+    if (act) {
+      act.innerHTML = S.adminPw ? ` &nbsp;·&nbsp; <button class="linkbtn" id="sp-rebuildstruct">Rebuild</button>` : "";
+      const rb = $("sp-rebuildstruct"); if (rb) rb.onclick = () => rebuildStructure();
+    }
+    if (row) {
+      // locked: nothing on screen at all. Unlocked (this tab only): a small "Lock" so the owner can hide Rebuild again.
+      row.hidden = !S.adminPw;
+      row.innerHTML = S.adminPw ? `<button class="linkbtn" id="sp-adminlock" title="Hide the admin actions again">Admin unlocked · Lock</button>` : "";
+      const lk = $("sp-adminlock"); if (lk) lk.onclick = () => { adminSet(""); paintAdmin(); toast("Admin locked."); };
+    }
+    // The only ways in (no visible hint for anyone else): press and HOLD the "Structure" heading for 1.5 s (phone or mouse),
+    // or Ctrl+Shift+A on a keyboard. Both only open the password dialog; the server still checks the password.
+    const ttl = $("sp-railttl");
+    if (ttl) {
+      const stop = () => { if (S.adminHold) { clearTimeout(S.adminHold); S.adminHold = null; } };
+      ttl.onpointerdown = () => { stop(); if (!S.adminPw) S.adminHold = setTimeout(() => { S.adminHold = null; adminEntry(); }, ADMIN_HOLD_MS); };
+      ttl.onpointerup = ttl.onpointerleave = ttl.onpointercancel = stop;
+      ttl.oncontextmenu = (e) => e.preventDefault();   // a long-press on a phone must not pop the browser's text menu
+    }
+    if (!S.adminKeyWired) {
+      S.adminKeyWired = true;
+      document.addEventListener("keydown", (e) => {
+        if (!(e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey && (e.code === "KeyA" || /^a$/i.test(e.key)))) return;
+        const sp = $("siteprogress"); if (!sp || sp.hidden || S.view !== "siteprogress") return;   // only while Site Progress is on screen
+        e.preventDefault(); adminEntry();
+      });
+    }
+  }
+  const ADMIN_HOLD_MS = 1500;
+  // The secret entry. Unlocked already, a dialog open or no project loaded: nothing. Otherwise ask the server (no password sent): if it has no
+  // MI_ADMIN_PASSWORD there is nothing to type, so Rebuild is shown for this tab straight away; if it has one (403) the password dialog opens.
+  async function adminEntry() {
+    if (S.adminPw || S.adminBusy || $("sp-modal") || !S.slug || !$("sp-railttl")) return;
+    S.adminBusy = true;
+    try {
+      try { await jpost(api("/" + S.slug + "/admin/check"), {}); }
+      catch (e) { if (e.status === 403) return openAdminUnlock(); return toast(briefErr(e)); }
+      adminSet("-"); paintAdmin(); toast("Admin unlocked for this tab.");   // "-" only marks the tab as unlocked; a server without a password ignores it
+    } finally { S.adminBusy = false; }
+  }
+  function openAdminUnlock() {
+    modal("Admin", "Enter the admin password.",
+      `<label class="sp-lbl" for="sp-adminpw" style="display:block;margin-bottom:6px">Admin password</label>
+       <input class="ctl" id="sp-adminpw" type="password" autocomplete="off" style="width:100%"><p class="sub" id="sp-adminerr" style="color:var(--red);margin-top:8px"></p>`,
+      async () => {
+        const pw = $("sp-adminpw").value; if (!pw) { $("sp-adminerr").textContent = "Type the admin password."; return; }
+        try { await jpost(api("/" + S.slug + "/admin/check"), {}, { "X-Mi-Admin": encodeURIComponent(pw) }); }
+        catch (e) { $("sp-adminerr").textContent = e.status === 403 ? "Wrong password." : briefErr(e); return; }
+        adminSet(pw); closeModal(); paintAdmin(); toast("Admin unlocked for this tab.");
+      }, "Unlock", "min(420px,94vw)");
+    const cd = $("sp-modal") && $("sp-modal").querySelector(".card"); if (cd) cd.classList.add("sp-admincard");   // so only this dialog gets the compact Close button
+    const f = $("sp-adminpw"); if (f) { f.focus(); f.onkeydown = (e) => { if (e.key === "Enter") $("sp-modal-save").click(); }; }
+  }
+
   async function rebuildStructure() {
     if (!confirm("Rebuild the structure? This lets you pick a different shape "
       + "(hotel / mall / hospital / custom) or re-import from a tracker. "
@@ -877,8 +941,11 @@
       + `recorded progress (every item, every service, every ${curLeafLower()}) is `
       + `cleared, since it was measured against the ${curLeafLower()} structure you're `
       + "replacing and would be meaningless against the new one.")) return;
-    try { await jpost(api("/" + S.slug + "/structure/reset"), {}); }
-    catch (e) { return toast("Reset failed: " + briefErr(e)); }
+    try { await jpost(api("/" + S.slug + "/structure/reset"), {}, adminHdr()); }
+    catch (e) {
+      if (e.status === 403 || e.status === 503) { if (e.status === 403) adminSet(""); paintAdmin(); return toast(e.status === 403 ? "Admin password no longer matches. Locked again." : briefErr(e)); }
+      return toast("Reset failed: " + briefErr(e));
+    }
     S.room = null; S.roomName = null;
     await reloadStateQuiet();
     if (S.state) S.state.structure = null;

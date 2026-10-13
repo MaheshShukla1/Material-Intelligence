@@ -571,3 +571,12 @@ body[data-view="inventory"] #leadwrap{display:none !important}
 
 /* amber count on the toolbar's Link stock (saved links with no material in the connected stock) */
 .sp-amb{display:inline-block;min-width:16px;padding:0 6px;border-radius:20px;background:var(--amberbg,#fbf1da);color:var(--amber,#6e4205);font-size:11px;font-weight:600;line-height:16px;text-align:center;text-decoration:none}
+
+/* admin lock: the actions that can wipe a project stay out of sight until the owner unlocks them */
+.sp-adminrow{margin:0 4px}
+.sp-adminrow .linkbtn{font-size:11.5px;color:var(--ink3)}
+.sp-railttl{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent;touch-action:manipulation}
+.sp-adminrow[hidden]{display:none}
+/* the admin password dialog: Close stays a normal-sized button instead of stretching to the heading's height */
+.sp-admincard .sheethd{align-items:flex-start}
+.sp-admincard .sheethd .btn{align-self:flex-start;flex:none}

@@ -798,3 +798,11 @@ body[data-view="billing"] #report{display:none !important}
 @media (max-width:640px){ .bl-lr .n .bl-xtag{margin-left:0} .bl-xback{margin-left:0} }
 .bl-kpi .bl-xi{margin-top:6px;color:var(--ink2)}
 .bl-kpi .bl-xi .bl-xtag{display:inline-block;width:auto;text-transform:none;letter-spacing:0;font-size:11.5px;margin:0 2px;color:var(--amber)}
+
+/* Download: Supply + Installation together (for us) */
+.bl-fmth{cursor:default}
+.bl-bl{margin-top:8px;border-top:1px solid var(--line);padding-top:8px;display:flex;flex-direction:column;gap:6px}
+.bl-bi{display:flex;gap:10px;align-items:flex-start;cursor:pointer;padding:4px 2px;border-radius:6px}
+.bl-bi:hover{background:var(--bg)}
+.bl-bi input{margin-top:3px;flex:none}
+.bl-bi small{display:block;color:var(--ink3);font-size:12.5px;line-height:1.4}

@@ -887,6 +887,14 @@
     return all.filter((r) => !(r.stages || []).every((st) => ov.ras.some((o) => o.service === r.service && o.no > r.no && (o.stages || []).includes(st)))).map((r) => r.id);
   };
 
+  // Supply + Installation together, for us: an internal view of one service, read from its latest Supply RA and latest Installation RA.
+  // Not a bill: it makes no RA, uses no invoice number and locks nothing (the server builds it, GET .../combined).
+  const bothOf = (sv) => (sv && sv.both_view && (sv.both_view.supply || sv.both_view.install)) ? sv.both_view : null;
+  const bothFile = (sv) => { const v = sv.both_view, tag = (st, r) => st + "-" + (r ? "RA" + String(r.no).padStart(2, "0") : "none");
+    return `${slugSafe(B.slug)}_${slugSafe(String(sv.service).split(WOSEP).join("-"))}_Supply+Installation_TOGETHER_${tag("Supply", v.supply)}_${tag("Install", v.install)}_INTERNAL.xlsx`; };
+  const bothLine = (sv) => [["Supply", sv.both_view.supply], ["Installation", sv.both_view.install]]
+    .map(([n, r]) => r ? `${n} RA ${r.no} (${r.status === "draft" ? "draft" : "invoiced"})` : `${n}: no RA yet`).join(" + ");
+
   // What a set of ticks will produce. Pure: the same ticks always give the same plan.
   function planDownload(ov, DL) {
     const sheetKeys = SHEETS.map((x) => x[0]).filter((k) => DL.sheets[k]);
@@ -915,14 +923,21 @@
     const pbIds = DL.pb ? chosen.filter(hasPb).map((r) => r.id) : [];
     chosen.filter((r) => pbIds.includes(r.id)).forEach((r) => files.push({ name: pbFile(r), pb: true, note: "ProjectBase sheet · only the Now column is filled" }));
     if (DL.combined && ov.ras.length) files.push({ name: `${slugSafe(B.slug)}_RA_bills_${today()}.xlsx`, note: "Every service and RA · BOQ with bill columns, invoices, challan sheets" });
+    const bothSv = ov.services.filter((sv) => bothOf(sv) && DL.both && DL.both.has(sv.service));
+    bothSv.forEach((sv) => files.push({ name: bothFile(sv), note: "Internal view · not a bill · " + bothLine(sv) }));
     const q = new URLSearchParams();
     if (wantInv) { q.set("ras", chosen.map((r) => r.id).join(",")); q.set("mode", DL.mode); q.set("sheets", sheetKeys.join(",")); }
     if (pbIds.length) { q.set("pb", "1"); q.set("pbras", pbIds.join(",")); if (!wantInv) q.set("invoice", "0"); }
     if (DL.combined) q.set("combined", "1");
+    bothSv.forEach((sv) => q.append("both", sv.service));
     // things the person should know BEFORE downloading
     const warnings = [];
     const drafts = wantInv ? chosen.filter((r) => r.status === "draft").length : 0;
     if (drafts) warnings.push({ k: "draft", text: `${drafts} draft RA ${drafts === 1 ? "is" : "are"} ticked. The file says “DRAFT — not invoiced yet” and its numbers are live formulas.` });
+    const bothDraft = bothSv.filter((sv) => [sv.both_view.supply, sv.both_view.install].some((r) => r && r.status === "draft"));
+    if (bothDraft.length) warnings.push({ k: "draft", text: `${bothDraft.map((sv) => sv.service.split(WOSEP).join(" › ")).join(", ")}: the Supply + Installation view reads a draft RA, so its numbers can still change.` });
+    bothSv.filter((sv) => !sv.both_view.supply || !sv.both_view.install).forEach((sv) => warnings.push({ k: "stage",
+      text: `${sv.service.split(WOSEP).join(" › ")}: ${sv.both_view.supply ? "Installation" : "Supply"} has no RA yet, so that half of the view stays empty. Nothing is guessed.` }));
     if (wantInv) {
       const bad = [...new Set(chosen.filter((r, i) => counts[i].noChallan).map((r) => r.service))];
       bad.forEach((name) => {
@@ -959,6 +974,8 @@
     try { ov = await jget(api("/" + B.slug)); B.ov = ov; } catch (e) { toast(briefErr(e)); return; }
     if (!ov.ras.length) { toast("No RA yet — create an RA bill first."); return; }
     const DL = keep || { invoice: true, mode: "files", combined: false, pb: Object.keys(ov.pb || {}).length > 0, sheets: { invoice: true, summary: true, boq: true, abstract: true, challan: true }, sel: new Set() };
+    if (!(DL.both instanceof Set)) DL.both = new Set();
+    DL.both = new Set([...DL.both].filter((n) => bothOf(ov.services.find((x) => x.service === n))));
     DL.pbrep = {};                                   // per-RA report of the ProjectBase sheet, fetched when it is ticked
     if (!keep) DL.sel = new Set(pre && pre.length ? pre : latestIds(ov));
     DL.sel = new Set([...DL.sel].filter((id) => ov.ras.some((r) => r.id === id)));
@@ -1005,6 +1022,14 @@
         .catch((e) => { need.forEach((id) => { DL.pbrep[id] = { error: briefErr(e) }; }); })
         .finally(() => { DL.pbBusy = false; if ($("bl-dl-go")) upd(); });
     };
+    const bothCard = (ck) => {
+      const svs = ov.services.filter((sv) => bothOf(sv));
+      if (!svs.length) return "";
+      return `<div class="bl-fmt ${DL.both.size ? "on" : ""}" id="bl-bothcard"><div class="bl-fmtt bl-fmth"><div><b>Supply + Installation together</b> <span class="bl-tag mute">For us</span>
+          <small>One workbook per service with both stages side by side, and Extra over BOQ if any. Not a bill: no RA number, no invoice number, nothing locks. The client still gets the two invoices separately.</small></div></div>
+        <div class="bl-bl">${svs.map((sv) => `<label class="bl-bi"><input type="checkbox" data-both="${esc(sv.service)}"${ck(DL.both.has(sv.service))}>
+          <span><b>${esc(sv.service.split(WOSEP).join(" › "))}</b><small>${esc(bothLine(sv))}</small></span></label>`).join("")}</div></div>`;
+    };
     const body = () => {
       const P = planDownload(ov, DL);
       const ck = (on) => (on ? " checked" : "");
@@ -1020,6 +1045,7 @@
         <div class="bl-fmt ${DL.combined ? "on" : ""}"><label class="bl-fmtt"><input type="checkbox" data-dl="combined"${ck(DL.combined)}>
             <div><b>All services Excel</b>
             <small>Your BOQ with the bill columns of every RA side by side, plus each RA’s Tax Invoice and each service’s Challan Abstract and Challan. Always every service and every RA.</small></div></label></div>
+        ${bothCard(ck)}
         <div class="bl-lbl">2 · Sheets in the invoice workbook</div>
         <div class="bl-shs ${DL.invoice ? "" : "off"}">${SHEETS.map(([k, n, d]) => `<label class="bl-ck ${DL.sheets[k] ? "on" : ""}" title="${esc(d)}"><input type="checkbox" data-sh="${k}"${ck(DL.sheets[k])}${DL.invoice ? "" : " disabled"}><span>${esc(n)}</span></label>`).join("")}</div>
         <div class="bl-hint">Challan Abstract and Challan exist only for services whose supply quantity comes from delivery challans.</div>
@@ -1065,6 +1091,7 @@
     const wire = () => {
       const m = $("bl-modal");
       m.querySelectorAll("[data-dl]").forEach((el) => el.onchange = () => { DL[el.dataset.dl] = el.checked; upd(); });
+      m.querySelectorAll("[data-both]").forEach((el) => el.onchange = () => { el.checked ? DL.both.add(el.dataset.both) : DL.both.delete(el.dataset.both); upd(); });
       m.querySelectorAll("[data-sh]").forEach((el) => el.onchange = () => { DL.sheets[el.dataset.sh] = el.checked; upd(); });
       m.querySelectorAll("[data-mode]").forEach((el) => el.onclick = () => { DL.mode = el.dataset.mode; DL.invoice = true; upd(); });
       m.querySelectorAll("[data-ra]").forEach((el) => el.onchange = () => { el.checked ? DL.sel.add(el.dataset.ra) : DL.sel.delete(el.dataset.ra); upd(); });

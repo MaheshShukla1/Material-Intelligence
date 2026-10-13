@@ -66,7 +66,7 @@ import datetime as dt
 from pathlib import Path
 
 import pandas as pd
-from fastapi import APIRouter, HTTPException, Response, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, Response, UploadFile, File, Form, Query
 
 from . import siteprogress as sp, itemprog, linkage, boq, projectbase as pbx
 
@@ -1492,7 +1492,8 @@ def overview(slug: str):
                          "supply_source": _source(store, svc), "source_locked": _last_locked_no(store, svc) > 0,
                          "challans": len(chs), "held": held,
                          "wire": _source(store, svc) == "challan" and any(_point_len(l["desc"]) for l in lines),
-                         "open_no": _open_no(store, svc) if s.get("mode") else None})
+                         "open_no": _open_no(store, svc) if s.get("mode") else None,
+                         "both_view": _combined_view(store, svc)})
         if held:
             notes.append({"kind": "hold", "ra": None,
                           "msg": f"{svc}: {held} challan{'s' if held != 1 else ''} on hold, not in any RA yet. Open Challans to tag {'them' if held != 1 else 'it'} to an RA."})
@@ -4408,7 +4409,7 @@ def _extra_sheet_name(names, taken):
     return n
 
 
-def _fill_extra_sheet(ws, rows, stages, bill, service, meta, live):
+def _fill_extra_sheet(ws, rows, stages, bill, service, meta, live, subject=None):
     """One page for the client: the lines billed above their BOQ quantity in this RA (values only, it is a record, not a calculation).
     Only exists when something was accepted."""
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -4418,7 +4419,7 @@ def _fill_extra_sheet(ws, rows, stages, bill, service, meta, live):
     ws["A1"] = meta.get("client") or ""
     ws["A1"].font = Font(name="Calibri", bold=True, size=13)
     ws["A2"], ws["B2"] = "Work", f"{_unit_text(service)} works"
-    ws["A3"], ws["B3"] = "Subject", f"Quantity billed above the BOQ quantity, RA-{bill['ra']['no']:02d}"
+    ws["A3"], ws["B3"] = "Subject", subject or f"Quantity billed above the BOQ quantity, RA-{bill['ra']['no']:02d}"
     ws["A4"], ws["B4"] = "Contractor", meta.get("contractor") or ""
     for r_ in (2, 3, 4):
         ws.cell(r_, 1).font = BOLD
@@ -4556,6 +4557,430 @@ def invoice_book(slug: str, ra_id: str):
     data = invoice_xlsx(slug, ra_id)
     return Response(content=data, media_type=_XLSX,
                     headers={"Content-Disposition": f'attachment; filename="{_xlsx_name(slug, ra)}"'})
+
+
+# ------------------------------------------------- Supply + Installation together, for us
+# An INTERNAL view, not a bill: the latest Supply RA and the latest Installation RA of one service, side by side. No RA is
+# created, no invoice number is used, nothing is locked. The client still gets the Supply and the Installation invoices
+# separately. Every figure is read from those two RAs (the same snapshot / live bill the separate workbooks use).
+_INTERNAL_NOTE = "INTERNAL COPY, not an invoice. The client receives the Supply and Installation invoices separately."
+
+
+def _combined_pick(store, service):
+    """{stage: the latest RA of the service that carries that stage, or None}. A draft counts as well as an invoiced RA."""
+    pick = {}
+    for st in ("supply", "install"):
+        c = [r for r in store["ras"] if r["service"] == service and st in STAGES[r["series"]]]
+        pick[st] = max(c, key=lambda r: r["no"]) if c else None
+    return pick
+
+
+def _combined_view(store, service):
+    """What the home / Download dialog needs to offer the view: which RA each stage would come from."""
+    pick = _combined_pick(store, service)
+    return {st: ({"id": r["id"], "label": _fmt_ra(r), "no": r["no"], "status": r["status"]} if r else None) for st, r in pick.items()}
+
+
+def _stage_fig(slug, d, store, ra, stage, lines, cache):
+    """{item_code: figures} of ONE stage of one RA -- the same figures `_write_ra` reads (previous, this, total, extra)."""
+    if ra["id"] not in cache:
+        cache[ra["id"]] = _get_bill(slug, d, store, ra)
+    bill = cache[ra["id"]]
+    brow = {r["item_code"]: r for r in bill["lines"]}
+    setup = store["setup"].get(ra["service"]) or {}
+    prev = _prev_upto(store, ra["service"], ra["series"], stage, ra["no"])
+    out = {}
+    for ln in lines:
+        code = ln["item_code"]
+        row = brow.get(code)
+        c = row.get(stage) if row else None
+        pq, pa = prev.get(code, (0.0, 0.0))
+        pct = c["pct"] if c else _stage_pct(setup, code, stage)
+        rate = row["rate"] if row else ln["rate"]
+        out[code] = {"pct": pct, "rate": rate, "pq": pq, "pa": pa,
+                     "tq": c["this"] if c and c["this"] is not None else 0.0,
+                     "tv": c["amount"] if c and c["amount"] is not None else 0.0,
+                     "xq": (c or {}).get("extra") or 0.0, "xv": (c or {}).get("extra_amount") or 0.0,
+                     "ov": bool(c and c["overridden"]), "reason": (c or {}).get("reason", ""),
+                     "ratepct": None if pct is None else rate * pct / 100.0}
+    return out, bill
+
+
+def combined_name(slug, service, pick):
+    safe = lambda t: re.sub(r"[^A-Za-z0-9._-]+", "_", t)
+    tag = lambda st, r: f"{'Supply' if st == 'supply' else 'Install'}-" + (f"RA{r['no']:02d}" if r else "none")
+    return (f"{safe(sp._slugify(slug))}_{safe(_unit_text(service, '-'))}_Supply+Installation_TOGETHER_"
+            f"{tag('supply', pick['supply'])}_{tag('install', pick['install'])}_INTERNAL.xlsx")
+
+
+def combined_xlsx(slug, service):
+    """(file name, bytes): Internal Summary, Annexure B-Summary BOQ, Annexure B-BOQ (supply block, then installation block)
+    and, when anything was accepted above the BOQ, Extra over BOQ. All values: it is a record for us, not a calculation."""
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter as L
+    from openpyxl.formatting.rule import Rule
+    from openpyxl.styles.differential import DifferentialStyle
+    from openpyxl.styles.numbers import NumberFormat
+    from openpyxl.comments import Comment
+    from openpyxl.worksheet.properties import PageSetupProperties
+    from . import billing_cover
+    d = sp._need(slug)
+    store = _load(d)
+    if service not in _services(d):
+        raise HTTPException(404, "this service is not in this project")
+    pick = _combined_pick(store, service)
+    if not pick["supply"] and not pick["install"]:
+        raise HTTPException(409, f"{service} has no Supply or Installation RA yet. Create one first; this view reads from the RAs.")
+    lines = _lines(d, service)
+    if not lines:
+        raise HTTPException(409, f"{service} has no billable lines.")
+    groups, _ = _groups_for(d, store, service, lines)
+    if not groups:
+        groups = [{"sr": "", "name": f"{_unit_text(service)} works", "sheet": None, "from": 1, "to": 10 ** 6, "wo": None}]
+    layout = _invoice_layout(d, store, service, lines, groups)
+    meta = store["meta"]
+    stages = ["supply", "install"]
+    cache, fig, bills = {}, {}, {}
+    for st in stages:
+        if pick[st]:
+            fig[st], bills[st] = _stage_fig(slug, d, store, pick[st], st, lines, cache)
+    work = (meta.get("work") or {}).get(service) or f"{_unit_text(service)} works"
+    wo_no = _wo_no(meta, service) or "…..............."
+
+    PEACH, GREEN = PatternFill("solid", fgColor="FCE4D6"), PatternFill("solid", fgColor="C6E0B4")
+    EXTRA_F = PatternFill("solid", fgColor="FFE699")
+    BOLD, NORM = Font(name="Calibri", bold=True, size=11), Font(name="Calibri", size=11)
+    RED = Font(name="Calibri", bold=True, color="A02622")
+    thin = Side(style="thin", color="000000")
+    BOX = Border(left=thin, right=thin, top=thin, bottom=thin)
+    dash = Rule(type="cellIs", operator="equal", formula=["0"], dxf=DifferentialStyle(numFmt=NumberFormat(numFmtId=170, formatCode='"-"')))
+    QTY = "#,##0.00"
+    state = lambda r: "Invoiced" if r["status"] == "locked" else "Draft"
+    who = lambda st: (f"{STAGE_NAME[st]} RA-{pick[st]['no']:02d} · {state(pick[st])}" if pick[st] else f"{STAGE_NAME[st]}: no RA yet")
+
+    wb = openpyxl.Workbook()
+    ws_in = wb.active
+    ws_in.title = "Internal Summary"
+    ws_sum = wb.create_sheet("Annexure B-Summary BOQ")
+    ws = wb.create_sheet("Annexure B-BOQ")
+
+    def header(w):
+        w["A1"] = meta.get("client") or ""
+        w["A1"].font = Font(name="Calibri", bold=True, size=13)
+        w["A2"], w["B2"] = "WO. No.", wo_no
+        w["A3"], w["B3"] = "Work", work
+        w["A4"], w["B4"] = "Contractor", meta.get("contractor") or ""
+        for r_ in (2, 3, 4):
+            w.cell(r_, 1).font = BOLD
+        w["A5"] = _INTERNAL_NOTE
+        w["A5"].font = RED
+        w["A6"], w["B6"] = "Annexure B", f"{_unit_text(service)} Works"
+        w["A6"].font = w["B6"].font = BOLD
+
+    # ---- Annexure B-BOQ
+    header(ws)
+    for col_i, t in enumerate(("Sr. No", "Description", "Unit", "Qty", "Rate", "Amt"), start=1):
+        ws.cell(8, col_i, t)
+    bcol = {st: 7 + _BLOCK * i for i, st in enumerate(stages)}
+    for st in stages:
+        c0 = bcol[st]
+        pct = bills[st]["pct"].get(st) if st in bills else None
+        pcts = f"{pct:g}% " if pct is not None else ""
+        ws.merge_cells(start_row=7, start_column=c0, end_row=7, end_column=c0 + _BLOCK - 1)
+        ws.cell(7, c0, (f"RA-{pick[st]['no']:02d} · {STAGE_NAME[st].upper()}" + (f" · {state(pick[st]).upper()}" if pick[st]["status"] == "draft" else "")) if pick[st]
+                else f"{STAGE_NAME[st].upper()} · NO RA YET")
+        for k, t in enumerate((f"{pcts}RATE OF {STAGE_NAME[st].upper()}", "PREVIOUS BILL QTY", "THIS BILL QTY", "TOTAL QTY",
+                               "PREVIOUS BILL VALUE", "THIS BILL VALUE", "TOTAL BILL VALUE")):
+            ws.cell(8, c0 + k, t)
+    last_col = 6 + _BLOCK * len(stages)
+    n = len(layout)
+    row_of = {i: _FIRST_DATA_ROW + i for i in range(n)}
+    last_row = _FIRST_DATA_ROW + n - 1
+    sub_rows, extra_rows, gsum = {}, [], {}
+    for i, e in enumerate(layout):
+        r = row_of[i]
+        if e["kind"] == "head":
+            ws.cell(r, 1, e["sr"] if e["sr"] != "" else None)
+            ws.cell(r, 2, e["desc"]).font = BOLD if len(e["desc"]) <= 110 else NORM
+            ws.cell(r, 2).alignment = Alignment(wrap_text=True, vertical="top")
+            ws.cell(r, 1).alignment = Alignment(vertical="top")
+            continue
+        if e["kind"] == "sub":
+            sub_rows[i] = r
+            ws.cell(r, 2, f"TOTAL FOR {e['name']}").font = BOLD
+            ws.cell(r, 2).alignment = Alignment(wrap_text=True, vertical="top")
+            items = [x for x in layout[e["first"]:i] if x["kind"] == "item" and x["line"]]
+            ws.cell(r, 6, sum(x["line"]["rate"] * x["line"]["boq_qty"] for x in items)).number_format = _INR2
+            ws.cell(r, 6).font = BOLD
+            gsum[i] = {}
+            for st in stages:
+                if st not in fig:
+                    continue
+                c0 = bcol[st]
+                pa = sum(fig[st][x["line"]["item_code"]]["pa"] for x in items)
+                tv = sum(fig[st][x["line"]["item_code"]]["tv"] for x in items)
+                gsum[i][st] = (pa, tv)
+                for k, v in ((4, pa), (5, tv), (6, pa + tv)):
+                    ws.cell(r, c0 + k, v).number_format = _INR2
+                    ws.cell(r, c0 + k).font = BOLD
+            continue
+        ln = e["line"]
+        ws.cell(r, 1, e["sr"] if e["sr"] != "" else None)
+        ws.cell(r, 2, e["desc"])
+        ws.cell(r, 3, e["unit"])
+        ws.cell(r, 4, e["qty"])
+        ws.cell(r, 2).alignment = Alignment(wrap_text=True, vertical="top")
+        ws.cell(r, 1).alignment = Alignment(vertical="top")
+        if ln is None:
+            continue
+        ws.cell(r, 4).number_format = QTY
+        ws.cell(r, 5, ln["rate"]).number_format = _INR2
+        ws.cell(r, 6, ln["rate"] * ln["boq_qty"]).number_format = _INR2
+        code = ln["item_code"]
+        for st in stages:
+            if st not in fig:
+                continue
+            f_, c0 = fig[st][code], bcol[st]
+            if f_["pct"] is None:
+                continue
+            G, H, I, J, K, Lc, M = (L(c0 + k) for k in range(7))
+            for ref, v, fmt in ((G, f_["ratepct"], _INR2), (H, f_["pq"], QTY), (I, f_["tq"], QTY), (J, f_["pq"] + f_["tq"], QTY),
+                                (K, f_["pa"], _INR2), (Lc, f_["tv"], _INR2), (M, f_["pa"] + f_["tv"], _INR2)):
+                ws[f"{ref}{r}"] = v
+                ws[f"{ref}{r}"].number_format = fmt
+            if f_["ov"] and f_["reason"]:
+                ws[f"{I}{r}"].comment = Comment(f_["reason"], "MI")
+            if f_["xq"] > 0:
+                for col in (I, Lc):
+                    ws[f"{col}{r}"].fill = EXTRA_F
+                note = f"Extra over BOQ: {f_['xq']:g} {ln['unit']} above the BOQ quantity of {ln['boq_qty']:g}. Accepted in Material Intelligence."
+                ws[f"{I}{r}"].comment = Comment(note + (f"\n{f_['reason']}" if f_["ov"] and f_["reason"] else ""), "MI")
+                extra_rows.append((e["sr"], e["desc"], e["unit"], ln["boq_qty"], f_["pq"] + f_["tq"], f_["xq"], f_["ratepct"], f_["xv"], st))
+            if f_["tq"] < 0:
+                ws[f"{I}{r}"].font = Font(color="A02622", bold=True)
+    for col, wd in zip("ABCD", (10, 78, 7.5, 9)):
+        ws.column_dimensions[col].width = wd
+    ws.column_dimensions["E"].width = 13
+    ws.column_dimensions["F"].width = 15
+    for st in stages:
+        c0 = bcol[st]
+        ws.cell(7, c0).font = BOLD
+        ws.cell(7, c0).alignment = Alignment(horizontal="center")
+        for k in range(_BLOCK):
+            ws.column_dimensions[L(c0 + k)].width = 15 if k in (0, 4, 5, 6) else 12.5
+            ws.cell(7, c0 + k).fill = GREEN
+    for cc_ in range(1, last_col + 1):
+        cell = ws.cell(8, cc_)
+        cell.font, cell.fill, cell.border = BOLD, PEACH, BOX
+        cell.alignment = Alignment(wrap_text=True, horizontal="center", vertical="center")
+    ws.row_dimensions[8].height = 44
+    for r_ in range(_FIRST_DATA_ROW, last_row + 1):
+        for cc_ in range(1, last_col + 1):
+            ws.cell(r_, cc_).border = BOX
+    ws.conditional_formatting.add(f"D{_FIRST_DATA_ROW}:{L(last_col)}{last_row}", dash)
+    ws.freeze_panes = "A9"
+    ws.sheet_view.showGridLines = False
+    ws.page_setup.orientation, ws.page_setup.paperSize = "landscape", ws.PAPERSIZE_A4
+    ws.page_setup.fitToWidth, ws.page_setup.fitToHeight = 1, 0
+    ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
+    ws.print_title_rows = "8:8"
+    ws.print_area = f"A1:{L(last_col)}{last_row}"
+
+    # ---- Annexure B-Summary BOQ: Supply | Installation | Total per group
+    w = ws_sum
+    header(w)
+    w.column_dimensions["A"].width = 11
+    w.column_dimensions["B"].width = 60
+    w.column_dimensions["C"].width = 16
+    blocks = [("supply", 4), ("install", 7), ("both", 10)]
+    w["A5"] = None
+    w["B5"] = _INTERNAL_NOTE
+    w["B5"].font = RED
+    w.merge_cells(start_row=4, start_column=4, end_row=4, end_column=12)
+    w.cell(4, 4, " · ".join(who(st) for st in stages))
+    for st, c0 in blocks:
+        w.merge_cells(start_row=5, start_column=c0, end_row=5, end_column=c0 + 2)
+        pct = bills[st]["pct"].get(st) if st in bills else None
+        w.cell(5, c0, "TOTAL" if st == "both" else f"{STAGE_NAME[st].upper()}" + (f" @ {pct:g}%" if pct is not None else ""))
+        for k, t in enumerate(("PREVIOUS BILL VALUE", "THIS BILL VALUE", "TOTAL BILL VALUE")):
+            w.cell(6, c0 + k, t)
+            w.column_dimensions[L(c0 + k)].width = 18
+    w["A6"], w["B6"], w["C6"] = "Sr.No.", "Description of Material", "WO Amount"
+    w["B7"] = work
+    for r_ in range(4, 7):
+        for cc_ in range(1, 13):
+            cell = w.cell(r_, cc_)
+            cell.font, cell.border = (RED if (r_, cc_) == (5, 2) else BOLD), BOX
+            cell.alignment = Alignment(wrap_text=True, horizontal="center", vertical="center")
+            if r_ >= 5:
+                cell.fill = PEACH
+    w.row_dimensions[6].height = 32
+    srow, seq = 8, 0
+    gfirst = srow
+    for i, e in enumerate(layout):
+        if e["kind"] != "sub":
+            continue
+        seq += 1
+        g = groups[e["group"]] if e["group"] is not None else None
+        items = [x for x in layout[e["first"]:i] if x["kind"] == "item" and x["line"]]
+        w.cell(srow, 1, (g.get("sr") if g and g.get("sr") else seq))
+        w.cell(srow, 2, e["name"])
+        wo = g["wo"] if g and g.get("wo") is not None else sum(x["line"]["rate"] * x["line"]["boq_qty"] for x in items)
+        w.cell(srow, 3, wo).number_format = _INR0
+        both = [0.0, 0.0]
+        for st, c0 in blocks[:2]:
+            if st not in gsum[i]:
+                continue
+            pa, tv = gsum[i][st]
+            for k, v in enumerate((pa, tv, pa + tv)):
+                w.cell(srow, c0 + k, v).number_format = _INR2
+            both[0] += pa
+            both[1] += tv
+        if any(st in gsum[i] for st in stages):
+            for k, v in enumerate((both[0], both[1], both[0] + both[1])):
+                w.cell(srow, 10 + k, v).number_format = _INR2
+        srow += 1
+    glast = srow - 1
+    w.cell(srow, 2, "Grand Total")
+    for cc_ in range(3, 13):
+        vals = [w.cell(r_, cc_).value for r_ in range(gfirst, glast + 1)]
+        vals = [v for v in vals if isinstance(v, (int, float))]
+        if vals:
+            w.cell(srow, cc_, sum(vals)).number_format = _INR0 if cc_ == 3 else _INR2
+    for r_ in range(gfirst, srow + 1):
+        for cc_ in range(1, 13):
+            cell = w.cell(r_, cc_)
+            cell.border = BOX
+            cell.font = BOLD if r_ == srow else NORM
+            if r_ == srow:
+                cell.fill = PEACH
+            cell.alignment = (Alignment(horizontal="right", vertical="center") if cc_ >= 3
+                              else Alignment(wrap_text=True, vertical="center") if cc_ == 2 else Alignment(horizontal="center", vertical="center"))
+    w.conditional_formatting.add(f"C{gfirst}:L{srow}", dash)
+    w.sheet_view.showGridLines = False
+    w.page_setup.orientation, w.page_setup.paperSize = "landscape", w.PAPERSIZE_A4
+    w.page_setup.fitToWidth, w.page_setup.fitToHeight = 1, 0
+    w.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
+
+    # ---- Internal Summary: the two invoices as the client receives them, and the sum
+    ci = ws_in
+    ci["A1"] = meta.get("client") or ""
+    ci["A1"].font = Font(name="Calibri", bold=True, size=13)
+    ci["A2"] = _INTERNAL_NOTE
+    ci["A2"].font = RED
+    for r_, (k, v) in enumerate((("Project", meta.get("project_name") or ""), ("WO. No.", wo_no), ("Work", work),
+                                 ("Contractor", meta.get("contractor") or "")), start=4):
+        ci.cell(r_, 1, k).font = BOLD
+        ci.cell(r_, 2, v)
+
+    def gst_of(r):
+        return (r.get("inv_gst") if r["status"] == "locked" else None) or {"sgst": meta.get("sgst"), "cgst": meta.get("cgst")}
+
+    amt = {st: (sum(fig[st][c]["tv"] for c in fig[st]) if st in fig else None) for st in stages}
+    one = pick["supply"] is not None and pick["supply"] is pick["install"]          # one Together RA carries both stages
+    money = {}
+    for st in stages:
+        if amt[st] is None:
+            continue
+        g_ = gst_of(pick[st])
+        sg, cg = _num(g_.get("sgst")), _num(g_.get("cgst"))
+        money[st] = billing_cover.money(amt[st], sg, cg) if sg is not None and cg is not None else None
+    present = [st for st in stages if amt[st] is not None]
+    both_amt = sum(amt[st] for st in present) if present else None
+    if one:
+        g_ = gst_of(pick["supply"])
+        sg, cg = _num(g_.get("sgst")), _num(g_.get("cgst"))
+        m_both = billing_cover.money(both_amt, sg, cg) if sg is not None and cg is not None else None
+        money = {st: None for st in stages}
+    else:
+        m_both = None
+        if present and all(money.get(st) for st in present):
+            m_both = {k: sum(money[st][k] for st in present) for k in ("amount", "sgst", "cgst", "gst", "invoice", "round", "total")}
+    hr = 9
+    for j, t in enumerate(("", "Supply", "Installation", "Both together")):
+        c = ci.cell(hr, 1 + j, t)
+        c.font, c.fill, c.border = BOLD, PEACH, BOX
+        c.alignment = Alignment(horizontal="center", vertical="center")
+    ci.cell(hr, 1).value = "Particulars"
+    rows = [("Which RA", [who("supply"), who("install"), "—"], None),
+            ("Invoice no.", [(pick[st].get("inv_no") or "—") if pick[st] else "—" for st in stages] + ["—"], None),
+            ("Value of services", [amt["supply"], amt["install"], both_amt], _INR2)]
+    g_pcts = {}
+    for st in present:
+        gg = gst_of(pick[st])
+        g_pcts[st] = (_num(gg.get("sgst")), _num(gg.get("cgst")))
+    same = len({v for v in g_pcts.values()}) <= 1 and bool(g_pcts)
+    lab_s = f"SGST {g_pcts[present[0]][0]:g}%" if same and g_pcts[present[0]][0] is not None else "SGST"
+    lab_c = f"CGST {g_pcts[present[0]][1]:g}%" if same and g_pcts[present[0]][1] is not None else "CGST"
+    mm = lambda st, k: (money[st][k] if st in money and money[st] else None)
+    rows += [(lab_s, [mm("supply", "sgst"), mm("install", "sgst"), m_both["sgst"] if m_both else None], _INR2),
+             (lab_c, [mm("supply", "cgst"), mm("install", "cgst"), m_both["cgst"] if m_both else None], _INR2),
+             ("Round off", [mm("supply", "round"), mm("install", "round"), m_both["round"] if m_both else None], _INR2),
+             ("Invoice total", [mm("supply", "total"), mm("install", "total"), m_both["total"] if m_both else None], _INR2)]
+    for i_, (lab, vals, fmt) in enumerate(rows):
+        r_ = hr + 1 + i_
+        ci.cell(r_, 1, lab).font = BOLD if lab in ("Invoice total", "Value of services") else NORM
+        for j, v in enumerate(vals):
+            c = ci.cell(r_, 2 + j, v if v is not None else "—")
+            if fmt and isinstance(v, (int, float)):
+                c.number_format = fmt
+            c.alignment = Alignment(horizontal="right", vertical="center", wrap_text=True)
+            c.font = BOLD if lab in ("Invoice total", "Value of services") else NORM
+        for j in range(4):
+            ci.cell(r_, 1 + j).border = BOX
+    last_in = hr + len(rows)
+    for j in range(4):
+        ci.cell(last_in, 1 + j).fill = PEACH
+    note_r = last_in + 2
+    if m_both:
+        ci.cell(note_r, 1, "Amount in words").font = BOLD
+        ci.cell(note_r, 2, billing_cover.words(m_both["total"]))
+        ci.merge_cells(start_row=note_r, start_column=2, end_row=note_r, end_column=4)
+        note_r += 1
+    else:
+        ci.cell(note_r, 1, "GST").font = BOLD
+        ci.cell(note_r, 2, "SGST / CGST % is not set in Billing setup, so no GST or invoice total is shown. Nothing is guessed.")
+        ci.merge_cells(start_row=note_r, start_column=2, end_row=note_r, end_column=4)
+        note_r += 1
+    if one:
+        ci.cell(note_r, 1, "Note").font = BOLD
+        ci.cell(note_r, 2, f"Both stages are on one Supply + Installation RA (RA-{pick['supply']['no']:02d}): one invoice, so GST is shown once, under Both together.")
+        ci.merge_cells(start_row=note_r, start_column=2, end_row=note_r, end_column=4)
+    elif m_both:
+        ci.cell(note_r, 1, "Note").font = BOLD
+        ci.cell(note_r, 2, "Each invoice is rounded to the rupee on its own, so Both together is the sum of the two invoice totals.")
+        ci.merge_cells(start_row=note_r, start_column=2, end_row=note_r, end_column=4)
+    for rr in range(note_r - 1, note_r + 1):
+        ci.cell(rr, 1).alignment = Alignment(vertical="top")
+        ci.cell(rr, 2).alignment = Alignment(wrap_text=True, vertical="top")
+        ci.row_dimensions[rr].height = 32
+    ci.column_dimensions["A"].width = 22
+    for col in "BCD":
+        ci.column_dimensions[col].width = 34
+    ci.sheet_view.showGridLines = False
+    ci.page_setup.orientation, ci.page_setup.paperSize = "portrait", ci.PAPERSIZE_A4
+    ci.page_setup.fitToWidth, ci.page_setup.fitToHeight = 1, 0
+    ci.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
+    ci.sheet_properties.tabColor = "A02622"
+
+    # ---- Extra over BOQ: only when something was accepted above the BOQ
+    if extra_rows:
+        wx = wb.create_sheet("Extra over BOQ")
+        _fill_extra_sheet(wx, extra_rows, stages, {"ra": {"no": 0}}, service, meta, False,
+                          subject="Quantity billed above the BOQ quantity, " + " and ".join(
+                              f"{STAGE_NAME[st]} RA-{pick[st]['no']:02d}" for st in stages if pick[st]))
+        wx["A5"] = _INTERNAL_NOTE
+        wx["A5"].font = RED
+    buf = io.BytesIO()
+    wb.save(buf)
+    return combined_name(slug, service, pick), buf.getvalue()
+
+
+@router.get("/{slug}/combined")
+def combined_book(slug: str, service: str):
+    name, data = combined_xlsx(slug, service)
+    return Response(content=data, media_type=_XLSX, headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 
 # ----------------------------------------------------------- ProjectBase sheet
@@ -4775,7 +5200,7 @@ def pb_check(slug: str, ra_id: str, payload: dict):
 #   mode=one   : every ticked RA in ONE workbook, sheets named "<service> RA01 <sheet>"
 #   combined=1 : the old "All services Excel" (BOQ sheet with RA blocks side by side)
 # More than one file comes back as a .zip, a single file as a plain .xlsx.
-def download_files(slug, ra_ids, mode="files", want=None, combined=False, pb=False):
+def download_files(slug, ra_ids, mode="files", want=None, combined=False, pb=False, together=()):
     import openpyxl
     d = sp._need(slug)
     store = _load(d)
@@ -4817,6 +5242,8 @@ def download_files(slug, ra_ids, mode="files", want=None, combined=False, pb=Fal
             out.append((rep["file"], data))
     if combined:
         out.append((f"{sp._slugify(slug)}_RA_bills_{dt.date.today().isoformat()}.xlsx", export_xlsx(slug)))
+    for svc in together:                          # the internal Supply + Installation view of each ticked service
+        out.append(combined_xlsx(slug, svc))
     if not out:
         raise HTTPException(400, "Nothing is ticked to download.")
     return out
@@ -4824,15 +5251,15 @@ def download_files(slug, ra_ids, mode="files", want=None, combined=False, pb=Fal
 
 @router.get("/{slug}/download")
 def download(slug: str, ras: str = "", mode: str = "files", sheets: str = "", combined: int = 0, pb: int = 0, invoice: int = 1,
-             pbras: str = ""):
-    """pb=1 adds the connected ProjectBase sheet of each RA in `pbras` (default: the ticked `ras`). invoice=0 leaves the
+             pbras: str = "", both: list[str] = Query(default=[])):
+    """both (repeat the parameter): services whose internal Supply + Installation view is added. pb=1 adds the connected ProjectBase sheet of each RA in `pbras` (default: the ticked `ras`). invoice=0 leaves the
     invoice workbook out, so a ProjectBase-only download needs no sheets ticked."""
     ids = [x for x in ras.split(",") if x]
     want = [x for x in sheets.split(",") if x] if sheets else None
     if mode not in ("files", "one"):
         raise HTTPException(400, "mode must be 'files' or 'one'")
     pb_ids = ([x for x in pbras.split(",") if x] or ids) if pb else []
-    files = download_files(slug, ids if invoice else [], mode, want, bool(combined), pb_ids)
+    files = download_files(slug, ids if invoice else [], mode, want, bool(combined), pb_ids, [x for x in both if x])
     if len(files) == 1:
         name, data = files[0]
         return Response(content=data, media_type=_XLSX,

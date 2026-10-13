@@ -38,7 +38,7 @@ from pathlib import Path
 import pandas as pd
 from fastapi import APIRouter, File, Form, Header, HTTPException, UploadFile, Response, Query
 
-from . import structure, boq, activity, progress, pnl, linkage, schema, subcat, realtime, itemprog, dpr, shortage_history
+from . import structure, boq, activity, progress, pnl, linkage, schema, subcat, realtime, itemprog, dpr, shortage_history, clientref
 
 ROOT = Path(__file__).resolve().parent.parent
 PROJECTS = ROOT / "data" / "projects"
@@ -223,7 +223,10 @@ def _leaf_label(d):
     return dpr.LEAF_LABEL.get(st.get("kind"), "ROOM")
 
 
-def _qty_for_room(d, service, item_code, room_id, frac):
+_PLAN_AS_NOW = object()     # "use the planned figure as it is stored now" (the normal case)
+
+
+def _qty_for_room(d, service, item_code, room_id, frac, planned=_PLAN_AS_NOW):
     """The real quantity one specific captured action represents: the room's
     own quantity (room_qty_groups override if the item uses them -- reuses
     itemprog's own group-resolution helper rather than reimplementing it --
@@ -244,7 +247,11 @@ def _qty_for_room(d, service, item_code, room_id, frac):
     Divides the override by the SAME applicable-room count
     _applicable_rooms() resolves (mirrors itemprog.compute()'s own
     denominator exactly, per that function's own docstring), so this never
-    quietly disagrees with how planned_total itself was derived."""
+    quietly disagrees with how planned_total itself was derived.
+
+    `planned` (optional) = the whole-project planned figure to use INSTEAD of
+    the stored one (None = no override). Only the DPR's "before" quantity uses
+    it, when the very same save raised the planned figure above the BOQ."""
     groups = _item_room_qty(d).get(service, {}).get(str(item_code))
     room_qty = None
     if groups:
@@ -257,7 +264,7 @@ def _qty_for_room(d, service, item_code, room_id, frac):
         if row.empty:
             return None, None
         unit = row.iloc[0].get("unit")
-        override = _planned(d, service).get(str(item_code))
+        override = _planned(d, service).get(str(item_code)) if planned is _PLAN_AS_NOW else planned
         if override is not None:
             try:
                 planned_total = float(override)
@@ -301,7 +308,15 @@ def _applicable_rooms(d, service, item_code):
     return [r for r in appl if r in room_set] or all_room_ids
 
 
-def _log_dpr_change(d, service, room_id, item_code, frac=None):
+def _node_before(store, service, item_code):
+    """A copy of one item's progress node ({"*": f, room: f, ...}) as it is
+    BEFORE a write -- taken by the progress routes ahead of itemprog.set_progress()
+    so _log_dpr_change() can tell how much the write ADDED (the DPR's "today"
+    quantity). {} when the item had no progress yet (= 0% everywhere)."""
+    return dict(((store.get(service) or {}).get(str(item_code))) or {})
+
+
+def _log_dpr_change(d, service, room_id, item_code, frac=None, before=None, before_planned=_PLAN_AS_NOW, only_existing=False):
     """Layer 1's actual hook. Works generically across hotel/mall/hospital/
     custom -- never assumes what a "room" or "floor" is called, only reads
     Structure.rooms()'s own path.
@@ -323,6 +338,23 @@ def _log_dpr_change(d, service, room_id, item_code, frac=None):
         within that floor (qty also stays blank -- see below), since that
         part genuinely isn't known.
 
+    `before` = the item's progress node as it was BEFORE this write (see
+    _node_before()). When given, each line also records qty_before -- what the
+    same room/floor quantity was at the start, resolved with the same
+    per-room fraction itemprog.compute() uses (itemprog.frac_for) -- so the
+    DPR can show only the day's own work (qty - qty_before) instead of the
+    cumulative quantity. dpr.record_change() keeps the FIRST baseline of the
+    day, so several saves in one day still add up to the day's real work.
+    Not given = no baseline (the day quantity is then unknown, never guessed).
+    `before_planned` = the whole-project planned figure as it was before the
+    write, for the one route that changes it together with the progress
+    ("quantity above the BOQ" and its undo); otherwise the stored one.
+    `only_existing` = an undo (a room set back to not-started): it is not
+    "work done today" so it never creates a line, but if the SAME room/item
+    already has a line today (ticked by mistake, then undone) that line is
+    brought back to what is true now, instead of keeping the quantity of the
+    wrong tick.
+
     Only for an item actually mapped to an activity (an unmapped item has no
     home in the narrative log, same reasoning pnl.rollup_pnl already applies
     to unmapped items' money). A silent no-op otherwise -- callers never
@@ -341,11 +373,19 @@ def _log_dpr_change(d, service, room_id, item_code, frac=None):
         if not info or not info["location"]:
             return
         qty, unit = (None, None)
+        extra = {}
         if frac is not None:
             qty, unit = _qty_for_room(d, service, item_code, room_id, frac)
+            if before is not None:
+                q0, _u0 = _qty_for_room(d, service, item_code, room_id,
+                                        itemprog.frac_for(before, str(room_id)), planned=before_planned)
+                extra["qty_before"] = q0
         for act in acts:
+            if only_existing and not any((e["date"], e["service"], e["floor"], e["activity"], e.get("room"), e.get("item")) ==
+                                         (today, service, info["location"], act, info["name"], item_desc) for e in log):
+                continue
             dpr.record_change(log, today, service, info["location"], act, info["name"],
-                              item=item_desc, qty=qty, unit=unit, item_code=str(item_code))
+                              item=item_desc, qty=qty, unit=unit, item_code=str(item_code), **extra)
     else:
         rooms_map = _room_location_map(d)
         appl = _applicable_rooms(d, service, item_code)
@@ -365,6 +405,7 @@ def _log_dpr_change(d, service, room_id, item_code, frac=None):
                 # did the work -- only that this floor's total applicable
                 # quantity moved by this much.
                 qty_total, unit, has_qty = 0.0, None, False
+                before_total, before_ok = 0.0, True
                 if frac is not None:
                     for r in by_floor[floor]:
                         q, u = _qty_for_room(d, service, item_code, r, frac)
@@ -372,9 +413,19 @@ def _log_dpr_change(d, service, room_id, item_code, frac=None):
                             qty_total += q
                             unit = u or unit
                             has_qty = True
+                        if before is not None:
+                            q0, _u0 = _qty_for_room(d, service, item_code, r, itemprog.frac_for(before, str(r)),
+                                                    planned=before_planned)
+                            if q0 is None:
+                                before_ok = False
+                            else:
+                                before_total += q0
+                extra = {}
+                if frac is not None and before is not None:
+                    extra["qty_before"] = round(before_total, 3) if (has_qty and before_ok) else None
                 dpr.record_change(log, today, service, floor, act, None, item=item_desc,
                                   qty=(round(qty_total, 3) if has_qty else None), unit=unit,
-                                  item_code=str(item_code))
+                                  item_code=str(item_code), **extra)
     _save_dpr_log(d, log)
 
 
@@ -881,9 +932,10 @@ def set_item_progress(slug: str, payload: dict):
     if not svc or code is None:
         raise HTTPException(400, "service and item_code are required")
     store = _item_prog(d)
+    before = _node_before(store, svc, code)
     itemprog.set_progress(store, svc, code, payload.get("frac", 0), room=payload.get("room"))
     (d / "item_progress.json").write_text(json.dumps(store, ensure_ascii=False))
-    _log_dpr_change(d, svc, payload.get("room"), code, frac=payload.get("frac", 0))
+    _log_dpr_change(d, svc, payload.get("room"), code, frac=payload.get("frac", 0), before=before)
     return _service_view(d, svc, room=payload.get("room"))
 
 
@@ -914,6 +966,7 @@ def set_item_qty(slug: str, payload: dict):
     if row.empty:
         raise HTTPException(404, "that item is not in this service")
     planned = float(row.iloc[0]["planned_total"] or 0.0)
+    plan_before = allp.get(svc, {}).get(code)       # the stored override before this save (None = none)
     if planned <= 0:
         frac = 0.0
     elif qty <= planned + 1e-9 or (_item_room_qty(d).get(svc, {}) or {}).get(code):
@@ -932,9 +985,10 @@ def set_item_qty(slug: str, payload: dict):
         (d / "planned.json").write_text(json.dumps(allp, ensure_ascii=False))
         frac = 1.0
     store = _item_prog(d)
+    before = _node_before(store, svc, code)
     itemprog.set_progress(store, svc, code, frac, room=None)
     (d / "item_progress.json").write_text(json.dumps(store, ensure_ascii=False))
-    _log_dpr_change(d, svc, None, code, frac=frac)
+    _log_dpr_change(d, svc, None, code, frac=frac, before=before, before_planned=plan_before)
     return _service_view(d, svc, room=None)
 
 
@@ -949,6 +1003,7 @@ def undo_item_over(slug: str, payload: dict):
     if not rec:
         raise HTTPException(404, "this item has no quantity above the BOQ to undo")
     allp = _read_json(d / "planned.json", {}) or {}
+    plan_before = allp.get(svc, {}).get(code)
     if rec.get("prior") is None:
         allp.setdefault(svc, {}).pop(code, None)
     else:
@@ -957,9 +1012,10 @@ def undo_item_over(slug: str, payload: dict):
     over[svc].pop(code, None)
     (d / "over_boq.json").write_text(json.dumps(over, ensure_ascii=False))
     store = _item_prog(d)
+    before = _node_before(store, svc, code)
     itemprog.set_progress(store, svc, code, 1.0, room=None)
     (d / "item_progress.json").write_text(json.dumps(store, ensure_ascii=False))
-    _log_dpr_change(d, svc, None, code, frac=1.0)
+    _log_dpr_change(d, svc, None, code, frac=1.0, before=before, before_planned=plan_before)
     return _service_view(d, svc, room=None)
 
 
@@ -1121,12 +1177,12 @@ def mark_rooms_done(slug: str, payload: dict, room: str = None):
         raise HTTPException(400, "tick at least one room")
     store = _item_prog(d)
     frac = 1.0 if done else 0.0
+    before = _node_before(store, svc, code)
     for rid in room_ids:
         itemprog.set_progress(store, svc, code, frac, room=rid)
     (d / "item_progress.json").write_text(json.dumps(store, ensure_ascii=False))
-    if done:   # an undo is not "work done today" -- never logged as one
-        for rid in room_ids:
-            _log_dpr_change(d, svc, rid, code, frac=1.0)
+    for rid in room_ids:   # an undo is not "work done today" -- it never adds a line, it only corrects one of today's own
+        _log_dpr_change(d, svc, rid, code, frac=frac, before=before, only_existing=not done)
     return _service_view(d, svc, room=room)
 
 
@@ -1246,12 +1302,13 @@ def set_rooms_progress(slug: str, payload: dict, room: str = None):
         frac = 1.0 if qty >= planned * (1 - 1e-9) else round(qty / planned, 6)
         todo.append((rid, frac))
     store = _item_prog(d)
+    before = _node_before(store, svc, code)
     for rid, frac in todo:
         itemprog.set_progress(store, svc, code, frac, room=rid)
     (d / "item_progress.json").write_text(json.dumps(store, ensure_ascii=False))
     for rid, frac in todo:
         if frac > 0:
-            _log_dpr_change(d, svc, rid, code, frac=frac)
+            _log_dpr_change(d, svc, rid, code, frac=frac, before=before)
     return _service_view(d, svc, room=room)
 
 
@@ -1800,9 +1857,297 @@ def dpr_today(slug: str):
     return {"date": today, "count": len(keys)}
 
 
+# ---------------------------------------------------------------- DPR: manpower, hold-ups, plan, parties
+# What the site engineer types once a day for the client-facing DPR, next to what the progress sliders already capture:
+#   dpr_days.json : {"2026-10-13": {"manpower": {service: {"supervisor": n, "skilled": n, "helper": n}}, "holdups": "...", "plan": "..."}}
+#   dpr_meta.json : {"client": "...", "contractor": "...", "prepared_by": "..."}     (project level, typed once)
+# Nothing is ever filled in for the engineer: a service with no manpower row, or a day with no text, is simply "not entered" and the
+# DPR shows "—" for it.
+_MANPOWER_ROLES = ("supervisor", "skilled", "helper")
+_DPR_TEXT_MAX = 2000
+_DPR_META_KEYS = ("client", "contractor", "prepared_by")
+
+
+def _dpr_days(d):
+    v = _read_json(d / "dpr_days.json", {})
+    return v if isinstance(v, dict) else {}
+
+
+def _dpr_meta(d):
+    v = _read_json(d / "dpr_meta.json", {})
+    return v if isinstance(v, dict) else {}
+
+
+def _iso_date(v, what="date"):
+    try:
+        return dt.date.fromisoformat(str(v)).isoformat()
+    except (TypeError, ValueError):
+        raise HTTPException(400, f"{what} must be YYYY-MM-DD")
+
+
+def _count(v, what):
+    """A head-count box: blank = nothing typed (None), else a whole number 0..9999."""
+    if v is None or (isinstance(v, str) and not v.strip()):
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        raise HTTPException(400, f"{what} must be a whole number")
+    if f != f or f < 0 or f > 9999 or f != int(f):
+        raise HTTPException(400, f"{what} must be a whole number between 0 and 9999")
+    return int(f)
+
+
+def _day_view(d, date):
+    days, meta = _dpr_days(d), _dpr_meta(d)
+    day = days.get(date) or {}
+    boqdf = _load_boq(d)
+    return {"date": date,
+            "weekday": dt.date.fromisoformat(date).strftime("%A"),
+            "services": boqdf.service.unique().tolist() if not boqdf.empty else [],
+            "manpower": day.get("manpower") or {},
+            "holdups": day.get("holdups") or "",
+            "plan": day.get("plan") or "",
+            **{k: meta.get(k) or "" for k in _DPR_META_KEYS}}
+
+
+@router.get("/{slug}/dpr/day")
+def dpr_day(slug: str, date: str = None):
+    """The manpower / hold-ups / plan entered for one day (today when `date` is omitted), plus the project's client / contractor / prepared-by."""
+    d = _need(slug)
+    return _day_view(d, _iso_date(date or dt.date.today().isoformat()))
+
+
+@router.post("/{slug}/dpr/day")
+def save_dpr_day(slug: str, payload: dict):
+    """Save what was typed for one day. Body (every key optional -- only the keys present are touched):
+        {"date": "YYYY-MM-DD" (default today),
+         "manpower": {service: {"supervisor": n, "skilled": n, "helper": n} | null, ...},
+         "holdups": "text", "plan": "text",
+         "client": "...", "contractor": "...", "prepared_by": "..."}      <- these three are project level, not per day
+    A service row counts as entered as soon as one of its three boxes has a number (the blank boxes of that row are then 0); a row with
+    all three blank, or null, removes that service's entry for the day. Nothing is carried over from another day."""
+    d = _need(slug)
+    date = _iso_date(payload.get("date") or dt.date.today().isoformat())
+    days = _dpr_days(d)
+    day = days.get(date) or {}
+    if "manpower" in payload:
+        mp_in = payload.get("manpower") or {}
+        if not isinstance(mp_in, dict):
+            raise HTTPException(400, "manpower must be an object keyed by service")
+        known = set(_load_boq(d).service.unique().tolist()) if not _load_boq(d).empty else set()
+        mp = dict(day.get("manpower") or {})
+        for svc, row in mp_in.items():
+            if svc not in known:
+                raise HTTPException(400, f"unknown service: {svc}")
+            vals = {r: _count((row or {}).get(r), f"{svc} {r}") for r in _MANPOWER_ROLES}
+            if all(v is None for v in vals.values()):
+                mp.pop(svc, None)
+            else:
+                mp[svc] = {r: (v or 0) for r, v in vals.items()}
+        day["manpower"] = mp
+    for k in ("holdups", "plan"):
+        if k in payload:
+            t = str(payload.get(k) or "").strip()
+            if len(t) > _DPR_TEXT_MAX:
+                raise HTTPException(400, f"{k} is too long (max {_DPR_TEXT_MAX} characters)")
+            day[k] = t
+    if any(k in payload for k in _DPR_META_KEYS):
+        meta = _dpr_meta(d)
+        for k in _DPR_META_KEYS:
+            if k in payload:
+                t = " ".join(str(payload.get(k) or "").split())
+                if len(t) > 200:
+                    raise HTTPException(400, f"{k} is too long (max 200 characters)")
+                meta[k] = t
+        (d / "dpr_meta.json").write_text(json.dumps(meta, ensure_ascii=False))
+    if day.get("manpower") or day.get("holdups") or day.get("plan"):
+        days[date] = day
+    else:
+        days.pop(date, None)
+    (d / "dpr_days.json").write_text(json.dumps(days, ensure_ascii=False))
+    return _day_view(d, date)
+
+
+def _nn(v):
+    """A pandas/numpy number as a plain float, None for a missing one."""
+    try:
+        if v is None or v != v:
+            return None
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _entries_qty(entries):
+    """Work quantity of a set of DPR log entries (their qty_today): 0 for none, None as soon as one of them cannot be known."""
+    tot = 0.0
+    for e in entries:
+        q = dpr.qty_today(e)
+        if q is None:
+            return None
+        tot += q
+    return round(tot, 3)
+
+
+def _client_dpr_data(d, slug, start, end, service, rooms_set, floor_names, room_names):
+    """Everything the client-facing DPR shows, as plain data for dpr.build_client_dpr(). Same engines as every other number in the app
+    (itemprog.compute, pnl.compute_item_pnl), nothing re-derived.
+
+    "Today" = the work of the report day(s) only: the sum of each log line's qty_today (what the day ADDED, see dpr.qty_today). "Cumulative"
+    = the item's real quantity done as of the end date (what is done now, minus whatever was logged after that date). "Up to previous day" =
+    cumulative minus today. A figure that cannot be known (a log line from before the day-quantity was recorded, a quantity the BOQ does not
+    give) stays None and is written as "—"."""
+    struct = _read_json(d / "structure.json", None)
+    boqdf = _load_boq(d)
+    all_services = boqdf.service.unique().tolist() if not boqdf.empty else []
+    services = [service] if service else all_services
+    m = _load_mapping(d)
+    all_rooms = _all_room_ids(d)
+    refs = clientref.refs_for(d, boqdf)
+    leaf_plural = _leaf_label(d).lower() + "s"
+    full_log = _dpr_log(d)
+    log = dpr.filter_by_area(full_log, floors=floor_names, rooms=room_names) if floor_names else full_log
+    period = start != end
+
+    def by_item(entries):
+        out = {}
+        for e in entries:
+            if e.get("item_code") is None:
+                continue
+            out.setdefault((e["service"], str(e["item_code"])), []).append(e)
+        return out
+
+    def one_activity(entries):               # an item mapped to several activities is logged once per activity: count it once
+        return [e for e in entries if e["activity"] == entries[0]["activity"]] if entries else []
+
+    in_range = by_item([e for e in log if start <= e["date"] <= end])
+    after = by_item([e for e in log if e["date"] > end])
+
+    boq_rows, lines = [], []
+    progress, values_by_svc = {}, {}
+    pos = 0
+    for si, svc in enumerate(services):
+        items = boqdf[boqdf.service == svc]
+        total_v = done_v = today_v = 0.0
+        done_known = today_known = True
+        if not items.empty:
+            prog_svc = _item_prog(d).get(svc, {})
+            rooms_cfg = _item_rooms(d).get(svc, {})
+            rqg = _item_room_qty(d).get(svc, {})
+            used = itemprog.compute(items, prog_svc, rooms_cfg, all_rooms, _planned(d, svc), room_qty_groups=rqg, rooms=rooms_set)
+            ip = pnl.compute_item_pnl(used, rates=_rates(d, svc), install_pct=_install_pct(d, svc),
+                                      default_install_pct=_settings(d).get("default_install_pct"))
+            mapped = {str(c) for a in m.activities(svc) for c in m.get(svc, a)}
+            acts = m.activities(svc)
+            for it in ip.itertuples():
+                code = str(it.item_code)
+                if code not in mapped:
+                    continue
+                pos += 1
+                planned, used_now, irate = _nn(it.planned_total), _nn(it.used), _nn(it.install_rate)
+                rb = itemprog.room_buckets(code, prog_svc, rooms_cfg, all_rooms, room_qty_groups=rqg, rooms=rooms_set)
+                got = in_range.get((svc, code), [])
+                today = _entries_qty(one_activity(got))
+                later = _entries_qty(one_activity(after.get((svc, code), [])))
+                cum = None if (used_now is None or later is None) else round(used_now - later, 3)
+                prev = None if (cum is None or today is None) else round(cum - today, 3)
+                ref = refs.get((svc, code)) or {}
+                desc = ref.get("text") or " ".join(str(it.description).split())
+                unit = getattr(it, "unit", None)
+                unit = None if unit is None or (isinstance(unit, float) and unit != unit) else str(unit)
+                boq_rows.append({"service": svc, "ref": ref.get("ref"), "desc": desc, "unit": unit, "planned": planned, "cum": cum,
+                                 "irate": irate, "zones_done": rb["done"], "zones_inp": rb["in_progress"], "zones_pend": rb["not_started"]})
+                if irate is not None and planned is not None:
+                    total_v += planned * irate
+                    if cum is None:
+                        done_known = False
+                    else:
+                        done_v += cum * irate
+                    if today is None and got:
+                        today_known = False
+                    elif today:
+                        today_v += today * irate
+                if got and (today is None or abs(today) > 1e-9):
+                    mine = one_activity(got)
+                    ai = acts.index(mine[0]["activity"]) if mine[0]["activity"] in acts else len(acts)
+                    lines.append({"_k": (si, ai, pos), "service": svc, "activity": mine[0]["activity"],
+                                  "parent": " ".join(ref["parent"].split()) if ref.get("parent") else None,
+                                  "ref": ref.get("ref"), "desc": desc, "unit": unit, "boq": planned, "prev": prev, "today": today, "cum": cum,
+                                  "balance": None if (planned is None or cum is None) else round(planned - cum, 3),
+                                  "pct": None if (planned in (None, 0) or cum is None) else cum / planned,
+                                  "location": dpr.location_text(mine, leaf_plural), "remarks": None})
+        todate = (done_v / total_v) if (total_v > 0 and done_known) else None
+        tdy = (today_v / total_v) if (total_v > 0 and today_known) else None
+        progress[svc] = {"todate": todate, "today": tdy,
+                         "prev": None if (todate is None or tdy is None) else todate - tdy}
+        values_by_svc[svc] = {"total": round(total_v, 2) if total_v > 0 else None,
+                              "done": round(done_v, 2) if (total_v > 0 and done_known) else None,
+                              "remaining": round(total_v - done_v, 2) if (total_v > 0 and done_known) else None,
+                              "_t": total_v, "_d": done_v, "_y": today_v, "_dk": done_known, "_yk": today_known}
+    lines.sort(key=lambda x: x.pop("_k"))
+
+    rated = [v for v in values_by_svc.values() if v["_t"] > 0]
+    tot_all = sum(v["_t"] for v in rated)
+    overall = {"todate": None, "today": None, "prev": None}
+    values = {"done": None, "remaining": None, "total": None, "by_service": {k: {a: b for a, b in v.items() if not a.startswith("_")}
+                                                                            for k, v in values_by_svc.items()}}
+    if tot_all > 0:
+        if all(v["_dk"] for v in rated):
+            overall["todate"] = sum(v["_d"] for v in rated) / tot_all
+            values.update(done=round(sum(v["_d"] for v in rated), 2), remaining=round(tot_all - sum(v["_d"] for v in rated), 2),
+                          total=round(tot_all, 2))
+        if all(v["_yk"] for v in rated):
+            overall["today"] = sum(v["_y"] for v in rated) / tot_all
+        if overall["todate"] is not None and overall["today"] is not None:
+            overall["prev"] = overall["todate"] - overall["today"]
+
+    # manpower typed by the engineer: this day's (or the period's) head-count per service, and the man-days of the days before
+    days = _dpr_days(d)
+    manpower, mp_total = {}, []
+    for svc in services:
+        today_rows = [(ds, (days.get(ds) or {}).get("manpower", {}).get(svc)) for ds in days if start <= ds <= end]
+        today_rows = [r for _ds, r in today_rows if r]
+        prev_days = sum(sum(int(r.get(k) or 0) for k in dpr_roles) for ds in days if ds < start
+                        for r in [((days.get(ds) or {}).get("manpower") or {}).get(svc)] if r)
+        row = {"prev_days": prev_days if any(ds < start and ((days.get(ds) or {}).get("manpower") or {}).get(svc) for ds in days) else None}
+        if today_rows:
+            for k in dpr_roles:
+                row[k] = sum(int(r.get(k) or 0) for r in today_rows)
+            row["total"] = sum(row[k] for k in dpr_roles)
+            row["to_date"] = (row["prev_days"] or 0) + row["total"]
+            mp_total.append(row["total"])
+        manpower[svc] = row
+
+    # DPR number = how many different days have a DPR up to this one (a day with progress logged or manpower typed, plus this day itself)
+    seen = {e["date"] for e in full_log if e["date"] <= end} | {ds for ds in days if ds <= end} | {end}
+    meta = _dpr_meta(d)
+    def fmt_day(ds):
+        return dt.date.fromisoformat(ds).strftime("%d-%b-%Y")
+    texts = lambda key: "\n".join(
+        (f"{fmt_day(ds)}: {t}" if period else t) for ds in sorted(days) if start <= ds <= end for t in [(days[ds].get(key) or "").strip()] if t)
+    scope = []
+    if service:
+        scope.append(service)
+    if floor_names:
+        scope.append(", ".join(sorted(floor_names)) + (" \u2192 " + ", ".join(sorted(room_names)) if room_names else ""))
+    return {"project": (struct or {}).get("name") or slug, "date_label": fmt_day(start) if not period else f"{fmt_day(start)} to {fmt_day(end)}",
+            "weekday": None if period else dt.date.fromisoformat(start).strftime("%A"), "period": period,
+            "dpr_no": None if period else len(seen), "client": meta.get("client"), "contractor": meta.get("contractor"),
+            "prepared_by": meta.get("prepared_by"), "scope": " \u00b7 ".join(scope), "services": [s_ for s_ in services if s_ in progress],
+            "progress": progress, "overall": overall, "values": values, "manpower": manpower,
+            "manpower_total": sum(mp_total) if mp_total else None, "lines": lines, "boq_rows": boq_rows,
+            "holdups": texts("holdups"), "plan": texts("plan"), "generated_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M")}
+
+
+dpr_roles = ("supervisor", "skilled", "helper")
+
+_SUMMARY_SUFFIX = {"none": "", "without": "_summary-without-amount", "with": "_summary-with-amount"}
+
+
 @router.get("/{slug}/export-dpr")
 def export_dpr(slug: str, start: str, end: str = None, service: str = None,
-               rooms: list[str] = Query(None)):
+               rooms: list[str] = Query(None), summary: str = None):
     """The full DPR -- Summary + Item detail + Daily updates -- for one date
     (end omitted) or a range (inclusive). Reuses the exact same pnl.py /
     itemprog.py / dpr.py functions every other route here already calls;
@@ -1851,6 +2196,29 @@ def export_dpr(slug: str, start: str, end: str = None, service: str = None,
         lookup = _room_location_map(d)
         room_names = {lookup[r]["name"] for r in rooms_set if r in lookup and lookup[r]["name"]}
         floor_names = {lookup[r]["location"] for r in rooms_set if r in lookup and lookup[r]["location"]}
+
+    if summary is not None:
+        # The client-facing DPR (sheet "DPR", optionally + Summary and BOQ progress). `summary` = none | without | with. Without this
+        # parameter the export below is exactly what it always was.
+        if summary not in _SUMMARY_SUFFIX:
+            raise HTTPException(400, "summary must be none, without or with")
+        try:
+            sd, ed = dt.date.fromisoformat(start), dt.date.fromisoformat(end)
+        except ValueError:
+            raise HTTPException(400, "start/end must be YYYY-MM-DD")
+        if ed < sd:
+            raise HTTPException(400, "end date is before start date")
+        data = _client_dpr_data(d, slug, start, end, service, rooms_set, floor_names, room_names)
+        wb = dpr.build_client_dpr(data, None if summary == "none" else summary)
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        bits = [_slugify(slug), start] + ([f"to_{end}"] if end != start else []) + \
+            ([_slugify(service)] if service else []) + (["area"] if rooms_set else [])
+        fname = "DPR_" + "_".join(bits) + _SUMMARY_SUFFIX[summary] + ".xlsx"
+        return Response(content=buf.read(),
+                        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
     rollups, item_rows = {}, []
     for svc in services:

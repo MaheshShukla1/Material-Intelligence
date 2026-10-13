@@ -37,7 +37,11 @@ from openpyxl.utils import get_column_letter
 # --------------------------------------------------------------------------
 # Layer 1 — auto-capture. Pure data, no I/O here (the caller owns the file).
 # --------------------------------------------------------------------------
-def record_change(log, date_str, service, floor, activity, room, item=None, qty=None, unit=None, item_code=None):
+_NO_BASELINE = object()      # "the caller did not say what the quantity was before today's first touch"
+
+
+def record_change(log, date_str, service, floor, activity, room, item=None, qty=None, unit=None, item_code=None,
+                  qty_before=_NO_BASELINE):
     """Append (or UPDATE) one captured fact in `log` (a plain list, e.g.
     loaded from dpr_log.json). `item`/`qty`/`unit` are optional (older log
     entries on disk won't have them -- group_for_export() below tolerates
@@ -56,6 +60,15 @@ def record_change(log, date_str, service, floor, activity, room, item=None, qty=
     dragging one room's slider from 30% to 70% twice in a day must show 70%
     worth of qty once, not 30%+70% double-counted. Returns the list back (so
     a caller can `log = record_change(log, ...)` or ignore the return).
+
+    `qty` stays what it always was: the CUMULATIVE quantity of that room/floor
+    at the moment of the last save that day. `qty_before` (optional) is the
+    cumulative quantity BEFORE the day's first save of that line -- written
+    once, when the line is first created that day, and never overwritten by
+    later saves the same day. `qty - qty_before` is then exactly the work done
+    on that day (see qty_today()). An entry without `qty_before` (every entry
+    written before this existed, or a caller that did not pass it) has an
+    UNKNOWN day quantity -- it is never guessed.
     """
     key = (date_str, service, floor, activity, room, item)
     for e in log:
@@ -63,11 +76,26 @@ def record_change(log, date_str, service, floor, activity, room, item=None, qty=
             e.get("room"), e.get("item")) == key:
             e["qty"], e["unit"] = qty, unit
             e["item_code"] = item_code
-            return log
-    log.append({"date": date_str, "service": service, "floor": floor,
-               "activity": activity, "room": room, "item": item, "qty": qty,
-               "unit": unit, "item_code": item_code})
+            return log        # qty_before (if the line has one) is the day's FIRST baseline: kept as it is
+    entry = {"date": date_str, "service": service, "floor": floor,
+             "activity": activity, "room": room, "item": item, "qty": qty,
+             "unit": unit, "item_code": item_code}
+    if qty_before is not _NO_BASELINE:
+        entry["qty_before"] = qty_before
+    log.append(entry)
     return log
+
+
+def qty_today(entry):
+    """The quantity of work done on `entry`'s day: cumulative qty at the last
+    save minus the cumulative qty before the first save of that day. None when
+    it cannot be known honestly (no baseline recorded -- an entry from before
+    this existed -- or either quantity unknown). May be negative: the engineer
+    reduced a figure that day (a correction), which is shown as it is."""
+    q, b = entry.get("qty"), entry.get("qty_before", None)
+    if "qty_before" not in entry or q is None or b is None or q != q or b != b:     # (q != q: a NaN quantity is unknown too)
+        return None
+    return round(float(q) - float(b), 3)
 
 
 def entries_for_range(log, start_date, end_date=None):
@@ -770,4 +798,452 @@ def build_full_export(date_label, project_totals, by_service, item_rows, days, l
     for mc in src.merged_cells.ranges:
         dst.merge_cells(str(mc))
     dst.sheet_view.showGridLines = False
+    return wb
+
+
+# ==========================================================================
+# The CLIENT-facing DPR (industry layout): sheet "DPR" -- progress status, manpower, work done today against the
+# client's BOQ, hold-ups, plan -- optionally followed by "Summary" and "BOQ progress" (without or with ₹).
+# Pure function: plain data in (assembled by siteprogress.py), Workbook out. Every number is written as a plain value (not a formula) so
+# it shows in any viewer; a figure that is not known is written as "—", never as a guess.
+# ==========================================================================
+import math as _math
+from openpyxl.worksheet.pagebreak import Break
+from openpyxl.worksheet.properties import PageSetupProperties
+
+_SLATE, _SLATE2, _BAND, _TODAY, _TODAYH, _LINE = "2C3E50", "4B6075", "EEF1F4", "E4F0DC", "C9E0BC", "D0D5DB"
+_thin_c = Side(style="thin", color=_LINE)
+_BOX = Border(left=_thin_c, right=_thin_c, top=_thin_c, bottom=_thin_c)
+_CEN = Alignment(horizontal="center", vertical="center", wrap_text=True)
+_LEFT = Alignment(horizontal="left", vertical="center", wrap_text=True)
+_RIGHT = Alignment(horizontal="right", vertical="center")
+DASH = "—"
+
+
+def _F(**k):
+    return Font(name="Calibri", size=k.pop("size", 10), **k)
+
+
+def _fill(c):
+    return PatternFill("solid", fgColor=c)
+
+
+def _ind(n=1):
+    return Alignment(horizontal="left", vertical="center", wrap_text=True, indent=n)
+
+
+def _short(s, n=96):
+    t = " ".join(str(s).split())
+    return t if len(t) <= n else t[:n].rstrip() + "…"
+
+
+def _isnum(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and v == v
+
+
+def _qty_fmt(unit, v):
+    """Whole numbers for counted things (Nos) unless the value really has a fraction; two decimals for lengths and the like."""
+    if str(unit).strip().lower() in ("nos", "no", "no.", "pcs", "set", "sets", "each") and _isnum(v) and abs(v - round(v)) < 1e-9:
+        return "#,##0"
+    return "#,##0.00"
+
+
+def _w(ws, ref, val=None, font=None, fil=None, al=None, fmt=None, border=True):
+    """Write one cell. A value of None is written as "—" (grey): the figure is not known."""
+    c = ws[ref]
+    unknown = val is None
+    c.value = DASH if unknown else val
+    c.font = _F(color="888888") if (unknown and font is None) else (font or _F())
+    if unknown and font is not None:
+        c.font = Font(name=font.name, size=font.size, bold=font.bold, italic=font.italic, color="888888")
+    c.alignment = (_RIGHT if unknown and al is None else al) or Alignment(vertical="center")
+    if fil:
+        c.fill = _fill(fil)
+    if fmt and not unknown:
+        c.number_format = fmt
+    if border:
+        c.border = _BOX
+    return c
+
+
+def _m(ws, rng, val=None, font=None, fil=None, al=None, border=True):
+    ws.merge_cells(rng)
+    _w(ws, rng.split(":")[0], val, font, fil, al, border=border)
+    if border:
+        for row in ws[rng]:
+            for c in row:
+                c.border = _BOX
+
+
+def _print_setup(ws, footer):
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.paperSize = 9
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
+    ws.print_options.horizontalCentered = True
+    ws.page_margins.left = ws.page_margins.right = 0.4
+    ws.page_margins.top = 0.5
+    ws.page_margins.bottom = 0.6
+    ws.oddFooter.center.text = footer
+    ws.oddFooter.center.size = 8
+
+
+def location_text(entries, leaf_plural="zones"):
+    """Where the work of one BOQ line was done, from its log entries: "B3 · Zone 1, 2, 3" for specific zones/rooms, plain floor names for
+    work recorded for the whole floor (overall slider) with "(all zones)" after them."""
+    rooms, whole = {}, []
+    for e in entries:
+        fl = e.get("floor")
+        if not fl:
+            continue
+        if e.get("room"):
+            rooms.setdefault(fl, [])
+            if e["room"] not in rooms[fl]:
+                rooms[fl].append(e["room"])
+        elif fl not in whole:
+            whole.append(fl)
+    parts = [f"{fl} · {_room_list_label(rs)}" for fl, rs in rooms.items() if fl not in whole]
+    if whole:
+        parts.append(", ".join(sorted(whole)) + f" (all {leaf_plural})")
+    return "; ".join(parts) if parts else None
+
+
+def _pct(v):
+    return None if v is None else v
+
+
+def sheet_dpr(wb, data):
+    """data keys used: project, date_label, weekday, dpr_no, period (bool), client, contractor, prepared_by, scope, services, progress,
+    overall, manpower, lines, holdups, plan."""
+    ws = wb.active
+    ws.title = "DPR"
+    ws.sheet_view.showGridLines = False
+    period = data.get("period")
+    for k, v in {"A": 5, "B": 13, "C": 52, "D": 8, "E": 13, "F": 13, "G": 12, "H": 13, "I": 12, "J": 11, "K": 24, "L": 28}.items():
+        ws.column_dimensions[k].width = v
+    _m(ws, "A1:L1", "DAILY PROGRESS REPORT", _F(size=16, bold=True, color="FFFFFF"), _SLATE,
+       Alignment(horizontal="center", vertical="center"))
+    ws.row_dimensions[1].height = 30
+    _w(ws, "B2", "Project", _F(bold=True), _BAND)
+    _w(ws, "C2", data["project"], _F(bold=True, size=11))
+    _m(ws, "E2:F2", "Period" if period else "Date", _F(bold=True), _BAND, _CEN)
+    _m(ws, "G2:H2", data["date_label"] + (f" ({data['weekday']})" if data.get("weekday") else ""), _F(bold=True), None, _CEN)
+    _w(ws, "J2", "DPR No.", _F(bold=True), _BAND, _CEN)
+    _w(ws, "K2", data.get("dpr_no"), _F(bold=True), None, Alignment(horizontal="left", vertical="center"))
+    _w(ws, "B3", "Client", _F(bold=True), _BAND)
+    _w(ws, "C3", data.get("client") or "", _F(), None, _LEFT)
+    _m(ws, "E3:F3", "Contractor", _F(bold=True), _BAND, _CEN)
+    _m(ws, "G3:H3", data.get("contractor") or "", _F(), None, _CEN)
+    _w(ws, "J3", "Prepared by", _F(bold=True), _BAND, _CEN)
+    _w(ws, "K3", data.get("prepared_by") or "", _F(), None, Alignment(horizontal="left", vertical="center", wrap_text=True))
+    if data.get("scope"):
+        _m(ws, "B4:L4", "Scope: " + data["scope"], _F(size=9, italic=True, color="555555"), None, _ind(1), border=False)
+
+    def section(rr, t):
+        _m(ws, f"A{rr}:L{rr}", t, _F(size=11, bold=True, color="FFFFFF"), _SLATE, Alignment(vertical="center", indent=1))
+        ws.row_dimensions[rr].height = 20
+
+    def head(rr, spec, h=32):
+        for col, txt in spec.items():
+            if ":" in col:
+                a, b = col.split(":")
+                _m(ws, f"{a}{rr}:{b}{rr}", txt, _F(bold=True), _BAND, _CEN)
+            else:
+                _w(ws, f"{col}{rr}", txt, _F(bold=True), _BAND, _CEN)
+        ws.row_dimensions[rr].height = h
+
+    svcs = data["services"]
+    r = 5
+    section(r, "1.  PROGRESS STATUS  (% of contract work complete)")
+    r = 6
+    head(r, {"B:D": "Service", "E": "Up to start of period" if period else "Up to previous day",
+             "F": "This period" if period else "Today", "G": "To date"})
+    ws.cell(row=r, column=6).fill = _fill(_TODAYH)
+    for i, svc in enumerate(svcs):
+        rr = r + 1 + i
+        p = data["progress"].get(svc) or {}
+        _m(ws, f"B{rr}:D{rr}", svc, _F(bold=True), None, _ind(1))
+        _w(ws, f"E{rr}", p.get("prev"), _F(), None, _RIGHT, "0.0%")
+        _w(ws, f"F{rr}", p.get("today"), _F(), None, _RIGHT, "0.0%")
+        _w(ws, f"G{rr}", p.get("todate"), _F(bold=True), None, _RIGHT, "0.0%")
+    rr = r + 1 + len(svcs)
+    o = data.get("overall") or {}
+    _m(ws, f"B{rr}:D{rr}", "Overall project", _F(bold=True), _BAND, _ind(1))
+    _w(ws, f"E{rr}", o.get("prev"), _F(bold=True), _BAND, _RIGHT, "0.0%")
+    _w(ws, f"F{rr}", o.get("today"), _F(bold=True), _BAND, _RIGHT, "0.0%")
+    _w(ws, f"G{rr}", o.get("todate"), _F(bold=True), _BAND, _RIGHT, "0.0%")
+
+    r = rr + 2
+    section(r, "2.  MANPOWER ON SITE " + ("IN THIS PERIOD" if period else "TODAY") + "  (nos)")
+    r += 1
+    head(r, {"B:D": "Service", "E": "Supervisor", "F": "Skilled", "G": "Helper / unskilled",
+             "H": "Total in period" if period else "Total today",
+             "I": "Man-days up to start of period" if period else "Man-days up to previous day", "J": "Man-days to date"}, 44)
+    mp = data["manpower"]
+    sums = {k: [] for k in "EFGHIJ"}
+    for i, svc in enumerate(svcs):
+        rr = r + 1 + i
+        row = mp.get(svc) or {}
+        _m(ws, f"B{rr}:D{rr}", svc, _F(bold=True), None, _ind(1))
+        for col, k in zip("EFG", ("supervisor", "skilled", "helper")):
+            _w(ws, f"{col}{rr}", row.get(k), _F(), None, _RIGHT, "0")
+            if _isnum(row.get(k)):
+                sums[col].append(row[k])
+        tot = row.get("total")
+        _w(ws, f"H{rr}", tot, _F(bold=True), None, _RIGHT, "0")
+        _w(ws, f"I{rr}", row.get("prev_days"), _F(), None, _RIGHT, "#,##0")
+        todate = row.get("to_date")
+        _w(ws, f"J{rr}", todate, _F(bold=True), None, _RIGHT, "#,##0")
+        for col, v in (("H", tot), ("I", row.get("prev_days")), ("J", todate)):
+            if _isnum(v):
+                sums[col].append(v)
+    rr = r + 1 + len(svcs)
+    _m(ws, f"B{rr}:D{rr}", "Total", _F(bold=True), _BAND, _ind(1))
+    for col in "EFGHIJ":
+        _w(ws, f"{col}{rr}", (sum(sums[col]) if sums[col] else None), _F(bold=True), _BAND, _RIGHT, "#,##0")
+    ws.row_breaks.append(Break(id=rr + 1))
+
+    r = rr + 2
+    section(r, "3.  WORK DONE " + ("IN THIS PERIOD" if period else "TODAY") +
+            ", AGAINST BOQ  (only BOQ lines worked on" + (" in this period" if period else " today") +
+            "; quantity = " + ("THIS period's" if period else "THIS day's") + " work)")
+    r += 1
+    head(r, {"A": "Sr.", "B": "BOQ Ref (client)", "C": "Activity / BOQ item", "D": "Unit", "E": "BOQ qty",
+             "F": "Up to start of period" if period else "Up to previous day", "G": "IN PERIOD" if period else "TODAY",
+             "H": "Cumulative", "I": "Balance", "J": "% complete", "K": "Location worked" if period else "Location worked today",
+             "L": "Remarks"})
+    ws.cell(row=r, column=7).fill = _fill(_TODAYH)
+    r += 1
+    sr = 0
+    lines = data["lines"]
+    if not lines:
+        _m(ws, f"A{r}:L{r}", "No BOQ line was updated in this " + ("period." if period else "day."), _F(italic=True, color="555555"), None, _ind(1))
+        r += 1
+    last_svc = last_act = last_parent = None
+    for ln in lines:
+        if ln["service"] != last_svc:
+            _m(ws, f"A{r}:L{r}", str(ln["service"]).upper(), _F(bold=True, color="FFFFFF"), _SLATE2, Alignment(vertical="center", indent=1))
+            ws.row_dimensions[r].height = 18
+            r += 1
+            last_svc, last_act, last_parent = ln["service"], None, None
+        if ln["activity"] != last_act:
+            _m(ws, f"A{r}:L{r}", str(ln["activity"]).upper(), _F(bold=True, color=_SLATE), _BAND, Alignment(vertical="center", indent=1))
+            ws.row_dimensions[r].height = 17
+            r += 1
+            last_act, last_parent = ln["activity"], None
+        if ln.get("parent") and ln["parent"] != last_parent:
+            _m(ws, f"A{r}:L{r}", _short(ln["parent"], 150), _F(italic=True, color="555555", size=9), None, _ind(2))
+            ws.row_dimensions[r].height = 16
+            r += 1
+        last_parent = ln.get("parent")
+        sr += 1
+        unit = ln.get("unit") or DASH
+        _w(ws, f"A{r}", sr, _F(), None, _CEN)
+        _w(ws, f"B{r}", ln.get("ref") or DASH, _F(), None, _CEN)
+        _w(ws, f"C{r}", _short(ln["desc"]), _F(), None, _LEFT)
+        _w(ws, f"D{r}", unit, _F(), None, _CEN)
+        for col, k, bold, fil in (("E", "boq", False, None), ("F", "prev", False, None), ("G", "today", True, _TODAY),
+                                  ("H", "cum", False, None), ("I", "balance", False, None)):
+            v = ln.get(k)
+            _w(ws, f"{col}{r}", v, _F(bold=bold), fil, _RIGHT, _qty_fmt(unit, v))
+        _w(ws, f"J{r}", ln.get("pct"), _F(), None, _RIGHT, "0.0%")
+        _w(ws, f"K{r}", ln.get("location"), _F(size=9), None, _ind(1))
+        _w(ws, f"L{r}", ln.get("remarks"), _F(size=9), None, _ind(1))
+        ws.row_dimensions[r].height = max(16, 13 * _math.ceil(len(_short(ln["desc"])) / 58) + 3,
+                                          13 * _math.ceil(len(ln.get("location") or "") / 26) + 3)
+        r += 1
+
+    r += 1
+    section(r, "4.  HOLD-UPS / ISSUES")
+    for t in _text_rows(data.get("holdups")):
+        r += 1
+        _m(ws, f"A{r}:L{r}", t, _F(), None, _ind(1))
+        ws.row_dimensions[r].height = 18
+    r += 2
+    section(r, "5.  PLAN FOR TOMORROW")
+    for t in _text_rows(data.get("plan")):
+        r += 1
+        _m(ws, f"A{r}:L{r}", t, _F(), None, _ind(1))
+        ws.row_dimensions[r].height = 18
+    r += 2
+    _m(ws, f"A{r}:F{r}", "Prepared by (Contractor):", _F(bold=True), None, Alignment(vertical="top", indent=1))
+    _m(ws, f"G{r}:L{r}", "Reviewed by (Client / PMC):", _F(bold=True), None, Alignment(vertical="top", indent=1))
+    ws.row_dimensions[r].height = 46
+    _print_setup(ws, f"{data['project']} - Daily Progress Report - {data['date_label']} - Page &P of &N")
+    return ws
+
+
+def _text_rows(t):
+    """The typed free text as table rows: one row per typed line; two empty writing rows when nothing was typed (the DPR is often printed
+    and filled in by hand)."""
+    rows = [x.strip() for x in str(t or "").splitlines() if x.strip()]
+    return rows if rows else ["", ""]
+
+
+def sheet_boq_progress(wb, data, with_amount):
+    ws = wb.create_sheet("BOQ progress")
+    ws.sheet_view.showGridLines = False
+    ncol = 16 if with_amount else 12
+    _m(ws, f"A1:{get_column_letter(ncol)}1", f"BOQ progress to date — {data['project']} — {data['date_label']}",
+       _F(size=13, bold=True, color="FFFFFF"), _SLATE, Alignment(vertical="center", indent=1))
+    ws.row_dimensions[1].height = 26
+    heads = ["Sr.", "Service", "BOQ Ref (client)", "BOQ item", "Unit", "BOQ qty", "Cumulative done (to date)", "Balance", "% complete",
+             "Zones done", "In progress", "Pending"]
+    widths = [5, 12, 13, 60, 7, 11, 14, 11, 10, 9, 10, 9]
+    if with_amount:
+        heads += ["Rate (₹)", "BOQ amount (₹)", "Done (₹)", "Balance (₹)"]
+        widths += [11, 15, 15, 15]
+    for i, (h, w) in enumerate(zip(heads, widths), start=1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+        _w(ws, f"{get_column_letter(i)}2", h, _F(bold=True), _BAND, _CEN)
+    ws.cell(row=2, column=7).fill = _fill(_TODAYH)
+    ws.row_dimensions[2].height = 34
+    r = 3
+    tot = {"N": 0.0, "O": 0.0, "P": 0.0}
+    any_amt = {"N": False, "O": False, "P": False}
+    for n, it in enumerate(data["boq_rows"], start=1):
+        unit = it.get("unit") or DASH
+        _w(ws, f"A{r}", n, _F(), None, _CEN)
+        _w(ws, f"B{r}", it["service"], _F(), None, _ind(1))
+        _w(ws, f"C{r}", it.get("ref") or DASH, _F(), None, _CEN)
+        _w(ws, f"D{r}", _short(it["desc"], 110), _F(), None, _LEFT)
+        _w(ws, f"E{r}", unit, _F(), None, _CEN)
+        planned, cum = it.get("planned"), it.get("cum")
+        bal = (planned - cum) if (_isnum(planned) and _isnum(cum)) else None
+        pct = (cum / planned) if (_isnum(planned) and _isnum(cum) and planned) else None
+        _w(ws, f"F{r}", planned, _F(), None, _RIGHT, _qty_fmt(unit, planned))
+        _w(ws, f"G{r}", cum, _F(bold=True), _TODAY, _RIGHT, _qty_fmt(unit, cum))
+        _w(ws, f"H{r}", bal, _F(), None, _RIGHT, _qty_fmt(unit, bal))
+        _w(ws, f"I{r}", pct, _F(), None, _RIGHT, "0.0%")
+        for col, k in zip("JKL", ("zones_done", "zones_inp", "zones_pend")):
+            _w(ws, f"{col}{r}", it.get(k), _F(), None, _RIGHT, "0")
+        if with_amount:
+            rate = it.get("irate")
+            if rate is None:
+                for col in "MNOP":
+                    _w(ws, f"{col}{r}", None)
+            else:
+                _w(ws, f"M{r}", rate, _F(), None, _RIGHT, "#,##0.00")
+                vals = {"N": planned * rate if _isnum(planned) else None,
+                        "O": cum * rate if _isnum(cum) else None,
+                        "P": bal * rate if bal is not None else None}
+                for col, v in vals.items():
+                    _w(ws, f"{col}{r}", v, _F(bold=(col == "O")), None, _RIGHT, "#,##0")
+                    if v is not None:
+                        tot[col] += v
+                        any_amt[col] = True
+        ws.row_dimensions[r].height = max(16, 13 * _math.ceil(len(_short(it["desc"], 110)) / 66) + 3)
+        r += 1
+    last = r - 1
+    if with_amount:
+        _m(ws, f"A{r}:L{r}", "Total", _F(bold=True), _BAND, Alignment(horizontal="right", vertical="center", indent=1))
+        _w(ws, f"M{r}", "", _F(), _BAND)
+        for col in "NOP":
+            _w(ws, f"{col}{r}", (tot[col] if any_amt[col] else None), _F(bold=True), _BAND, _RIGHT, "#,##0")
+        r += 1
+        _m(ws, f"A{r}:P{r}", "₹ figures: BOQ rate x installation % (Payment terms setting), same basis as the Summary. '—' = item without a BOQ rate.",
+           _F(size=9, italic=True, color="555555"), None, _LEFT, border=False)
+    ws.freeze_panes = "E3"
+    if last >= 3:
+        ws.auto_filter.ref = f"A2:{get_column_letter(ncol)}{last}"
+    ws.print_title_rows = "1:2"
+    _print_setup(ws, f"{data['project']} - BOQ progress to date - {data['date_label']} - Page &P of &N")
+    return ws
+
+
+def sheet_summary(wb, data, with_amount):
+    ws = wb.create_sheet("Summary")
+    ws.sheet_view.showGridLines = False
+    period = data.get("period")
+    ncol = 8
+    for i, w in enumerate([16, 14, 14, 14, 14, 13, 13, 16], start=1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+    _m(ws, f"A1:{get_column_letter(ncol)}1", f"Site progress summary — {data['project']} — {data['date_label']}",
+       _F(size=13, bold=True, color="FFFFFF"), _SLATE, Alignment(vertical="center", indent=1))
+    ws.row_dimensions[1].height = 26
+    _m(ws, f"A2:{get_column_letter(ncol)}2", f"Generated {data.get('generated_at', '')}".strip(), _F(size=9, italic=True, color="888888"),
+       None, Alignment(vertical="center"), border=False)
+    svcs = data["services"]
+    o = data.get("overall") or {}
+    val = data.get("values") or {}
+    brows = data["boq_rows"]
+    zsum = lambda svc, k: (sum(b.get(k) or 0 for b in brows if b["service"] == svc))
+    if with_amount:
+        tiles = [("Value complete", o.get("todate"), "0.0%"), ("Done (₹)", val.get("done"), '"₹"#,##0'),
+                 ("Remaining (₹)", val.get("remaining"), '"₹"#,##0'), ("Material waste (₹)", None, '"₹"#,##0')]
+    else:
+        mp_total = data.get("manpower_total")
+        tiles = [("Progress complete", o.get("todate"), "0.0%"), ("This period" if period else "Today", o.get("today"), "+0.0%"),
+                 ("Manpower in period" if period else "Manpower today", mp_total, "0"),
+                 ("BOQ lines worked", len(data["lines"]), "0")]
+    for i, (lab, v, fmt) in enumerate(tiles):
+        c0 = 1 + i * 2
+        _m(ws, f"{get_column_letter(c0)}4:{get_column_letter(c0 + 1)}4", lab, _F(size=9, bold=True, color="555555"), _BAND, _CEN)
+        _m(ws, f"{get_column_letter(c0)}5:{get_column_letter(c0 + 1)}5", v, _F(size=15, bold=True, color=_SLATE), None, _CEN)
+        if v is not None:
+            ws[f"{get_column_letter(c0)}5"].number_format = fmt
+    ws.row_dimensions[5].height = 30
+    if with_amount:
+        heads = ["Service", "% complete", "Done (₹)", "Remaining (₹)", "Total (₹)", "Zones done", "In progress", "Pending"]
+    else:
+        heads = ["Service", "Up to start of period" if period else "Up to previous day", "This period" if period else "Today",
+                 "To date (% complete)", "Zones done", "In progress", "Pending", "Manpower in period" if period else "Manpower today"]
+    for i, h in enumerate(heads, start=1):
+        _w(ws, f"{get_column_letter(i)}7", h, _F(bold=True, color="FFFFFF"), _SLATE, _CEN)
+    ws.row_dimensions[7].height = 32
+    r0 = 8
+    for k, svc in enumerate(svcs):
+        r = r0 + k
+        p = data["progress"].get(svc) or {}
+        v = (val.get("by_service") or {}).get(svc) or {}
+        _w(ws, f"A{r}", svc, _F(bold=True), None, _ind(1))
+        if with_amount:
+            _w(ws, f"B{r}", p.get("todate"), _F(), None, _RIGHT, "0.0%")
+            for col, key in zip("CDE", ("done", "remaining", "total")):
+                _w(ws, f"{col}{r}", v.get(key), _F(), None, _RIGHT, '"₹"#,##0')
+            for col, key in zip("FGH", ("zones_done", "zones_inp", "zones_pend")):
+                _w(ws, f"{col}{r}", zsum(svc, key), _F(), None, _RIGHT, "#,##0")
+        else:
+            _w(ws, f"B{r}", p.get("prev"), _F(), None, _RIGHT, "0.0%")
+            _w(ws, f"C{r}", p.get("today"), _F(), None, _RIGHT, "0.0%")
+            _w(ws, f"D{r}", p.get("todate"), _F(bold=True), None, _RIGHT, "0.0%")
+            for col, key in zip("EFG", ("zones_done", "zones_inp", "zones_pend")):
+                _w(ws, f"{col}{r}", zsum(svc, key), _F(), None, _RIGHT, "#,##0")
+            _w(ws, f"H{r}", (data["manpower"].get(svc) or {}).get("total"), _F(), None, _RIGHT, "0")
+    r = r0 + len(svcs)
+    first, last = r0, r - 1
+    _w(ws, f"A{r}", "Overall project", _F(bold=True), _BAND, _ind(1))
+    colsum = lambda col: (sum(ws[f"{col}{x}"].value for x in range(first, last + 1) if _isnum(ws[f"{col}{x}"].value)))
+    if with_amount:
+        _w(ws, f"B{r}", o.get("todate"), _F(bold=True), _BAND, _RIGHT, "0.0%")
+        for col, key in zip("CDE", ("done", "remaining", "total")):
+            _w(ws, f"{col}{r}", val.get(key), _F(bold=True), _BAND, _RIGHT, '"₹"#,##0')
+        for col in "FGH":
+            _w(ws, f"{col}{r}", colsum(col), _F(bold=True), _BAND, _RIGHT, "#,##0")
+        _m(ws, f"A{r + 2}:{get_column_letter(ncol)}{r + 2}",
+           "₹ figures: computed from each item's BOQ rate x installation % (Payment terms setting). Zone counts: from the 'BOQ progress' sheet.",
+           _F(size=9, italic=True, color="555555"), None, _LEFT, border=False)
+    else:
+        _w(ws, f"B{r}", o.get("prev"), _F(bold=True), _BAND, _RIGHT, "0.0%")
+        _w(ws, f"C{r}", o.get("today"), _F(bold=True), _BAND, _RIGHT, "0.0%")
+        _w(ws, f"D{r}", o.get("todate"), _F(bold=True), _BAND, _RIGHT, "0.0%")
+        for col in "EFG":
+            _w(ws, f"{col}{r}", colsum(col), _F(bold=True), _BAND, _RIGHT, "#,##0")
+        _w(ws, f"H{r}", data.get("manpower_total"), _F(bold=True), _BAND, _RIGHT, "0")
+        _m(ws, f"A{r + 2}:{get_column_letter(ncol)}{r + 2}", "Zone counts: from the 'BOQ progress' sheet.",
+           _F(size=9, italic=True, color="555555"), None, _LEFT, border=False)
+    _print_setup(ws, f"{data['project']} - Summary - {data['date_label']} - Page &P of &N")
+    return ws
+
+
+def build_client_dpr(data, mode=None):
+    """mode: None = the DPR sheet only (the client copy) | "without" = + Summary and BOQ progress, percentages only | "with" = the same
+    with ₹ amounts (internal). Sheet order: DPR, Summary, BOQ progress."""
+    wb = openpyxl.Workbook()
+    sheet_dpr(wb, data)
+    if mode:
+        with_amount = (mode == "with")
+        sheet_summary(wb, data, with_amount)
+        sheet_boq_progress(wb, data, with_amount)
     return wb

@@ -373,10 +373,83 @@
       where.style.cursor = "pointer";
       where.style.color = "var(--violet)";
       where.onclick = () => openDprModal();
+      // "Manpower & notes": what the engineer types for the DPR besides the progress sliders. A second text link of the same weight
+      // right after the export link (created once, kept across re-renders of the bar).
+      let mp = $("sp-mp-open");
+      if (!mp) {
+        mp = document.createElement("span");
+        mp.id = "sp-mp-open";
+        where.insertAdjacentElement("afterend", mp);
+      }
+      mp.textContent = "Manpower & notes";
+      mp.title = "Today's manpower, hold-ups and plan for the client DPR";
+      mp.style.cssText = "cursor:pointer;color:var(--violet);margin-left:12px";
+      mp.onclick = () => openDayModal();
     } catch (e) {}
   }
 
+  // ---------- DPR: manpower, hold-ups, plan for tomorrow, client / contractor ----------
+  // The few things a site engineer types once a day for the client-facing DPR. Nothing is carried over from another day or filled in:
+  // a service left empty is "not entered" and the DPR shows a dash for it; in a service row that has any number, the blank boxes count as 0.
+  async function openDayModal() {
+    const t0 = new Date();       // the day on the engineer's clock (the server logs progress by its own local date too), not the UTC date
+    const today = `${t0.getFullYear()}-${String(t0.getMonth() + 1).padStart(2, "0")}-${String(t0.getDate()).padStart(2, "0")}`;
+    const services = (S.state && S.state.services) || [];
+    const ROLES = [["supervisor", "Supervisor"], ["skilled", "Skilled"], ["helper", "Helper / unskilled"]];
+    const field = "width:100%;box-sizing:border-box";
+    const render = (v) => {
+      const mp = v.manpower || {};
+      $("sp-day-body").innerHTML = `
+        <p style="font-size:13px;color:var(--ink3);margin:0 0 8px">Manpower on site</p>
+        <div class="sp-day-grid sp-day-head"><span></span>${ROLES.map(([, l]) => `<span>${esc(l)}</span>`).join("")}</div>
+        ${services.map((svc) => `<div class="sp-day-grid" data-svc="${esc(svc)}"><b>${esc(svc)}</b>${ROLES.map(([k]) =>
+          `<input class="ctl" type="number" min="0" step="1" inputmode="numeric" data-role="${k}" aria-label="${esc(svc)} ${k}" value="${mp[svc] && mp[svc][k] != null ? mp[svc][k] : ""}">`).join("")}</div>`).join("")}
+        <p class="sp-day-note">Leave a service empty if there is nothing to report: the DPR then shows a dash. In a row you fill, a blank box counts as 0.</p>
+        <p style="font-size:13px;color:var(--ink3);margin:18px 0 6px">Hold-ups / issues</p>
+        <textarea class="ctl" id="sp-day-holdups" rows="3" maxlength="2000" style="${field}" placeholder="e.g. Slab opening not handed over, piping on hold">${esc(v.holdups || "")}</textarea>
+        <p style="font-size:13px;color:var(--ink3);margin:14px 0 6px">Plan for tomorrow</p>
+        <textarea class="ctl" id="sp-day-plan" rows="3" maxlength="2000" style="${field}" placeholder="e.g. Fire: 100 mm pipe in B2">${esc(v.plan || "")}</textarea>
+        <p style="font-size:13px;color:var(--ink3);margin:18px 0 6px">On every DPR of this project <span style="color:var(--ink3);font-size:12px">(typed once)</span></p>
+        <div class="sp-day-parties">
+          <label>Client<input class="ctl" id="sp-day-client" maxlength="200" style="${field}" value="${esc(v.client || "")}"></label>
+          <label>Contractor<input class="ctl" id="sp-day-contractor" maxlength="200" style="${field}" value="${esc(v.contractor || "")}"></label>
+          <label>Prepared by<input class="ctl" id="sp-day-prepared" maxlength="200" style="${field}" value="${esc(v.prepared_by || "")}"></label>
+        </div>`;
+    };
+    const load = async (date) => {
+      const v = await jget(api("/" + S.slug + "/dpr/day?date=" + encodeURIComponent(date)));
+      render(v);
+    };
+    modal("Manpower & notes",
+      "For the client DPR. Pick the day it is for.",
+      `<div style="display:flex;gap:10px;align-items:center;font-size:13px;padding:4px 0 16px">
+         <span style="color:var(--ink3)">Date</span>
+         <input class="ctl" id="sp-day-date" type="date" value="${today}" style="flex:1">
+       </div>
+       <div id="sp-day-body"><div class="sp-empty">Loading…</div></div>`,
+      async () => {
+        const date = $("sp-day-date").value;
+        if (!date) return toast("Pick a date");
+        const manpower = {};
+        document.querySelectorAll("#sp-day-body [data-svc]").forEach((row) => {
+          const o = {};
+          row.querySelectorAll("input[data-role]").forEach((i) => { o[i.dataset.role] = i.value.trim() === "" ? null : Number(i.value); });
+          manpower[row.dataset.svc] = o;
+        });
+        await jpost(api("/" + S.slug + "/dpr/day"), {
+          date, manpower,
+          holdups: $("sp-day-holdups").value, plan: $("sp-day-plan").value,
+          client: $("sp-day-client").value, contractor: $("sp-day-contractor").value, prepared_by: $("sp-day-prepared").value,
+        });
+        closeModal(); toast("Saved for the DPR.");
+      }, "Save", "min(640px,94vw)");
+    $("sp-modal").querySelector(".card").classList.add("sp-compactclose");
+    $("sp-day-date").onchange = async () => { try { await load($("sp-day-date").value || today); } catch (e) { toast("Failed: " + briefErr(e)); } };
+    try { await load(today); } catch (e) { $("sp-day-body").innerHTML = `<div class="sp-empty">${esc(briefErr(e))}</div>`; }
+  }
+
   let dprSvc = "";
+  let dprSum = "none";   // "Summary sheets": none (DPR only, the client copy) | without (+ Summary, % only) | with (+ Summary, ₹ amounts, internal)
   let dprActiveFloor = null;
   let dprPicked = {};   // path -> Set of room ids, persists across floor switches
 
@@ -386,7 +459,7 @@
     const groups = {};
     rooms.forEach((r) => { (groups[r.path] = groups[r.path] || []).push(r); });
     const groupEntries = Object.entries(groups);
-    dprSvc = ""; dprActiveFloor = groupEntries.length ? groupEntries[0][0] : null; dprPicked = {};
+    dprSvc = ""; dprSum = "none"; dprActiveFloor = groupEntries.length ? groupEntries[0][0] : null; dprPicked = {};
     groupEntries.forEach(([path]) => { dprPicked[path] = new Set(); });
 
     modal("Export daily update",
@@ -399,6 +472,9 @@
        </div>
        <p style="font-size:13px;color:var(--ink3);margin:0 0 8px">Service</p>
        <div id="sp-dpr-svc" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:20px"></div>
+       <p style="font-size:13px;color:var(--ink3);margin:0 0 8px">Summary sheets</p>
+       <div id="sp-dpr-sum" style="display:flex;flex-wrap:wrap;gap:8px"></div>
+       <p id="sp-dpr-sumhelp" class="sp-dsum-help"></p>
        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px">
          <p style="font-size:13px;color:var(--ink3);margin:0">Area</p>
          <span id="sp-dpr-scope" style="font-size:12.5px;color:var(--violet)"></span>
@@ -414,6 +490,7 @@
         q.set("start", start);
         if (end && end !== start) q.set("end", end);
         if (dprSvc) q.set("service", dprSvc);
+        q.set("summary", dprSum);
         ticked.forEach((rid) => q.append("rooms", rid));
         const a = document.createElement("a");
         a.href = api("/" + S.slug + "/export-dpr?" + q.toString());
@@ -422,9 +499,52 @@
       }, "Export DPR", "min(640px,92vw)");
 
     renderDprSvcChips();
+    renderDprSum();
+    $("sp-dpr-start").addEventListener("input", renderDprSumHelp);
+    $("sp-dpr-end").addEventListener("input", renderDprSumHelp);
     if (!rooms.length) return;
     renderDprFloors(groupEntries);
     refreshDprScopeLine(groupEntries);
+  }
+
+  // "Summary sheets": which sheets come with the DPR sheet. The default is the client copy (the DPR sheet only). The helper line says what the
+  // choice adds and the exact file name the download will have (same naming as the server: export_dpr()).
+  const DPR_SUM = [
+    ["none", "DPR only"],
+    ["without", "+ Summary, without amount"],
+    ["with", "+ Summary, with amount"],
+  ];
+  const slugName = (t) => String(t || "").trim().replace(/[^A-Za-z0-9]+/g, "-").replace(/^-+|-+$/g, "").toLowerCase() || "untitled";
+  function dprFileName() {
+    const st = $("sp-dpr-start"), en = $("sp-dpr-end");
+    const start = st && st.value ? st.value : new Date().toISOString().slice(0, 10);
+    const end = en && en.value ? en.value : start;
+    const area = Object.values(dprPicked).some((set) => set.size);
+    const bits = [slugName(S.slug), start].concat(end !== start ? ["to_" + end] : [], dprSvc ? [slugName(dprSvc)] : [], area ? ["area"] : []);
+    return "DPR_" + bits.join("_") + (dprSum === "none" ? "" : "_summary-" + dprSum + "-amount") + ".xlsx";
+  }
+  function renderDprSumHelp() {
+    const el = $("sp-dpr-sumhelp");
+    if (!el) return;
+    const txt = {
+      none: "Client copy: the <b>DPR</b> sheet only.",
+      without: "Adds <b>Summary</b> and <b>BOQ progress</b> (cumulative, against every BOQ line). Percentages only, no \u20b9.",
+      with: "Adds <b>Summary</b> and <b>BOQ progress</b> with \u20b9 amounts. Internal use, not for the client.",
+    }[dprSum];
+    el.innerHTML = `${txt}<br>File <code>${esc(dprFileName())}</code>`;
+  }
+  function renderDprSum() {
+    const box = $("sp-dpr-sum");
+    if (!box) return;
+    box.innerHTML = DPR_SUM.map(([k, label]) => {
+      const on = dprSum === k;
+      return `<button type="button" data-dprsum="${k}"
+        style="font-size:12.5px;padding:5px 12px;border-radius:999px;cursor:pointer;
+        background:${on ? "#eaf3de" : "#fff"};color:${on ? "#3b6d11" : "#1c1c1b"};
+        border:1px solid ${on ? "#97c459" : "var(--line2)"}">${esc(label)}${k === "with" ? ` <span class="sp-dsum-tag">\u20b9 internal</span>` : ""}</button>`;
+    }).join("");
+    box.querySelectorAll("[data-dprsum]").forEach((b) => { b.onclick = () => { dprSum = b.dataset.dprsum; renderDprSum(); }; });
+    renderDprSumHelp();
   }
 
   function renderDprSvcChips() {
@@ -439,7 +559,7 @@
         border:1px solid ${on ? "#97c459" : "var(--line2)"}">${esc(label)}</button>`;
     }).join("");
     container.querySelectorAll("[data-dprsvc]").forEach((b) => {
-      b.onclick = () => { dprSvc = b.dataset.dprsvc; renderDprSvcChips(); };
+      b.onclick = () => { dprSvc = b.dataset.dprsvc; renderDprSvcChips(); renderDprSumHelp(); };
     });
   }
 
@@ -514,6 +634,7 @@
   function refreshDprScopeLine(groupEntries) {
     const el = $("sp-dpr-scope");
     if (!el) return;
+    renderDprSumHelp();
     const total = Object.values(dprPicked).reduce((s, set) => s + set.size, 0);
     if (!total) { el.textContent = "Whole project"; return; }
     el.textContent = groupEntries

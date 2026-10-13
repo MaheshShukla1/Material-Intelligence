@@ -242,7 +242,7 @@
     const names = [...order, ...drafts.map((r) => r.service).filter((n) => order.indexOf(n) < 0)];
     const per = [...new Set(names)].map((n) => {
       const mine = drafts.filter((r) => r.service === n);
-      return mine.length ? { service: n, amt: mine.reduce((a, r) => a + (r.this_total || 0), 0) } : null;
+      return mine.length ? { service: n, n: mine.length, amt: mine.reduce((a, r) => a + (r.this_total || 0), 0) } : null;
     }).filter(Boolean);
     return { n: drafts.length, draftTotal, ready, notInvoiced: draftTotal + ready, per,
              nInv: ov.ras.filter((r) => r.status === "locked").length };
@@ -256,17 +256,25 @@
     return inr(v);
   }
   const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  // The text people send to a manager or a client on WhatsApp / email. Plain text (no markdown, so email does not show stray
+  // asterisks), one figure per line, exact rupees in Indian grouping, the same words as the cards on the screen. Only figures the
+  // overview already has; a part that is zero is left out rather than shown as "0".
   function snapshotText(ov) {
     const sn = snapshotOf(ov);
-    const rs = (v) => (v < 0 ? "−" : "") + Math.abs(Math.round(v)).toLocaleString("en-IN");
     const d = new Date();
     const pr = B.projects.find((p) => p.slug === B.slug);
-    const lines = [`${pr ? pr.project : B.slug} · Billing · ${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`,
-      `Invoiced: ${inr(ov.billed)} (${sn.nInv} RA)`,
-      `Not invoiced yet: ${inr(sn.notInvoiced)} (${sn.n} draft${sn.n === 1 ? "" : "s"})`];
-    for (let i = 0; i < sn.per.length; i += 3) lines.push("  " + sn.per.slice(i, i + 3).map((p) => `${p.service} ${rs(p.amt)}`).join(" · "));
-    lines.push(`Ready to bill, no draft: ${inr(sn.ready)}`, `Contract value: ${inr(ov.contract_value)}`);
-    return lines.join("\n");
+    const ras = (n) => `${n} RA${n === 1 ? "" : "s"}`;
+    const L = [`${pr ? pr.project : B.slug} – Billing status`, `As on ${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`, "",
+      `Contract value: ${inr(ov.contract_value)}`,
+      `Invoiced so far: ${inr(ov.billed)}${sn.nInv ? ` (${ras(sn.nInv)})` : ""}`,
+      `Not yet invoiced: ${inr(sn.notInvoiced)}`];
+    if (sn.n) L.push(`• RA bills prepared, awaiting invoice (${sn.n}): ${inr(sn.draftTotal)}`);
+    if (sn.ready > 0) L.push(`• Ready to bill, RA not prepared yet: ${inr(sn.ready)}`);
+    if (sn.per.length) {
+      L.push("", "Prepared RA bills by service:");
+      sn.per.forEach((p) => L.push(`• ${p.service}${p.n > 1 ? ` (${ras(p.n)})` : ""} – ${inr(p.amt)}`));
+    }
+    return L.join("\n");
   }
   // One tap. A phone opens its share sheet (WhatsApp is one tap away); a computer copies. Where copying is not allowed (a plain
   // http address on a phone is not a "secure" page, so the browser refuses the clipboard) the text is shown, ready to select.
@@ -285,7 +293,7 @@
       document.body.appendChild(ta); ta.select(); done = document.execCommand("copy"); ta.remove();
     } catch (e) { done = false; }
     if (done) { toast("Snapshot copied. Paste it in WhatsApp or email."); return; }
-    modal("Snapshot", "Copying is blocked here. Select the text and copy it.", `<textarea class="bl-snaptxt" id="bl-snaptxt" readonly rows="8">${esc(text)}</textarea>`, [{ label: "Close", cls: "primary", run: closeModal }]);
+    modal("Snapshot", "Copying is blocked here. Select the text and copy it.", `<textarea class="bl-snaptxt" id="bl-snaptxt" readonly rows="12">${esc(text)}</textarea>`, [{ label: "Close", cls: "primary", run: closeModal }]);
     const t = $("bl-snaptxt"); if (t) { t.focus(); t.select(); }
   }
 

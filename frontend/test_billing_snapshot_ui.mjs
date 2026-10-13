@@ -112,14 +112,21 @@ async function main() {
   click(window, d.querySelector("#bl-share")); await sleep(20);
   const now = new window.Date();
   const want = [
-    `Thoth Mall · Billing · ${now.getDate()} ${monthName[now.getMonth()]} ${now.getFullYear()}`,
-    "Invoiced: ₹ 0 (0 RA)",
-    "Not invoiced yet: ₹ 28,77,527 (5 drafts)",
-    "  Electrical 3,37,178 · Fire 13,06,140 · HVAC 11,47,469",
-    "  Plumbing 51,278 · ELV 35,462",
-    "Ready to bill, no draft: ₹ 0",
-    "Contract value: ₹ 1,14,70,96,759"].join("\n");
-  ok(got.length === 1 && got[0] === want, "copied text is exactly the mock-up's:\n" + (got[0] || "(nothing copied)") + "\n--- wanted ---\n" + want);
+    "Thoth Mall – Billing status",
+    `As on ${now.getDate()} ${monthName[now.getMonth()]} ${now.getFullYear()}`,
+    "",
+    "Contract value: ₹ 1,14,70,96,759",
+    "Invoiced so far: ₹ 0",
+    "Not yet invoiced: ₹ 28,77,527",
+    "• RA bills prepared, awaiting invoice (5): ₹ 28,77,527",
+    "",
+    "Prepared RA bills by service:",
+    "• Electrical – ₹ 3,37,178",
+    "• Fire – ₹ 13,06,140",
+    "• HVAC – ₹ 11,47,469",
+    "• Plumbing – ₹ 51,278",
+    "• ELV – ₹ 35,462"].join("\n");
+  ok(got.length === 1 && got[0] === want, "copied text is exactly the agreed status note:\n" + (got[0] || "(nothing copied)") + "\n--- wanted ---\n" + want);
   ok(/Snapshot copied/.test(T(d.getElementById("bl-toast"))), "a toast says it was copied");
 
   // ---- it follows the numbers: a refreshed overview (a draft grew, one was invoiced) is what gets shared next
@@ -130,10 +137,10 @@ async function main() {
   const sel = d.getElementById("bl-proj"); sel.dispatchEvent(new window.Event("change", { bubbles: true })); await sleep(80);
   click(window, d.querySelector("#bl-share")); await sleep(20);
   const t2 = got[1] || "";
-  ok(/Invoiced: ₹ 35,462 \(1 RA\)/.test(t2), "after a refresh: invoiced figure follows: " + t2);
+  ok(/Invoiced so far: ₹ 35,462 \(1 RA\)/.test(t2), "after a refresh: invoiced figure follows (1 RA): " + t2);
   const after = SUM + 100000 - 35462;                                      // 29,42,065, added here
-  ok(after === 2942065 && t2.includes(`Not invoiced yet: ${money(after)} (4 drafts)`), "28,77,527 + 1,00,000 - 35,462 = 29,42,065 in 4 drafts: " + t2);
-  ok(/Fire 14,06,140/.test(t2) && !/ELV/.test(t2.split("\n").slice(3, -2).join(" ")), "Fire's new amount shows, invoiced ELV is no longer in the not-invoiced list: " + t2);
+  ok(after === 2942065 && t2.includes(`Not yet invoiced: ${money(after)}\n• RA bills prepared, awaiting invoice (4): ${money(after)}`), "28,77,527 + 1,00,000 - 35,462 = 29,42,065 in 4 drafts: " + t2);
+  ok(/• Fire – ₹ 14,06,140/.test(t2) && !/ELV/.test(t2), "Fire's new amount shows, invoiced ELV is no longer in the not-invoiced list: " + t2);
   k = [...d.querySelectorAll(".bl-kpi")];
   ok(T(k[2].querySelector("b")) === money(after), "and so does the card: " + T(k[2].querySelector("b")));
 
@@ -149,7 +156,7 @@ async function main() {
   ok(/Not invoiced yet · 4 drafts/.test(T(d.querySelector(".bl-grp"))) && T(d.querySelector(".bl-grp")).endsWith("₹ 28,42,065"), "the header counts drafts only: " + T(d.querySelector(".bl-grp")));
   const gt = [];
   clip(window, gt); click(window, d.querySelector("#bl-share")); await sleep(20);
-  ok(/Ready to bill, no draft: ₹ 23,53,650/.test(gt[0] || "") && (gt[0] || "").includes("Not invoiced yet: " + money(four + 2353650) + " (4 drafts)"), "the shared text names the ready part: " + gt[0]);
+  ok((gt[0] || "").includes(`Not yet invoiced: ${money(four + 2353650)}\n• RA bills prepared, awaiting invoice (4): ${money(four)}\n• Ready to bill, RA not prepared yet: ₹ 23,53,650`), "the shared text names both parts: " + gt[0]);
 
   // ---- one draft says "1 draft"; no drafts at all: no header, the card is only the ready part
   ({ d } = await boot(scenario(DRAFTS.slice(0, 1))));
@@ -163,6 +170,18 @@ async function main() {
   ({ d } = await boot(scenario([], (ov) => { ov.contract_value = 4321; })));
   ok(T(d.querySelector(".bl-kpi b .cmp")) === "₹ 4,321", "under a lakh: the full number: " + T(d.querySelector(".bl-kpi b .cmp")));
 
+  // ---- wording rules of the note: a service with two drafts says so; a zero part is left out; nothing invoiced says no "(0 RA)"
+  { const two = [];
+    ({ window, d } = await boot(scenario(DRAFTS.slice(0, 3), (ov) => { const r = clone(ov.ras[2]); r.id = "ra9"; r.this_total = 100000; ov.ras.push(r); })));
+    clip(window, two); click(window, d.querySelector("#bl-share")); await sleep(20);
+    const t = two[0] || "";
+    ok(/• HVAC \(2 RAs\) – ₹ 12,47,469/.test(t) && /\(4\): ₹ 28,90,787/.test(t), "two drafts of one service: '(2 RAs)' and their sum: " + t);
+    ok(!/Ready to bill/.test(t) && !/\(0 RA/.test(t) && !/drafts?/.test(t), "no zero 'Ready' line, no '(0 RA)', no 'draft' jargon: " + t);
+    const none = [];
+    ({ window, d } = await boot(scenario([], (ov) => { ov.services[1].ready.install = { ready: 500000, blocked: null, has_draft: false, draft_label: null, next_no: 1 }; ov.ready_total = 500000; })));
+    clip(window, none); click(window, d.querySelector("#bl-share")); await sleep(20);
+    ok(!/Prepared RA bills by service/.test(none[0] || "") && /Not yet invoiced: ₹ 5,00,000\n• Ready to bill, RA not prepared yet: ₹ 5,00,000$/.test(none[0] || ""), "no drafts: no by-service list, only the ready part: " + none[0]); }
+
   // ---- Share where the page is not allowed to use the clipboard
   // (1) clipboard refused, the older copy command works
   let ex = 0;
@@ -173,7 +192,7 @@ async function main() {
   ({ window, d } = await boot(scenario(DRAFTS)));
   clip(window, [], true); click(window, d.querySelector("#bl-share")); await sleep(30);
   const ta = d.getElementById("bl-snaptxt");
-  ok(!!ta && ta.value.startsWith("Thoth Mall · Billing · ") && /Not invoiced yet: ₹ 28,77,527 \(5 drafts\)/.test(ta.value), "nothing can copy: the text is shown in a dialog to copy by hand");
+  ok(!!ta && ta.value.startsWith("Thoth Mall – Billing status") && /Not yet invoiced: ₹ 28,77,527/.test(ta.value), "nothing can copy: the text is shown in a dialog to copy by hand");
   ok(ta && ta.hasAttribute("readonly"), "and it is read-only");
   click(window, d.getElementById("bl-mx"));
   ok(!d.getElementById("bl-modal"), "the dialog closes");
@@ -185,7 +204,7 @@ async function main() {
     w.navigator.share = async (x) => { if (abort) { const e = new Error("cancel"); e.name = "AbortError"; throw e; } shared.push(x); };
   } }));
   clip(window, cp); click(window, d.querySelector("#bl-share")); await sleep(30);
-  ok(shared.length === 1 && /^Thoth Mall · Billing · /.test(shared[0].text) && cp.length === 0, "phone: the share sheet gets the text, nothing is copied behind it");
+  ok(shared.length === 1 && /^Thoth Mall – Billing status/.test(shared[0].text) && cp.length === 0, "phone: the share sheet gets the text, nothing is copied behind it");
   abort = true; d.getElementById("bl-toast") && d.getElementById("bl-toast").classList.remove("on");
   click(window, d.querySelector("#bl-share")); await sleep(30);
   ok(cp.length === 0 && !d.getElementById("bl-modal") && !(d.getElementById("bl-toast") || { classList: { contains: () => false } }).classList.contains("on"), "cancelling the share sheet does nothing (no error, no dialog, no copy)");

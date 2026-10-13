@@ -56,6 +56,8 @@ with sync_playwright() as p:
         # ---- the dialog
         pg.click("#bl-dl"); pg.wait_for_selector("#bl-modal .bl-dl")
         pg.wait_for_timeout(200)
+        assert pg.locator("#bl-modal [data-ra]:checked").count() == 0 and pg.locator('#bl-modal [data-dl="pb"]:checked').count() == 0 and pg.is_disabled("#bl-dl-go"), "from home nothing is ticked"
+        pg.click('#bl-modal [data-q="latest"]'); pg.wait_for_timeout(100)
         pg.screenshot(path=f"{OUT}/{name}_2_dialog.png"); fits(pg, name + " dialog")
         n = pg.locator("#bl-modal .bl-fi").count()
         assert n == 3, n
@@ -85,6 +87,7 @@ with sync_playwright() as p:
         pg.wait_for_function("!document.getElementById('bl-modal')")
         # ---- fill the details through the UI
         pg.click("#bl-dl"); pg.wait_for_selector("#bl-modal .bl-dl")
+        pg.click('#bl-modal [data-q="latest"]'); pg.wait_for_timeout(100)
         pg.click('#bl-modal [data-act="details"]'); pg.wait_for_selector('#bl-modal [data-m="client"]')
         pg.wait_for_timeout(150)
         pg.screenshot(path=f"{OUT}/{name}_3_details.png"); fits(pg, name + " details")

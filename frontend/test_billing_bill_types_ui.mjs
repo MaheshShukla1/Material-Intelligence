@@ -185,12 +185,15 @@ async function main() {
   click(window, nav2(d, "billing")); await sleep(80);
   click(window, d.getElementById("bl-dl")); await sleep(80);
   const ticked = () => [...d.querySelectorAll("#bl-modal [data-ra]")].filter((c) => c.checked).map((c) => c.dataset.ra).sort().join();
-  ok(ticked() === "i2,s2", "Together RA 1 is history once Supply RA 2 and Installation RA 2 followed: 'Latest' = the two new invoices, ticked: " + ticked());
+  ok(ticked() === "", "nothing is ticked when Download opens from home");
+  click(window, [...d.querySelectorAll("#bl-modal [data-q]")].find((b) => b.dataset.q === "latest")); await sleep(20);
+  ok(ticked() === "i2,s2", "Together RA 1 is history once Supply RA 2 and Installation RA 2 followed: 'Latest' quick pick = the two new invoices, ticked: " + ticked());
   ok([...d.querySelectorAll("#bl-modal [data-ra]")].length === 3 && /Supply \+ Installation RA-01/.test(d.getElementById("bl-modal").textContent), "all three are still listed by their type and number, so any can be ticked");
   const half = clone(mixed); half.ras = [mk("t1", "together", 1, "locked"), mk("s2", "supply", 2, "draft")];
   ({ window, d, calls } = await boot({ ov: half }));
   click(window, nav2(d, "billing")); await sleep(80);
   click(window, d.getElementById("bl-dl")); await sleep(80);
+  click(window, [...d.querySelectorAll("#bl-modal [data-q]")].find((b) => b.dataset.q === "latest")); await sleep(20);
   ok(ticked() === "s2,t1", "with only a later Supply RA, Together RA 1 still carries the installation stage: it stays in 'Latest': " + ticked());
 
   console.log(`billing bill types UI: ${pass} passed, ${fail} failed`);

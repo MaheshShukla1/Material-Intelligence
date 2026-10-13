@@ -973,11 +973,11 @@
     let ov;
     try { ov = await jget(api("/" + B.slug)); B.ov = ov; } catch (e) { toast(briefErr(e)); return; }
     if (!ov.ras.length) { toast("No RA yet — create an RA bill first."); return; }
-    const DL = keep || { invoice: true, mode: "files", combined: false, pb: Object.keys(ov.pb || {}).length > 0, sheets: { invoice: true, summary: true, boq: true, abstract: true, challan: true }, sel: new Set() };
+    const DL = keep || { invoice: true, mode: "files", combined: false, pb: false, sheets: { invoice: true, summary: true, boq: true, abstract: true, challan: true }, sel: new Set() };
     if (!(DL.both instanceof Set)) DL.both = new Set();
     DL.both = new Set([...DL.both].filter((n) => bothOf(ov.services.find((x) => x.service === n))));
     DL.pbrep = {};                                   // per-RA report of the ProjectBase sheet, fetched when it is ticked
-    if (!keep) DL.sel = new Set(pre && pre.length ? pre : latestIds(ov));
+    if (!keep) DL.sel = new Set(pre && pre.length ? pre : []);       // nothing is ticked for you: from a draft only that draft, from home nothing
     DL.sel = new Set([...DL.sel].filter((id) => ov.ras.some((r) => r.id === id)));
     const allGroups = ov.services.map((s) => ({ s, ras: ov.ras.filter((r) => r.service === s.service).sort((a, b) => a.no - b.no || SER_ORD[a.series] - SER_ORD[b.series]) }));
     const groups = () => allGroups.filter((g) => g.ras.length);           // services with no RA yet are only named, not listed

@@ -88,6 +88,7 @@ const tick = (w, el, on) => { el.checked = on; change(w, el); };
 const modalText = (d) => (d.getElementById("bl-modal") || { textContent: "" }).textContent;
 const files = (d) => [...d.querySelectorAll("#bl-modal .bl-fi b")].map((x) => x.textContent);
 const goBtn = (d) => d.getElementById("bl-dl-go");
+const pickLatest = async (w, d) => { click(w, [...d.querySelectorAll("#bl-modal [data-q]")].find((b) => b.dataset.q === "latest")); await sleep(20); };
 const q = (url) => new URLSearchParams(url.split("?")[1]);
 
 async function main() {
@@ -97,9 +98,12 @@ async function main() {
   ok(dl && dl.tagName === "BUTTON" && dl.textContent.trim() === "Download", "home has ONE Download button");
   ok(!d.getElementById("bl-xl") && !/Download Excel|All services Excel/.test(d.querySelector(".bl-headact").textContent), "the lone 'Download Excel' link is gone from the header");
 
-  // ---- the dialog opens with the latest RA of every service ticked
+  // ---- opened from home: NOTHING is ticked for the person (they pick what they need)
   click(window, dl); await sleep(80);
   ok(!!d.getElementById("bl-modal") && /Download/.test(d.querySelector("#bl-modal h2").textContent), "Download dialog opens");
+  ok([...d.querySelectorAll("#bl-modal [data-ra]")].every((x) => !x.checked) && files(d).length === 0, "from home: no RA is ticked and the preview is empty");
+  ok(goBtn(d).disabled && /Tick what you need/.test(d.getElementById("bl-dlsum").textContent), "so the Download button waits: 'Tick what you need'");
+  click(window, [...d.querySelectorAll("#bl-modal [data-q]")].find((b) => b.dataset.q === "latest")); await sleep(20);   // the quick pick is still there
   const ticked = [...d.querySelectorAll("#bl-modal [data-ra]")].filter((x) => x.checked).map((x) => x.dataset.ra).sort();
   ok(ticked.join() === [ID.hvac2, ID.hvac_i, ID.fire].sort().join(), "default = the latest RA of each service/series (HVAC RA-02 supply, HVAC RA-01 install, Fire RA-01), not the locked RA-01");
   ok(files(d).length === 3 && files(d).every((n) => /^thoth-mall_.*_RA-\d\d(_DRAFT)?\.xlsx$/.test(n)), "preview lists one workbook per ticked RA with the real file names: " + files(d).join(" | "));
@@ -200,13 +204,13 @@ async function main() {
 
   // ---- a server error keeps the dialog open and says why
   ({ window, d, calls, clicks } = await boot({ fail: "Tick at least one sheet." }));
-  click(window, d.getElementById("bl-dl")); await sleep(80);
+  click(window, d.getElementById("bl-dl")); await sleep(80); await pickLatest(window, d);
   click(window, goBtn(d)); await sleep(60);
   ok(!!d.getElementById("bl-modal") && !goBtn(d).disabled && /Tick at least one sheet/.test(d.getElementById("bl-toast").textContent), "a failed download keeps the dialog, re-enables the button and shows the server's reason");
 
   // ---- 'Fill details': the form, the save, and back to the SAME dialog with the SAME ticks
   ({ window, d, calls, clicks } = await boot());
-  click(window, d.getElementById("bl-dl")); await sleep(80);
+  click(window, d.getElementById("bl-dl")); await sleep(80); await pickLatest(window, d);
   click(window, d.querySelector('#bl-modal [data-act="details"]')); await sleep(80);
   ok(/Invoice details/.test(d.querySelector("#bl-modal h2").textContent) && !d.querySelector("#bl-modal .bl-dl"), "'Fill details' opens the Invoice details form");
   const f = (k) => d.querySelector(`#bl-modal [data-m="${k}"]`);

@@ -66,6 +66,7 @@ with sync_playwright() as p:
         pg.screenshot(path=f"{OUT}/{name}_3_home.png", full_page=True); noscroll(pg, name + " home")
         # ---- Download dialog + real file name
         pg.click("#bl-dl"); pg.wait_for_selector("#bl-modal .bl-dl"); pg.wait_for_timeout(200)
+        pg.click('#bl-modal [data-q="latest"]'); pg.wait_for_timeout(100)
         dlg = pg.text_content("#bl-modal")
         assert "Installation ₹0" in dlg and "Locked" not in dlg and "LOCKED" not in dlg, dlg[:400]
         names = [re.sub(r"[​]", "", x) for x in pg.locator("#bl-modal .bl-fi b").all_inner_texts()]

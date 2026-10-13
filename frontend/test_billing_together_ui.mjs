@@ -63,6 +63,7 @@ async function main() {
   ok(/Supply RA 1 \(invoiced\) \+ Installation RA 1 \(draft\)/.test(card.textContent), "the row says which RAs it reads: " + card.textContent.replace(/\s+/g, " "));
   ok(!boxes[0].checked && !card.classList.contains("on"), "nothing is ticked by default: the usual download is unchanged");
   ok(!files(d).some((n) => /TOGETHER/.test(n)), "no combined file in the list until ticked");
+  ok([...d.querySelectorAll("#bl-modal [data-ra]")].every((x) => !x.checked) && files(d).length === 0, "from home no RA is ticked either: the person picks");
   const before = files(d).length;
 
   // ---- tick it
@@ -86,6 +87,7 @@ async function main() {
   // ---- with the RAs as well it is one zip, and the service name travels as given
   ({ window, d, calls, clicks } = await boot(clone(FX.overview)));
   click(window, d.getElementById("bl-dl")); await sleep(80);
+  click(window, [...d.querySelectorAll("#bl-modal [data-q]")].find((b) => b.dataset.q === "latest")); await sleep(20);
   tick(window, d.querySelector("#bl-bothcard [data-both]"), true); await sleep(20);
   ok(/Download 3 files \(\.zip\)/.test(d.getElementById("bl-dl-go").textContent), "2 RA workbooks + the combined file = one zip of 3");
   click(window, d.getElementById("bl-dl-go")); await sleep(60);

@@ -94,10 +94,13 @@ async function pickFile(w, d, name) {
   change(w, inp); await sleep(60);
 }
 
+const pickLatest = async (w, d) => { click(w, [...d.querySelectorAll("#bl-modal [data-q]")].find((b) => b.dataset.q === "latest")); await sleep(20); };
 async function main() {
   // ============ not connected: the card says so and offers Connect, the download has no ProjectBase file
   let { window, d, calls } = await boot();
   click(window, d.getElementById("bl-dl")); await sleep(120);
+  ok(files(d).length === 0, "from home nothing is ticked, so nothing is in the download yet");
+  await pickLatest(window, d);
   const card = d.getElementById("bl-pbcard");
   ok(!!card && /ProjectBase sheet/.test(card.textContent) && /Not connected/.test(card.textContent), "Download has a ProjectBase sheet card that says Not connected");
   ok(card.querySelector('[data-dl="pb"]').disabled && !card.querySelector('[data-dl="pb"]').checked, "its checkbox is disabled until a service is connected");
@@ -127,6 +130,7 @@ async function main() {
   // ============ Connect: step 2 with the real inspect payload
   ({ window, d, calls } = await boot());
   click(window, d.getElementById("bl-dl")); await sleep(120);
+  await pickLatest(window, d);
   click(window, d.querySelector('#bl-pbcard [data-pbc="Electrical"]')); await sleep(30);
   await pickFile(window, d, "Billing_Request-undefined.xlsx");
   ok(/Step 2 of 2/.test(txt(d, ".bl-pb2")) && /VEIPL-GUJ\/PRO\/26-27\/002/.test(txt(d, ".bl-pbproj")), "step 2 names the project code read from the file");
@@ -215,7 +219,9 @@ async function main() {
   // ============ with invoices ticked too: one request carries both
   ({ window, d, calls } = await boot({ ov: clone(FX.ov1) }));
   click(window, d.getElementById("bl-dl")); await sleep(150);
-  ok(d.querySelector('[data-dl="pb"]').checked && files(d).length === 4, "already-connected project: ProjectBase is ticked by default");
+  ok(!d.querySelector('[data-dl="pb"]').checked && files(d).length === 0, "already-connected project: ProjectBase is NOT ticked for you either, and no RA is ticked");
+  await pickLatest(window, d); tick(window, d.querySelector('[data-dl="pb"]'), true); await sleep(20);
+  ok(d.querySelector('[data-dl="pb"]').checked && files(d).length === 4, "ticked by the person: 2 invoices + 2 ProjectBase files");
   click(window, d.getElementById("bl-dl-go")); await sleep(120);
   qq = q(dlUrl(calls).u);
   ok(qq.get("ras") === `${SUP},${INS}` && qq.get("pb") === "1" && qq.get("pbras") === `${SUP},${INS}` && qq.get("invoice") !== "0" && qq.get("mode") === "files", "one request: invoice RAs + ProjectBase RAs: " + dlUrl(calls).u);
@@ -226,8 +232,8 @@ async function main() {
   // ============ ProjectBase unticked: ordinary download, no hand-off
   ({ window, d, calls } = await boot({ ov: clone(FX.ov1) }));
   click(window, d.getElementById("bl-dl")); await sleep(150);
-  tick(window, d.querySelector('[data-dl="pb"]'), false); await sleep(20);
-  ok(files(d).length === 2 && d.getElementById("bl-dl-go").textContent === "Download 2 files (.zip)", "unticking ProjectBase leaves the 2 invoices");
+  await pickLatest(window, d);
+  ok(!d.querySelector('[data-dl="pb"]').checked && files(d).length === 2 && d.getElementById("bl-dl-go").textContent === "Download 2 files (.zip)", "with ProjectBase left unticked it is just the 2 invoices");
   click(window, d.getElementById("bl-dl-go")); await sleep(120);
   ok(!/pb=/.test(dlUrl(calls).u) && !/Finish in ProjectBase/.test(txt(d, "#bl-toast") + txt(d, "#bl-modal")), "no pb in the URL and no hand-off");
 
@@ -235,6 +241,7 @@ async function main() {
   const ov = clone(FX.ov1); ov.ras.find((r) => r.id === INS).service = "Fire";
   ({ window, d, calls } = await boot({ ov }));
   click(window, d.getElementById("bl-dl")); await sleep(150);
+  await pickLatest(window, d); tick(window, d.querySelector('[data-dl="pb"]'), true); await sleep(20);
   ok(files(d).filter((n) => /_ProjectBase_/.test(n)).length === 1, "only the connected service's RA gets a ProjectBase file");
   const w = [...d.querySelectorAll("#bl-modal .bl-wn.pbn")];
   ok(w.length === 1 && /Fire has no ProjectBase sheet connected/.test(w[0].textContent) && w[0].querySelector('[data-pbc="Fire"]'), "a warning names Fire and offers Connect…");

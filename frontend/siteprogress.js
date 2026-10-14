@@ -1482,6 +1482,8 @@
     const areaTick = areaG.filter((g) => g.querySelector("input[data-area]").checked);
     const ids = [...document.querySelectorAll("#sp-modal input[data-room]")].filter((c) => c.checked && !inArea.has(c.dataset.room)).map((c) => c.dataset.room);
     if (!ids.length && !areaTick.length) return toast(`Tick at least one ${dlgLeafLower()} to ${done ? "mark done" : "undo"}.`);
+    // plan removed for this item: nothing is "the full plan" any more -- a zone / Whole counts the quantity typed for it, exactly
+    const fp = getPlan ? getPlan() : null, free = !!(fp && fp.free) && done;
     if (areaTick.length) {
       const unit = (S._byCode[code] || {}).unit || "";
       const made = [];
@@ -1489,8 +1491,12 @@
         for (const g of areaTick) {
           const inp = g.querySelector("input[data-areaqty]"), P = Number(g.dataset.plan), v = Number(inp.value);
           const typed = inp.dataset.touched && inp.value.trim() !== "" && !isNaN(v);
-          const qty = done ? (typed ? Math.min(Math.max(v, 0), P) : P) : 0;
           const was = Number(g.dataset.was || 0), nm = g.querySelector("b").textContent.split(" › ").pop();
+          if (free && !(typed && v > 0)) {
+            if (!typed && g.dataset.pooled) continue;                                // already holds this total: nothing new to save
+            return toast(`Type the quantity done for Whole ${nm}. The plan is removed, so a tick alone has no quantity.`);
+          }
+          const qty = free ? v : (done ? (typed ? Math.min(Math.max(v, 0), P) : P) : 0);
           if (done && !g.dataset.pooled && was > 0 && Math.abs(was - qty) > 1e-9
               && !confirm(`${nm} already has ${qf(was, unit)} ${unit} recorded. Replace it with this one total of ${qf(qty, unit)} ${unit}?`)) return;
           S.svc = await jpost(api("/" + S.slug + "/progress/area-total" + roomQ()), { service: S.service, item_code: code, rooms: JSON.parse(g.dataset.ids), qty });
@@ -1498,10 +1504,36 @@
         }
       } catch (e) { return toast("Failed: " + briefErr(e)); }
       if (!ids.length) {
+        if (!made.length && done) return toast("Nothing new to save — those totals are already recorded.");
         closeModal();
         await afterSvc();
         return toast(done ? `Saved whole-area total for ${code} — ${made.join(", ")}.` : `Cleared the whole-area total on ${code}.`);
       }
+    }
+    if (free) {
+      const unit = (S._byCode[code] || {}).unit || "";
+      const nameOf = (id) => { const l = document.querySelector(`#sp-modal input[data-room="${cssA(id)}"]`); return l ? l.closest("label").textContent.replace("✓", "").trim() : id; };
+      const entries = [], missing = [];
+      for (const id of ids) {
+        const inp = document.querySelector(`#sp-modal input[data-roomqty="${cssA(id)}"]`);
+        const info = fp.rooms && fp.rooms[id];
+        if (!inp || !info || !(info.planned > 0)) { missing.push(nameOf(id)); continue; }
+        const v = Number(inp.value), typed = inp.dataset.touched && inp.value.trim() !== "" && !isNaN(v) && v > 0;
+        if (typed) entries.push({ room: id, qty: v });
+        else if (!((info.frac || 0) > 0)) missing.push(nameOf(id));               // untouched and nothing recorded yet: no quantity to count
+      }
+      if (missing.length) {
+        return toast(`Type the quantity done for ${missing.slice(0, 3).join(", ")}${missing.length > 3 ? ` +${missing.length - 3} more` : ""}. The plan is removed, so a tick alone has no quantity.`);
+      }
+      if (!entries.length) return toast("Nothing new to save — type a quantity next to a name first.");
+      try {
+        S.svc = await jpost(api("/" + S.slug + "/progress/rooms" + roomQ()), { service: S.service, item_code: code, entries });
+        closeModal();
+        await afterSvc();
+        const sum = entries.reduce((a, e) => a + e.qty, 0);
+        return toast(entries.length === 1 ? `Saved ${qf(sum, unit)} ${unit} for ${code}.`
+                                          : `Saved ${entries.length} ${dlgLeafPluralLower(entries.length)} (${qf(sum, unit)} ${unit}) on ${code}.`);
+      } catch (e) { return toast("Failed: " + briefErr(e)); }
     }
     // Rows with a quantity box (a zone planned at more than one unit) carry a
     // REAL installed quantity -- tick = the full plan, or whatever was typed.
@@ -1707,8 +1739,10 @@
     const isCountItem = isCountUnit(it.unit);
     const fmtQ = (v) => (isCountItem ? Math.round(v) : Math.round(v * 100) / 100);
     const cells = [];   // {cb, inp, cell, planned, done0}
+    let isFree = false;  // the item's per-zone plan was removed: a zone / Whole counts exactly the quantity typed
     const paintCell = (c, v) => {
       c.cell.classList.toggle("is-on", !!c.cb.checked);
+      if (isFree) { c.cell.classList.toggle("is-partial", false); c.cell.classList.toggle("is-full", v > 0); return; }
       c.cell.classList.toggle("is-partial", v > 0 && v < c.planned);
       c.cell.classList.toggle("is-full", v >= c.planned);
     };
@@ -1718,6 +1752,7 @@
     function syncCells() {
       cells.forEach((c) => {
         if (c.inp.dataset.touched) return;
+        if (isFree) { c.inp.value = c.done0 > 0 ? fmtQ(c.done0) : ""; paintCell(c, c.done0); return; }     // a tick never fills a quantity
         const v = c.cb.checked ? c.planned : c.done0;
         c.inp.value = fmtQ(v);
         paintCell(c, v);
@@ -1726,10 +1761,12 @@
     function applyRoomPlan(plan) {
       if (!plan || !plan.rooms || $("sp-modal") !== modalEl) return;
       roomPlan = plan;
+      isFree = !!plan.free;
+      paintPlanOff(plan);
       document.querySelectorAll("#sp-modal input[data-room]").forEach((cb) => {
         const info = plan.rooms[cb.dataset.room];
         if (!info || !(info.planned > 0)) return;                 // unknown plan: tick only, never a guessed number
-        if (isCountItem && info.planned <= 1) return;             // 1 per room: the tick says it all
+        if (isCountItem && info.planned <= 1 && !isFree) return;  // 1 per room: the tick says it all
         const label = cb.closest("label");
         if (!label || label.parentNode.classList.contains("sp-roomcell")) return;
         const done0 = fmtQ((info.frac || 0) * info.planned);
@@ -1739,7 +1776,9 @@
         cell.appendChild(label);
         const box = document.createElement("span");
         box.className = "sp-roomqty";
-        box.innerHTML = `<input class="ctl" type="number" min="0" max="${esc(String(info.planned))}" step="${isCountItem ? "1" : "any"}" inputmode="${isCountItem ? "numeric" : "decimal"}" data-roomqty="${esc(cb.dataset.room)}" value="${done0}" aria-label="Quantity done"><span class="u">of ${fmtQ(info.planned)} ${esc(it.unit)}</span>`;
+        box.innerHTML = isFree
+          ? `<input class="ctl" type="number" min="0" step="${isCountItem ? "1" : "any"}" inputmode="${isCountItem ? "numeric" : "decimal"}" data-roomqty="${esc(cb.dataset.room)}" value="${done0 > 0 ? done0 : ""}" placeholder="qty" aria-label="Quantity done"><span class="u">${esc(it.unit)}</span>`
+          : `<input class="ctl" type="number" min="0" max="${esc(String(info.planned))}" step="${isCountItem ? "1" : "any"}" inputmode="${isCountItem ? "numeric" : "decimal"}" data-roomqty="${esc(cb.dataset.room)}" value="${done0}" aria-label="Quantity done"><span class="u">of ${fmtQ(info.planned)} ${esc(it.unit)}</span>`;
         cell.appendChild(box);
         const inp = box.querySelector("input");
         const c = { cb, inp, cell, planned: info.planned, done0 };
@@ -1757,7 +1796,7 @@
         inp.addEventListener("change", () => {
           let v = Number(inp.value);
           if (inp.value.trim() === "" || isNaN(v) || v < 0) { delete inp.dataset.touched; cb.checked = false; syncCells(); return; }
-          if (v > info.planned) { v = info.planned; toast(`Planned here is ${fmtQ(info.planned)} ${it.unit}. To record more, raise the plan first.`); }
+          if (!isFree && v > info.planned) { v = info.planned; toast(`Planned here is ${fmtQ(info.planned)} ${it.unit}. To record more, raise the plan first.`); }
           inp.value = fmtQ(v);
           paintCell(c, v);
         });
@@ -1780,7 +1819,8 @@
       if (pb && !$("sp-zhelp")) {
         const zh = document.createElement("p");
         zh.id = "sp-zhelp"; zh.className = "sp-zhelp";
-        zh.textContent = "Tick = the full planned quantity is done. To record only part of it, type the number next to the name.";
+        zh.textContent = isFree ? "Plan removed: type the quantity done next to a name, then “Mark ticked as done” — it counts exactly as typed."
+                                : "Tick = the full planned quantity is done. To record only part of it, type the number next to the name.";
         pb.insertAdjacentElement("beforebegin", zh);
       }
       const q = modalEl.querySelector(".sp-qtyrow");
@@ -1799,6 +1839,42 @@
     // its rooms for progress (so every % and report is unchanged) and remembered as ONE total, which is how the
     // bill's backup sheet prints it -- as one line, never as invented per-zone numbers. Nothing is sent until
     // "Mark ticked as done", like every other quantity here.
+    // ---- remove / restore the per-zone PLAN of this one item ----
+    // The "of 54.76 Rmt" on every zone is only the item's total split equally -- nobody typed it. Removing the plan lifts that
+    // share as a limit for THIS item (a zone / Whole takes the typed quantity as typed; the item's own total stays the limit).
+    // Nothing recorded changes. Hotel-room items that are planned per room keep the plan and the plain tick.
+    async function setPlanOff(off) {
+      if (!off && !confirm("Restore the equal-share plan for this item? Quantities already recorded stay as they are.")) return;
+      try { S.svc = await jpost(api("/" + S.slug + "/item-plan-off" + roomQ()), { service: S.service, item_code: code, off }); }
+      catch (e) { return toast("Failed: " + briefErr(e)); }
+      closeModal();
+      await afterSvc();
+      openRoomsModal(code, expandToEverything);
+      toast(off ? `Plan removed for ${code} — type the quantity done in a ${dlgLeafLower()} or Whole area, then Mark ticked as done.` : `Plan restored for ${code}.`);
+    }
+    function paintPlanOff(plan) {
+      const pb = modalEl.querySelector(".sp-planbox");
+      if (!pb || $("sp-planoff")) return;
+      const leaf = dlgLeafLower();
+      if (plan.free) {
+        pb.hidden = true;                                             // nothing to plan per zone while the plan is removed
+        const card = document.createElement("div");
+        card.id = "sp-planoff"; card.className = "sp-freecard";
+        const left = Math.max(0, (plan.total || 0) - (plan.used || 0));
+        card.innerHTML = `<div><b>Plan removed for this item</b><span>Type what was done in a ${esc(leaf)} (or Whole area) — it counts exactly as typed. Item total ${fmtQ(plan.total || 0)} ${esc(it.unit)} · recorded ${fmtQ(plan.used || 0)} · left ${fmtQ(left)}</span></div><button type="button" class="linkbtn" id="sp-plan-restore">Restore plan</button>`;
+        pb.insertAdjacentElement("afterend", card);
+        $("sp-plan-restore").onclick = () => setPlanOff(false);
+        return;
+      }
+      const anyBox = Object.values(plan.rooms || {}).some((i) => i && i.planned > 0 && !(isCountItem && i.planned <= 1));
+      if (!anyBox || existingGroups.length) return;                    // no equal share to remove / the plan is quantity groups (they have their own Remove)
+      const p = document.createElement("p");
+      p.id = "sp-planoff"; p.className = "sp-planoff";
+      p.innerHTML = `Not a fixed share per ${esc(leaf)}? <button type="button" class="linkbtn" id="sp-plan-remove">Remove plan for this item</button>`;
+      pb.appendChild(p);
+      $("sp-plan-remove").onclick = () => setPlanOff(true);
+    }
+
     function addAreaTotals(plan) {
       const leafW = dlgLeafLower(), unit = it.unit;
       let added = 0;
@@ -1823,7 +1899,9 @@
         const grid = g.lastElementChild;
         const card = document.createElement("div");
         card.className = "sp-areacell"; card.hidden = true;
-        card.innerHTML = `<label style="display:flex;align-items:center;gap:5px;font-size:12.5px;cursor:pointer"><input type="checkbox" data-area="1">Whole ${esc(last)}</label><span class="sp-roomqty"><input class="ctl" type="number" min="0" max="${esc(String(sumPlan))}" step="${isCountItem ? "1" : "any"}" inputmode="${isCountItem ? "numeric" : "decimal"}" data-areaqty="1" value="${fmtQ(pool ? pool.qty : 0)}" aria-label="Quantity done in the whole area"><span class="u">of ${fmtQ(sumPlan)} ${esc(unit)}</span></span>`;
+        card.innerHTML = `<label style="display:flex;align-items:center;gap:5px;font-size:12.5px;cursor:pointer"><input type="checkbox" data-area="1">Whole ${esc(last)}</label><span class="sp-roomqty">${isFree
+          ? `<input class="ctl" type="number" min="0" step="${isCountItem ? "1" : "any"}" inputmode="${isCountItem ? "numeric" : "decimal"}" data-areaqty="1" value="${pool && pool.qty > 0 ? fmtQ(pool.qty) : ""}" placeholder="qty" aria-label="Quantity done in the whole area"><span class="u">${esc(unit)}</span>`
+          : `<input class="ctl" type="number" min="0" max="${esc(String(sumPlan))}" step="${isCountItem ? "1" : "any"}" inputmode="${isCountItem ? "numeric" : "decimal"}" data-areaqty="1" value="${fmtQ(pool ? pool.qty : 0)}" aria-label="Quantity done in the whole area"><span class="u">of ${fmtQ(sumPlan)} ${esc(unit)}</span>`}</span>`;
         const note = document.createElement("p");
         note.className = "sp-areahint"; note.hidden = true;
         note.textContent = `One total for the whole ${last}. Progress % still counts; the bill backup shows it as one line.`;
@@ -1838,7 +1916,7 @@
         inp.addEventListener("change", () => {
           let v = Number(inp.value);
           if (inp.value.trim() === "" || isNaN(v) || v < 0) { delete inp.dataset.touched; cb.checked = false; syncCells(); return; }
-          if (v > sumPlan) { v = sumPlan; toast(`Planned for the whole ${last} is ${fmtQ(sumPlan)} ${unit}. To record more, raise the plan first.`); }
+          if (!isFree && v > sumPlan) { v = sumPlan; toast(`Planned for the whole ${last} is ${fmtQ(sumPlan)} ${unit}. To record more, raise the plan first.`); }
           inp.value = fmtQ(v); paintCell(c, v);
         });
         cb.addEventListener("change", () => { delete inp.dataset.touched; syncCells(); });

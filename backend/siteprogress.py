@@ -286,7 +286,10 @@ def _qty_for_room(d, service, item_code, room_id, frac, planned=_PLAN_AS_NOW):
         unit = row.iloc[0].get("unit") if not row.empty else None
     if room_qty is None:
         return None, None
-    return round(room_qty * max(0.0, min(1.0, float(frac))), 4), unit
+    cap = 1.0
+    if _is_free(d, service, item_code):                 # plan removed: a zone may hold more than an equal share (up to the whole item)
+        cap = float(max(1, len(_applicable_rooms(d, service, item_code))))
+    return round(room_qty * max(0.0, min(cap, float(frac))), 4), unit
 
 
 def _applicable_rooms(d, service, item_code):
@@ -519,6 +522,16 @@ def _item_room_qty(d):
     entry here and fall straight through to the uniform qty_per_room x
     room-count path, unchanged."""
     return _read_json(d / "item_room_qty.json", {}) or {}
+
+
+def _item_free(d):
+    """{service: {item_code: true}} -- items whose per-zone PLAN was removed (item_free.json). Opt-in, per item: an item not listed
+    here behaves exactly as it always did (every zone is capped at its own share of the plan; a tick = that share)."""
+    return _read_json(d / "item_free.json", {}) or {}
+
+
+def _is_free(d, service, item_code):
+    return bool((_item_free(d).get(service) or {}).get(str(item_code)))
 
 
 def _activity_prog(d):
@@ -1131,9 +1144,69 @@ def set_item_room_qty(slug: str, payload: dict, room: str = None):
     code = payload.get("item_code")
     if not svc or code is None:
         raise HTTPException(400, "service and item_code are required")
+    if payload.get("qty") is not None and _is_free(d, svc, code):
+        raise HTTPException(400, "The plan is removed for this item, so a planned quantity can't be set for zones. Restore the plan first.")
     store = _item_room_qty(d)
     itemprog.set_room_qty_group(store, svc, code, payload.get("rooms") or [], payload.get("qty"))
     (d / "item_room_qty.json").write_text(json.dumps(store, ensure_ascii=False))
+    return _service_view(d, svc, room=room)
+
+
+def _q_txt(v):
+    """A quantity for a message: up to 2 decimals, no trailing zeros."""
+    return f"{round(float(v), 2):,.2f}".rstrip("0").rstrip(".")
+
+
+def _free_total_check(store, svc, code, appl, plan, unit, new):
+    """Plan removed (item_free.json): a zone may hold more than an equal share, so the item's own planned total is the one limit.
+    `new` = {room_id: fraction} about to be written. Refuses (nothing written) when everything recorded would pass that total."""
+    node = dict(((store.get(svc) or {}).get(str(code)) or {}))
+    for r, f in new.items():
+        node[str(r)] = f
+    limit = sum(v for v in plan.values() if v)
+    total = sum((plan.get(r) or 0.0) * itemprog.frac_for(node, r) for r in appl)
+    if total > limit * (1 + 1e-9) + 1e-6:
+        u = f" {unit}" if unit else ""
+        raise HTTPException(400, f"These quantities add up to {_q_txt(total)}{u} for this item, but its planned total is {_q_txt(limit)}{u}. "
+                                 "Lower a figure, or raise the item's planned quantity first (the pencil next to it).")
+
+
+@router.post("/{slug}/item-plan-off")
+def set_item_plan_off(slug: str, payload: dict, room: str = None):
+    """Remove (or restore) the per-zone PLAN of ONE item. Body: {"service","item_code","off": true|false} (off defaults to true).
+
+    Removed = the item has no per-zone plan: a zone / whole area takes the quantity that is typed for it exactly, even above an
+    equal share of the item's total, and a plain tick has no quantity to count (the dialog asks for the number). The item's own
+    planned TOTAL stays -- it is what progress % and the stock forecast are measured against -- and is the one limit.
+
+    Nothing recorded changes: progress is stored per zone as a fraction of its share, removing the plan only lifts the "at most 100 %
+    of the share" cap for this item. Restoring refuses while any zone holds more than its share (that quantity would be cut).
+    An item whose plan is quantity groups (a quantity typed per zone) keeps the existing 'Remove' on each group; it has to go first."""
+    d = _need(slug)
+    svc, code = payload.get("service"), payload.get("item_code")
+    if not svc or code is None:
+        raise HTTPException(400, "service and item_code are required")
+    code = str(code)
+    boqdf = _load_boq(d, svc)
+    if boqdf[boqdf.item_code.astype(str) == code].empty:
+        raise HTTPException(404, "that item is not in this service")
+    off = payload.get("off", True)
+    store = _item_free(d)
+    if off:
+        if (_item_room_qty(d).get(svc) or {}).get(code):
+            raise HTTPException(400, "This item's plan is a quantity set per zone (a group). Remove those groups first, then remove the plan.")
+        store.setdefault(svc, {})[code] = True
+    else:
+        node = (_item_prog(d).get(svc) or {}).get(code) or {}
+        over = [r for r, v in node.items() if r != "*" and itemprog._f(v) > 1 + 1e-9]
+        if over:
+            names = _room_location_map(d)
+            nm = ", ".join((names.get(r) or {}).get("name", r) for r in over[:3]) + (f" +{len(over) - 3} more" if len(over) > 3 else "")
+            raise HTTPException(400, f"{nm} hold more than an equal share of this item, so the plan can't be restored without cutting that quantity. Lower it first.")
+        (store.get(svc) or {}).pop(code, None)
+        if not store.get(svc):
+            store.pop(svc, None)
+    (d / "item_free.json").write_text(json.dumps(store, ensure_ascii=False))
     return _service_view(d, svc, room=room)
 
 
@@ -1179,6 +1252,8 @@ def mark_rooms_done(slug: str, payload: dict, room: str = None):
         raise HTTPException(400, "service and item_code are required")
     if not room_ids:
         raise HTTPException(400, "tick at least one room")
+    if done and _is_free(d, svc, code):
+        raise HTTPException(400, "The plan is removed for this item, so a tick has no quantity. Type the quantity for each zone instead.")
     store = _item_prog(d)
     frac = 1.0 if done else 0.0
     before = _node_before(store, svc, code)
@@ -1261,7 +1336,11 @@ def item_room_plan(slug: str, service: str, item_code: str):
                       "frac": itemprog.frac_for(node, rid)}
     # areas whose quantity was entered as ONE total (see locqty.py); only the ones still true
     pools = locqty.pool_views(_item_pools(d).get(service, {}).get(str(item_code)), node or {}, plan)
-    return {"unit": unit, "rooms": rooms, "pools": pools}
+    out = {"unit": unit, "rooms": rooms, "pools": pools, "free": _is_free(d, service, item_code)}
+    if out["free"]:                                    # plan removed: the item's total is the only limit; tell the dialog how much is left
+        out["total"] = round(sum(v for v in plan.values() if v), 4)
+        out["used"] = round(sum((plan.get(r) or 0.0) * itemprog.frac_for(node or {}, r) for r in appl), 4)
+    return out
 
 
 # ------------------------------------------------------------------ area totals
@@ -1336,11 +1415,18 @@ def set_area_total(slug: str, payload: dict, room: str = None):
         raise HTTPException(400, "an area total belongs to ONE area; pick the rooms of a single floor / level / wing")
     area = next(iter(where)) or ""
     total_plan = sum(plan[r] for r in ids)
-    frac = 1.0 if qty >= total_plan * (1 - 1e-9) else round(qty / total_plan, 10)    # fine enough that 1500 comes back as 1500
+    free = _is_free(d, svc, code)
+    if free:                                         # plan removed: the typed quantity counts as typed, above this area's equal share too
+        frac = round(qty / total_plan, 10)
+    else:
+        frac = 1.0 if qty >= total_plan * (1 - 1e-9) else round(qty / total_plan, 10)    # fine enough that 1500 comes back as 1500
     store = _item_prog(d)
+    if free:
+        _free_total_check(store, svc, code, appl, plan, _unit, {r: frac for r in ids})
     before = _node_before(store, svc, code)
+    cap = float(len(appl)) if free else 1.0
     for rid in ids:
-        itemprog.set_progress(store, svc, code, frac, room=rid)
+        itemprog.set_progress(store, svc, code, frac, room=rid, cap=cap)
     (d / "item_progress.json").write_text(json.dumps(store, ensure_ascii=False))
     pools = _item_pools(d)
     mine = [p for p in pools.get(svc, {}).get(str(code), []) if not (set(p.get("rooms") or []) & set(ids)) and p.get("area") != area]
@@ -1385,6 +1471,7 @@ def set_rooms_progress(slug: str, payload: dict, room: str = None):
         raise HTTPException(400, "at least one room entry is required")
     appl_list, plan, _unit = _item_plan(d, svc, code)
     appl = set(appl_list)
+    free = _is_free(d, svc, code)
     todo = []
     for e in entries:
         e = e or {}
@@ -1403,12 +1490,18 @@ def set_rooms_progress(slug: str, payload: dict, room: str = None):
         if planned is None or planned <= 0:
             raise HTTPException(400, f"planned quantity for room {rid} is not set, so a partial quantity "
                                      "cannot be recorded -- set the plan first, or just tick it")
-        frac = 1.0 if qty >= planned * (1 - 1e-9) else round(qty / planned, 6)
+        if free:                                     # plan removed: exactly what was typed, even above an equal share
+            frac = round(qty / planned, 10)
+        else:
+            frac = 1.0 if qty >= planned * (1 - 1e-9) else round(qty / planned, 6)
         todo.append((rid, frac))
     store = _item_prog(d)
+    if free:
+        _free_total_check(store, svc, code, appl_list, plan, _unit, dict(todo))
     before = _node_before(store, svc, code)
+    cap = float(len(appl_list)) if free else 1.0
     for rid, frac in todo:
-        itemprog.set_progress(store, svc, code, frac, room=rid)
+        itemprog.set_progress(store, svc, code, frac, room=rid, cap=cap)
     (d / "item_progress.json").write_text(json.dumps(store, ensure_ascii=False))
     for rid, frac in todo:
         if frac > 0:

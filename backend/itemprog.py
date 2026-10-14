@@ -254,6 +254,7 @@ def compute(items_df, prog_svc, rooms_svc, all_room_ids, planned_over,
             else:
                 n = len(appl)
                 frac_sum = sum(frac_for(node, r) for r in appl)
+            frac_sum = min(frac_sum, n)        # a zone holding more than an equal share (plan removed) never reads above 100 %
             planned = _f(over) if over is not None else qty * (1 if room is not None else n)
             # used must scale off `planned`, not the raw per-room `qty` -- they
             # are the same number when nothing is overridden (planned = qty*n),
@@ -451,10 +452,12 @@ def project_room_status(services_data, all_room_ids):
             "not_started": not_started, "total": len(all_room_ids)}
 
 
-def set_progress(store, service, code, frac, room=None):
+def set_progress(store, service, code, frac, room=None, cap=1.0):
     """Mutate the item_progress dict. room=None sets the overall '*' (all rooms);
-    a room id sets just that room. frac clamped to [0,1]."""
-    frac = max(0.0, min(1.0, _f(frac)))
+    a room id sets just that room. frac clamped to [0, cap]. cap is 1.0 (a room never holds more than its own plan)
+    except for an item whose plan was removed (siteprogress item-plan-off): there one zone may hold more than an equal
+    share, up to the whole item (cap = number of rooms), and the item's total is what limits the sum."""
+    frac = max(0.0, min(float(cap), _f(frac)))
     node = store.setdefault(service, {}).setdefault(str(code), {})
     if room:
         node[str(room)] = frac

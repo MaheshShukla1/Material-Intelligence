@@ -26,6 +26,7 @@ progress-setting already writes, and a project's structure tree for floor
 ordering.
 """
 import json
+import math as _math
 from datetime import date as _date
 
 import openpyxl
@@ -96,6 +97,54 @@ def qty_today(entry):
     if "qty_before" not in entry or q is None or b is None or q != q or b != b:     # (q != q: a NaN quantity is unknown too)
         return None
     return round(float(q) - float(b), 3)
+
+
+# Units that count whole things: ONE definition for the whole backend, in itemprog (it mirrors COUNT_UNITS in
+# frontend/siteprogress.js), so a report can never print 5.25 Nos where the screen says 5.
+try:
+    from . import itemprog as _itemprog
+except ImportError:                      # imported as a top-level module (older scripts and tests put backend/ on sys.path)
+    import itemprog as _itemprog
+COUNT_UNITS = _itemprog.COUNT_UNITS
+is_count_unit = _itemprog.is_count_unit
+
+
+def whole(v):
+    """Round half up (what the screen's Math.round does), so the report and the screen show the same whole number. None stays None."""
+    if v is None:
+        return None
+    return float(_math.floor(float(v) + 0.5))
+
+
+def _qty_txt(unit, v):
+    if is_count_unit(unit):
+        return f"{int(whole(v)):,}"
+    return f"{v:,.2f}".rstrip("0").rstrip(".")
+
+
+def present_qty(unit, prev, today, cum):
+    """The three quantities of one client-DPR line, as they are PRINTED. Pure: raw (prev, today, cum) in, printable figures out.
+
+    * A counted unit (Nos, Set, Point ...) prints whole numbers, the same ones the screen shows. `prev` and `cum` are rounded first and
+      `today` is the difference of the two rounded figures, so the row always adds up (5 + 1 = 6) -- a fraction of a fan can come from an
+      older percentage entry, but it is never a real quantity.
+    * Work done today cannot be negative. If the figure went DOWN (a recount, a correction), `today` is 0, "up to previous day" is
+      restated to the corrected figure so the row still adds up, and the Remarks column says by how much it was corrected -- the
+      correction is shown, never hidden and never passed off as work.
+    * A figure that is not known stays None (printed "—"); nothing is guessed.
+    Returns {"prev", "today", "cum", "remark"}."""
+    if is_count_unit(unit):
+        c, p = whole(cum), whole(prev)
+        t = (c - p) if (c is not None and p is not None) else whole(today)
+    else:
+        c, p, t = cum, prev, today
+    remark = None
+    if t is not None and t < -1e-9:
+        remark = f"Quantity corrected down by {_qty_txt(unit, -t)}" + (f" {unit}" if unit else "")
+        t = 0.0
+        if c is not None:
+            p = c
+    return {"prev": p, "today": t, "cum": c, "remark": remark}
 
 
 def entries_for_range(log, start_date, end_date=None):
@@ -422,7 +471,7 @@ def _write_day_block(ws, row, date_str, grouped, location_label="FLOOR"):
             ic = ws.cell(row, 3, item or "—")
             ic.font = Font(name=FONT, size=10, italic=(not item), color="9A9890" if not item else "000000")
             if qty is not None:
-                qc = ws.cell(row, 4, f"{qty:,.2f} {unit}" if unit else round(qty, 2))
+                qc = ws.cell(row, 4, (f"{int(whole(qty)):,} {unit}" if is_count_unit(unit) else f"{qty:,.2f} {unit}") if unit else round(qty, 2))
                 qc.alignment = Alignment(horizontal="right")
                 qc.font = Font(name=FONT, size=10)
             else:
@@ -843,7 +892,7 @@ def _isnum(v):
 
 def _qty_fmt(unit, v):
     """Whole numbers for counted things (Nos) unless the value really has a fraction; two decimals for lengths and the like."""
-    if str(unit).strip().lower() in ("nos", "no", "no.", "pcs", "set", "sets", "each") and _isnum(v) and abs(v - round(v)) < 1e-9:
+    if is_count_unit(unit) and _isnum(v) and abs(v - round(v)) < 1e-9:
         return "#,##0"
     return "#,##0.00"
 
@@ -1051,7 +1100,8 @@ def sheet_dpr(wb, data):
         _w(ws, f"K{r}", ln.get("location"), _F(size=9), None, _ind(1))
         _w(ws, f"L{r}", ln.get("remarks"), _F(size=9), None, _ind(1))
         ws.row_dimensions[r].height = max(16, 13 * _math.ceil(len(_short(ln["desc"])) / 58) + 3,
-                                          13 * _math.ceil(len(ln.get("location") or "") / 26) + 3)
+                                          13 * _math.ceil(len(ln.get("location") or "") / 26) + 3,
+                                          13 * _math.ceil(len(ln.get("remarks") or "") / 30) + 3)
         r += 1
 
     r += 1
@@ -1110,10 +1160,12 @@ def sheet_boq_progress(wb, data, with_amount):
         _w(ws, f"D{r}", _short(it["desc"], 110), _F(), None, _LEFT)
         _w(ws, f"E{r}", unit, _F(), None, _CEN)
         planned, cum = it.get("planned"), it.get("cum")
-        bal = (planned - cum) if (_isnum(planned) and _isnum(cum)) else None
+        cum_d = whole(cum) if (is_count_unit(unit) and _isnum(cum)) else cum        # what is printed (whole for counted units)
+        bal = (planned - cum_d) if (_isnum(planned) and _isnum(cum_d)) else None
+        bal_raw = (planned - cum) if (_isnum(planned) and _isnum(cum)) else None      # the rupee columns stay on the raw figures
         pct = (cum / planned) if (_isnum(planned) and _isnum(cum) and planned) else None
         _w(ws, f"F{r}", planned, _F(), None, _RIGHT, _qty_fmt(unit, planned))
-        _w(ws, f"G{r}", cum, _F(bold=True), _TODAY, _RIGHT, _qty_fmt(unit, cum))
+        _w(ws, f"G{r}", cum_d, _F(bold=True), _TODAY, _RIGHT, _qty_fmt(unit, cum_d))
         _w(ws, f"H{r}", bal, _F(), None, _RIGHT, _qty_fmt(unit, bal))
         _w(ws, f"I{r}", pct, _F(), None, _RIGHT, "0.0%")
         for col, k in zip("JKL", ("zones_done", "zones_inp", "zones_pend")):
@@ -1127,7 +1179,7 @@ def sheet_boq_progress(wb, data, with_amount):
                 _w(ws, f"M{r}", rate, _F(), None, _RIGHT, "#,##0.00")
                 vals = {"N": planned * rate if _isnum(planned) else None,
                         "O": cum * rate if _isnum(cum) else None,
-                        "P": bal * rate if bal is not None else None}
+                        "P": bal_raw * rate if bal_raw is not None else None}
                 for col, v in vals.items():
                     _w(ws, f"{col}{r}", v, _F(bold=(col == "O")), None, _RIGHT, "#,##0")
                     if v is not None:

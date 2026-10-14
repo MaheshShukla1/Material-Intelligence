@@ -90,6 +90,37 @@ def _room_qty_from_groups(groups, room_set):
     return room_qty, appl
 
 
+# ---------------------------------------------------------------------------------------------------------
+# Counted units. ONE definition for the whole backend; it mirrors COUNT_UNITS in frontend/siteprogress.js (a test keeps the
+# two the same). A counted unit (Nos, Set, Point ...) is whole things: there is no 1.75 of a fan.
+COUNT_UNITS = frozenset({"NOS", "NO", "NOS.", "PCS", "PC", "PC.", "EACH", "EA", "SET", "SETS", "POINT", "POINTS", "UNIT", "UNITS",
+                         "NUMBER", "NUMBERS", "LOT", "LOTS"})
+
+
+def is_count_unit(unit):
+    return str(unit or "").strip().upper() in COUNT_UNITS
+
+
+def whole_split(unit, total, appl):
+    """How a COUNTED item's whole-project total is shared over its applicable rooms, in WHOLE units: {room_id: share}.
+
+    7 Nos over 4 zones is 2, 2, 2, 1 (the first zones, in the item's own room order, carry the extra unit) -- not 1.75 each. The
+    shares always add up to the total, so every figure that adds the rooms back up (item row, Zones dialog, DPR, bill) agrees.
+
+    None when nothing changes: not a counted unit, one room, a total that is not a whole number, or a total that already divides
+    evenly (then the equal share IS whole and the old arithmetic stands, byte for byte)."""
+    n = len(appl)
+    if n < 2 or not is_count_unit(unit):
+        return None
+    t = _f(total)
+    if t <= 0 or abs(t - round(t)) > 1e-9:
+        return None
+    base, extra = divmod(int(round(t)), n)
+    if extra == 0:
+        return None
+    return {str(r): float(base + (1 if i < extra else 0)) for i, r in enumerate(appl)}
+
+
 def compute(items_df, prog_svc, rooms_svc, all_room_ids, planned_over,
             room=None, room_qty_groups=None, rooms=None):
     """Return a used/planned/% DataFrame, one row per BOQ item.
@@ -236,6 +267,13 @@ def compute(items_df, prog_svc, rooms_svc, all_room_ids, planned_over,
             # instead of quietly ignoring it.
             used = planned * (frac_sum / n) if n else 0.0
             pct = (100.0 * frac_sum / n) if n else 0.0
+            # A counted item whose total does not divide evenly over its rooms: whole shares per room (7 Nos over 4 zones = 2,2,2,1),
+            # used = what the rooms' own fractions of THEIR share add up to. Only the whole-project row; the single-room and
+            # room-set views keep their documented behaviour.
+            shares = whole_split(getattr(it, "unit", ""), planned, appl) if (room is None and rooms_target is None) else None
+            if shares:
+                used = sum(shares[str(r)] * frac_for(node, r) for r in appl)
+                pct = (100.0 * used / planned) if planned else 0.0
 
         target_room_count = (
             (1 if room in appl else 0) if room is not None else

@@ -1429,7 +1429,7 @@
       <div class="sp-bqty">${plannedControlHTML(it)}</div>
       <div class="sp-entry">
         <div class="sp-entrymain">
-          <input class="sp-qty" type="number" min="0" step="any" inputmode="decimal"
+          <input class="sp-qty" type="number" min="0" step="${isCountUnit(it.unit) ? "1" : "any"}" inputmode="${isCountUnit(it.unit) ? "numeric" : "decimal"}"
                  value="${qtyVal}" data-qty="${esc(it.code)}" aria-label="Installed quantity">
           <span class="sp-entryunit">${esc(it.unit)}</span>
           <span class="sp-entrysaved" data-saved="${esc(it.code)}">✓ saved</span>
@@ -2071,6 +2071,9 @@
       const it = S._byCode[code]; if (!it) return;
       let v = Number(inp.value);
       if (isNaN(v) || v < 0) v = 0;
+      // A counted unit (Nos, Set, Point ...) is whole things: 5.5 fans is not a quantity anyone installed. Same rule the Zones dialog already
+      // follows, and the same one the DPR prints with.
+      if (isCountUnit(it.unit)) v = Math.round(v);
       // Whole-project entry: more than planned is KEPT (the server raises planned to match and marks the row "Over BOQ").
       // Inside a single room/zone the plan is that room's own, and an item whose quantity is set zone by zone has no project-wide plan to raise: both still stop at the plan.
       const over = !S.room && !it.has_room_groups && it.planned > 0 && v > it.planned;

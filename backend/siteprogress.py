@@ -268,9 +268,13 @@ def _qty_for_room(d, service, item_code, room_id, frac, planned=_PLAN_AS_NOW):
         if override is not None:
             try:
                 planned_total = float(override)
-                n_rooms = len(_applicable_rooms(d, service, item_code))
+                appl_rooms = _applicable_rooms(d, service, item_code)
+                n_rooms = len(appl_rooms)
                 if n_rooms:
                     room_qty = planned_total / n_rooms
+                    shares = itemprog.whole_split(unit, planned_total, appl_rooms)       # counted unit: whole shares, same as itemprog.compute()
+                    if shares and str(room_id) in shares:
+                        room_qty = shares[str(room_id)]
             except (TypeError, ValueError):
                 pass
         if room_qty is None:
@@ -1229,6 +1233,9 @@ def _item_plan(d, service, item_code, _ctx=None):
         over = (c["planned"] if "planned" in c else _planned(d, service)).get(code)
         per = (itemprog._f(over) / len(appl) if appl else None) if over is not None else qty
         plan = {r: per for r in appl}
+        shares = itemprog.whole_split(unit, over, appl) if over is not None else None     # counted unit: whole shares (7 Nos / 4 zones = 2,2,2,1)
+        if shares:
+            plan = dict(shares)
     plan = {str(r): (v if v is not None and v > 0 else None) for r, v in plan.items()}
     return [str(r) for r in appl], plan, unit
 
@@ -1315,6 +1322,8 @@ def set_area_total(slug: str, payload: dict, room: str = None):
     if qty != qty or qty < 0:
         raise HTTPException(400, "quantity must be 0 or more")
     appl, plan, _unit = _item_plan(d, svc, code)
+    if itemprog.is_count_unit(_unit):
+        qty = float(int(qty + 0.5))                 # whole things: 5.5 fans is not a quantity
     bad = [r for r in ids if r not in set(appl)]
     if bad:
         raise HTTPException(400, f"room {bad[0]} is not one of this item's rooms")
@@ -1388,6 +1397,8 @@ def set_rooms_progress(slug: str, payload: dict, room: str = None):
             raise HTTPException(400, f"quantity for room {rid} must be a number")
         if qty != qty or qty < 0:
             raise HTTPException(400, f"quantity for room {rid} must be 0 or more")
+        if itemprog.is_count_unit(_unit):
+            qty = float(int(qty + 0.5))             # whole things: 5.5 fans is not a quantity
         planned = plan.get(rid)
         if planned is None or planned <= 0:
             raise HTTPException(400, f"planned quantity for room {rid} is not set, so a partial quantity "
@@ -2149,6 +2160,7 @@ def _client_dpr_data(d, slug, start, end, service, rooms_set, floor_names, room_
                 desc = ref.get("text") or " ".join(str(it.description).split())
                 unit = getattr(it, "unit", None)
                 unit = None if unit is None or (isinstance(unit, float) and unit != unit) else str(unit)
+                q = dpr.present_qty(unit, prev, today, cum)         # what is PRINTED: whole for counted units, never a negative "today"
                 boq_rows.append({"service": svc, "ref": ref.get("ref"), "desc": desc, "unit": unit, "planned": planned, "cum": cum,
                                  "irate": irate, "zones_done": rb["done"], "zones_inp": rb["in_progress"], "zones_pend": rb["not_started"]})
                 if irate is not None and planned is not None:
@@ -2157,19 +2169,19 @@ def _client_dpr_data(d, slug, start, end, service, rooms_set, floor_names, room_
                         done_known = False
                     else:
                         done_v += cum * irate
-                    if today is None and got:
+                    if q["today"] is None and got:
                         today_known = False
-                    elif today:
-                        today_v += today * irate
+                    elif q["today"]:
+                        today_v += q["today"] * irate
                 if got and (today is None or abs(today) > 1e-9):
                     mine = one_activity(got)
                     ai = acts.index(mine[0]["activity"]) if mine[0]["activity"] in acts else len(acts)
                     lines.append({"_k": (si, ai, pos), "service": svc, "activity": mine[0]["activity"],
                                   "parent": " ".join(ref["parent"].split()) if ref.get("parent") else None,
-                                  "ref": ref.get("ref"), "desc": desc, "unit": unit, "boq": planned, "prev": prev, "today": today, "cum": cum,
-                                  "balance": None if (planned is None or cum is None) else round(planned - cum, 3),
+                                  "ref": ref.get("ref"), "desc": desc, "unit": unit, "boq": planned, "prev": q["prev"], "today": q["today"], "cum": q["cum"],
+                                  "balance": None if (planned is None or q["cum"] is None) else round(planned - q["cum"], 3),
                                   "pct": None if (planned in (None, 0) or cum is None) else cum / planned,
-                                  "location": dpr.location_text(mine, leaf_plural), "remarks": None})
+                                  "location": dpr.location_text(mine, leaf_plural), "remarks": q["remark"]})
         todate = (done_v / total_v) if (total_v > 0 and done_known) else None
         tdy = (today_v / total_v) if (total_v > 0 and today_known) else None
         progress[svc] = {"todate": todate, "today": tdy,

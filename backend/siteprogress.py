@@ -38,7 +38,7 @@ from pathlib import Path
 import pandas as pd
 from fastapi import APIRouter, File, Form, Header, HTTPException, UploadFile, Response, Query
 
-from . import structure, boq, activity, progress, pnl, linkage, schema, subcat, realtime, itemprog, dpr, shortage_history, clientref
+from . import structure, boq, activity, progress, pnl, linkage, schema, subcat, realtime, itemprog, dpr, shortage_history, clientref, locqty
 
 ROOT = Path(__file__).resolve().parent.parent
 PROJECTS = ROOT / "data" / "projects"
@@ -1186,7 +1186,7 @@ def mark_rooms_done(slug: str, payload: dict, room: str = None):
     return _service_view(d, svc, room=room)
 
 
-def _item_plan(d, service, item_code):
+def _item_plan(d, service, item_code, _ctx=None):
     """(rooms, plan, unit) for ONE item: the rooms it applies to, and each
     room's own planned quantity -- resolved with exactly itemprog.compute()'s
     rules, so the per-room numbers the Rooms/Zones dialog shows always add up
@@ -1206,16 +1206,19 @@ def _item_plan(d, service, item_code):
     the DPR and still treat "no item_rooms list" as every room even for an
     item with quantity groups, which compute() no longer does."""
     code = str(item_code)
-    boqdf = _load_boq(d, service)
+    # `_ctx` lets a caller that plans MANY items of one service (the bill's measurement sheet) read the
+    # stores once instead of once per item; the figures are exactly the same.
+    c = _ctx or {}
+    boqdf = c["boq"] if "boq" in c else _load_boq(d, service)
     row = boqdf[boqdf.item_code.astype(str) == code]
     if row.empty:
         return [], {}, None
     unit = row.iloc[0].get("unit")
     qty = itemprog._f(row.iloc[0].get("qty"))
-    all_ids = _all_room_ids(d)
-    room_set = set(all_ids)
-    room_qty, group_appl = itemprog._room_qty_from_groups(_item_room_qty(d).get(service, {}).get(code), room_set)
-    explicit = _item_rooms(d).get(service, {}).get(code)
+    all_ids = c["all_ids"] if "all_ids" in c else _all_room_ids(d)
+    room_set = c["room_set"] if "room_set" in c else set(all_ids)
+    room_qty, group_appl = itemprog._room_qty_from_groups((c["groups"] if "groups" in c else _item_room_qty(d).get(service, {})).get(code), room_set)
+    explicit = (c["rooms"] if "rooms" in c else _item_rooms(d).get(service, {})).get(code)
     if room_qty is not None:
         base = ([r for r in explicit if r in room_set] or all_ids) if explicit else list(group_appl)
         appl = list(dict.fromkeys(base + group_appl))
@@ -1223,7 +1226,7 @@ def _item_plan(d, service, item_code):
     else:
         appl = explicit or all_ids
         appl = [r for r in appl if r in room_set] or all_ids
-        over = _planned(d, service).get(code)
+        over = (c["planned"] if "planned" in c else _planned(d, service)).get(code)
         per = (itemprog._f(over) / len(appl) if appl else None) if over is not None else qty
         plan = {r: per for r in appl}
     plan = {str(r): (v if v is not None and v > 0 else None) for r, v in plan.items()}
@@ -1249,7 +1252,97 @@ def item_room_plan(slug: str, service: str, item_code: str):
         p = plan.get(rid)
         rooms[rid] = {"planned": (round(p, 4) if p is not None else None),
                       "frac": itemprog.frac_for(node, rid)}
-    return {"unit": unit, "rooms": rooms}
+    # areas whose quantity was entered as ONE total (see locqty.py); only the ones still true
+    pools = locqty.pool_views(_item_pools(d).get(service, {}).get(str(item_code)), node or {}, plan)
+    return {"unit": unit, "rooms": rooms, "pools": pools}
+
+
+# ------------------------------------------------------------------ area totals
+# A "whole area" quantity ("B3 = 420 Rmt") is recorded the same way every other room quantity is -- as a
+# fraction per room, spread over that area's rooms, so every percentage and report keeps working -- and
+# item_pools.json remembers that it was ONE total. See locqty.py for why that note can never go stale.
+def _item_pools(d):
+    return _read_json(d / "item_pools.json", {}) or {}
+
+
+def item_location_qty(d, service, code, _ctx=None):
+    """locqty.split() of one item: how its installed quantity was recorded (area totals / per room / overall)."""
+    appl, plan, _u = _item_plan(d, service, code, _ctx)
+    node = _item_prog(d).get(service, {}).get(str(code)) or {}
+    pools = _item_pools(d).get(service, {}).get(str(code))
+    order = (_ctx or {}).get("order")
+    if order is None:
+        order = {r: i for i, r in enumerate(_all_room_ids(d))}
+    return locqty.split(node, appl, plan, pools, order)
+
+
+def location_context(d, service):
+    """The stores item_location_qty() needs, read once for a whole service."""
+    ids = _all_room_ids(d)
+    return {"boq": _load_boq(d, service), "all_ids": ids, "room_set": set(ids),
+            "groups": _item_room_qty(d).get(service, {}), "rooms": _item_rooms(d).get(service, {}),
+            "planned": _planned(d, service), "order": {r: i for i, r in enumerate(ids)}}
+
+
+def location_info(d):
+    """What lines_for() needs to name places: room names, their area, the project's word for an area."""
+    st = _read_json(d / "structure.json", {}) or {}
+    m = _room_location_map(d)
+    return {"name": {r: v["name"] for r, v in m.items()}, "loc": {r: v["location"] for r, v in m.items()},
+            "order": {r: i for i, r in enumerate(_all_room_ids(d))},
+            "word": {"hotel": "floor", "mall": "level"}.get(st.get("kind"), "area"),
+            "leaf": _leaf_label(d).lower(), "collapse": _leaf_label(d) == "ROOM"}
+
+
+@router.post("/{slug}/progress/area-total")
+def set_area_total(slug: str, payload: dict, room: str = None):
+    """Record ONE quantity for a whole area of an item ("B3 = 420 Rmt") when it was not measured zone by zone.
+    Body: {"service","item_code","rooms":[room_id,...],"qty":number} -- the rooms are the area's rooms the item
+    applies to. The quantity is spread over them as a fraction of each room's plan (so a room at/above its plan
+    counts as done and every existing reader keeps working), and the area is remembered as a total.
+    All validated before anything is written. qty 0 clears the area."""
+    d = _need(slug)
+    svc, code = payload.get("service"), payload.get("item_code")
+    ids = [str(r) for r in (payload.get("rooms") or [])]
+    if not svc or code is None:
+        raise HTTPException(400, "service and item_code are required")
+    if not ids:
+        raise HTTPException(400, "pick the area's rooms")
+    try:
+        qty = float(payload.get("qty"))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "quantity must be a number")
+    if qty != qty or qty < 0:
+        raise HTTPException(400, "quantity must be 0 or more")
+    appl, plan, _unit = _item_plan(d, svc, code)
+    bad = [r for r in ids if r not in set(appl)]
+    if bad:
+        raise HTTPException(400, f"room {bad[0]} is not one of this item's rooms")
+    unknown = [r for r in ids if not plan.get(r)]
+    if unknown:
+        raise HTTPException(400, "the planned quantity of some of these rooms is not set, so a total cannot be spread "
+                                 "over them -- set the plan first")
+    where = {(_room_location_map(d).get(r) or {}).get("location") for r in ids}
+    if len(where) != 1 or None in where:
+        raise HTTPException(400, "an area total belongs to ONE area; pick the rooms of a single floor / level / wing")
+    area = next(iter(where)) or ""
+    total_plan = sum(plan[r] for r in ids)
+    frac = 1.0 if qty >= total_plan * (1 - 1e-9) else round(qty / total_plan, 10)    # fine enough that 1500 comes back as 1500
+    store = _item_prog(d)
+    before = _node_before(store, svc, code)
+    for rid in ids:
+        itemprog.set_progress(store, svc, code, frac, room=rid)
+    (d / "item_progress.json").write_text(json.dumps(store, ensure_ascii=False))
+    pools = _item_pools(d)
+    mine = [p for p in pools.get(svc, {}).get(str(code), []) if not (set(p.get("rooms") or []) & set(ids)) and p.get("area") != area]
+    if frac > 0:
+        mine.append({"area": area, "rooms": ids, "frac": frac})
+    pools.setdefault(svc, {})[str(code)] = mine
+    (d / "item_pools.json").write_text(json.dumps(pools, ensure_ascii=False))
+    for rid in ids:
+        if frac > 0:
+            _log_dpr_change(d, svc, rid, code, frac=frac, before=before)
+    return _service_view(d, svc, room=room)
 
 
 @router.post("/{slug}/progress/rooms")

@@ -514,20 +514,20 @@ body[data-view="inventory"] #leadwrap{display:none !important}
 .sp-planbox .sp-qtyrow label{flex:1 0 100%;font-size:12.5px;font-weight:600;color:var(--ink2)}
 .sp-planbox .sp-qtyrow input{flex:0 1 150px;width:auto;min-width:0;max-width:150px;background:var(--panel)}
 .sp-planbox .sp-qtyhint{margin:6px 0 0}
-.sp-roomcell{display:grid;grid-template-columns:minmax(0,1fr) 96px;
+.sp-roomcell,.sp-areacell{display:grid;grid-template-columns:minmax(0,1fr) 96px;
   grid-template-areas:"name inp" "plan inp";align-items:center;column-gap:10px;row-gap:0;
   min-height:56px;padding:6px 10px;border:1px solid var(--line);border-radius:10px;background:var(--panel)}
-.sp-roomcell>label{grid-area:name;min-width:0}
+.sp-roomcell>label,.sp-areacell>label{grid-area:name;min-width:0}
 .sp-roomqty{display:contents}
 .sp-roomqty .u{grid-area:plan;font-size:11.5px;color:var(--ink3);white-space:nowrap;padding-left:23px}
-.sp-roomcell .sp-roomqty input{grid-area:inp;width:100%;min-width:0;box-sizing:border-box;
+.sp-roomcell .sp-roomqty input,.sp-areacell .sp-roomqty input{grid-area:inp;width:100%;min-width:0;box-sizing:border-box;
   text-align:right;font-weight:600;font-size:15px;padding:8px 10px;color:var(--ink3)}
-.sp-roomcell.is-on{border-color:var(--ink3);background:#fafaf8}
-.sp-roomcell.is-on .sp-roomqty input{color:var(--ink)}
-.sp-roomcell.is-on.is-partial{border-color:#e4cc94;background:#fffaf0}
-.sp-roomcell.is-on.is-partial .sp-roomqty input{border-color:#c98a1b}
-.sp-roomcell.is-on.is-full{border-color:#c4dcb2;background:#f6fbf1}
-.sp-roomcell.is-on.is-full .sp-roomqty input{border-color:var(--green)}
+.sp-roomcell.is-on,.sp-areacell.is-on{border-color:var(--ink3);background:#fafaf8}
+.sp-roomcell.is-on .sp-roomqty input,.sp-areacell.is-on .sp-roomqty input{color:var(--ink)}
+.sp-roomcell.is-on.is-partial,.sp-areacell.is-on.is-partial{border-color:#e4cc94;background:#fffaf0}
+.sp-roomcell.is-on.is-partial .sp-roomqty input,.sp-areacell.is-on.is-partial .sp-roomqty input{border-color:#c98a1b}
+.sp-roomcell.is-on.is-full,.sp-areacell.is-on.is-full{border-color:#c4dcb2;background:#f6fbf1}
+.sp-roomcell.is-on.is-full .sp-roomqty input,.sp-areacell.is-on.is-full .sp-roomqty input{border-color:var(--green)}
 .sp-qtyhint{font-size:11.5px;color:var(--ink3);margin:2px 0 0}
 /* header + footer always on screen (landscape phones, small screens): the card
    is a column, only the list in the middle scrolls. dvh keeps it above the
@@ -539,9 +539,9 @@ body[data-view="inventory"] #leadwrap{display:none !important}
 /* iOS Safari zooms the page on focus when an input is under 16px */
 @media (hover:none),(pointer:coarse){.sp-planbox .sp-qtyrow input{font-size:16px;min-height:44px}}
 @media (hover:none),(pointer:coarse){
-  .sp-roomcell{min-height:60px}
-  .sp-roomcell>label{min-height:44px}
-  .sp-roomcell .sp-roomqty input{min-height:44px;font-size:16px}
+  .sp-roomcell,.sp-areacell{min-height:60px}
+  .sp-roomcell>label,.sp-areacell>label{min-height:44px}
+  .sp-roomcell .sp-roomqty input,.sp-areacell .sp-roomqty input{min-height:44px;font-size:16px}
   .sp-zones .sheethd .btn{min-height:44px}
 }
 
@@ -596,3 +596,17 @@ body[data-view="inventory"] #leadwrap{display:none !important}
 /* the Close button of the new dialog keeps its normal height (the shared header row would stretch it) */
 .sp-compactclose .sheethd{align-items:flex-start}
 .sp-compactclose .sheethd .btn{align-self:flex-start;flex:none}
+
+/* ---- whole-area total in the Zones dialog: "By zone | Whole <area>" per floor / level / wing ----
+   Same look as the zone cards (.sp-roomcell); only the switch and the small chip are new. */
+.sp-areaseg{display:inline-flex;margin-left:auto;border:1px solid var(--line2);border-radius:999px;overflow:hidden;background:var(--panel)}
+.sp-areaseg button{font:inherit;font-size:12px;padding:4px 12px;min-height:28px;border:0;background:none;color:var(--ink2);cursor:pointer}
+.sp-areaseg button.on{background:var(--ink);color:#fff}
+.sp-areachip{font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;background:#fff4d6;color:#8a5a00}
+.sp-areahint{font-size:12px;color:var(--ink3);margin:6px 2px 0;line-height:1.45}
+.sp-areacell{margin-top:2px}
+.sp-areacell[hidden],.sp-areahint[hidden],.sp-roomgroup [hidden]{display:none !important}
+@media (hover:none),(pointer:coarse){
+  .sp-areaseg button{min-height:44px;padding:4px 14px;font-size:14px}
+  .sp-areacell .sp-roomqty input{min-height:44px;font-size:16px}
+}

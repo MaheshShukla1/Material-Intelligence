@@ -874,7 +874,8 @@
   // ONE place for everything that leaves the app as Excel: tick what, which sheets, which RAs.
   // The server builds it (GET .../download); this file only plans and previews it.
   const SHEETS = [["invoice", "Tax Invoice", "Your invoice format, filled in"], ["summary", "Annexure B-Summary BOQ", "Summary of the bill"],
-    ["boq", "Annexure B-BOQ", "Line by line"], ["abstract", "Challan Abstract", "RA-wise qty · challan services"], ["challan", "Challan", "Challan-wise qty · challan services"]];
+    ["boq", "Annexure B-BOQ", "Line by line"], ["abstract", "Challan Abstract", "RA-wise qty · challan services"], ["challan", "Challan", "Challan-wise qty · challan services"],
+    ["meas", "With supporting backup", "Measurement Sheet at the end · installation bills"]];
   const SER_ORD = { supply: 0, install: 1, together: 2 };
   const slugSafe = (t) => String(t).replace(/[^A-Za-z0-9._-]+/g, "_");
   const raFile = (r) => `${slugSafe(B.slug)}_${slugSafe(String(r.service).split(WOSEP).join("-"))}_${SERIES[r.series].replace(" + ", "+").replace(/ /g, "")}_RA-${String(r.no).padStart(2, "0")}${r.status === "draft" ? "_DRAFT" : ""}.xlsx`;
@@ -905,6 +906,7 @@
       const hasSup = r.stages.includes("supply"), ch = src(r.service) === "challan";
       let n = (DL.sheets.invoice ? 1 : 0) + (DL.sheets.summary ? 1 : 0) + (DL.sheets.boq ? 1 : 0);
       if (hasSup && ch) n += (DL.sheets.abstract ? 1 : 0) + (DL.sheets.challan ? 1 : 0);
+      if (DL.sheets.meas && r.stages.includes("install")) n += 1;
       return { n, noChallan: hasSup && !ch && (DL.sheets.abstract || DL.sheets.challan) };
     };
     const files = [];
@@ -938,6 +940,19 @@
     if (bothDraft.length) warnings.push({ k: "draft", text: `${bothDraft.map((sv) => sv.service.split(WOSEP).join(" › ")).join(", ")}: the Supply + Installation view reads a draft RA, so its numbers can still change.` });
     bothSv.filter((sv) => !sv.both_view.supply || !sv.both_view.install).forEach((sv) => warnings.push({ k: "stage",
       text: `${sv.service.split(WOSEP).join(" › ")}: ${sv.both_view.supply ? "Installation" : "Supply"} has no RA yet, so that half of the view stays empty. Nothing is guessed.` }));
+    if (wantInv && DL.sheets.meas) {
+      // the supporting Measurement Sheet: say, BEFORE the download, what it can and cannot show
+      const nm = (r) => `${r.service.split(WOSEP).join(" › ")} · ${SERIES[r.series]} ${raL(r.no)}`;
+      const noInst = chosen.filter((r) => !r.stages.includes("install"));
+      if (noInst.length) warnings.push({ k: "meas", text: `${noInst.map(nm).join(", ")}: a Supply RA has no installation quantity, so it gets no Measurement Sheet.` });
+      chosen.filter((r) => r.stages.includes("install")).forEach((r) => {
+        const c = (DL.mcov || {})[r.id];
+        if (!c || c.error || !c.applies) return;
+        if (c.legacy_ra) warnings.push({ k: "meas", text: `${nm(r)} was invoiced before locations were kept. Its Measurement Sheet shows the totals, with “Location not recorded”.` });
+        else if (c.earlier.length) warnings.push({ k: "meas", text: `${nm(r)}: ${c.earlier.length} item${c.earlier.length === 1 ? " was" : "s were"} billed in earlier RAs without locations (${brief(c.earlier.map((e) => e.sr ? e.sr + " " + String(e.desc).slice(0, 28) : String(e.desc).slice(0, 28)), 3)}). That earlier quantity shows as “Location of earlier RAs not recorded”; everything new is shown by location.` });
+        if (c.adjusted) warnings.push({ k: "measinfo", text: `${nm(r)}: ${c.adjusted} item${c.adjusted === 1 ? "" : "s"} carr${c.adjusted === 1 ? "ies" : "y"} one adjustment line (quantity capped at the BOQ, or typed by hand), so the sheet always matches the bill.` });
+      });
+    }
     if (wantInv) {
       const bad = [...new Set(chosen.filter((r, i) => counts[i].noChallan).map((r) => r.service))];
       bad.forEach((name) => {
@@ -1022,6 +1037,18 @@
         .catch((e) => { need.forEach((id) => { DL.pbrep[id] = { error: briefErr(e) }; }); })
         .finally(() => { DL.pbBusy = false; if ($("bl-dl-go")) upd(); });
     };
+    // what the Measurement Sheet of each ticked installation RA can show -- asked of the server once per RA, when the tick is on
+    const ensureMcov = () => {
+      if (!DL.sheets.meas) return;
+      DL.mcov = DL.mcov || {};
+      const need = planDownload(ov, DL).chosen.filter((r) => r.stages.includes("install") && !(r.id in DL.mcov)).map((r) => r.id);
+      if (!need.length || DL.mcovBusy) return;
+      DL.mcovBusy = true;
+      jget(api("/" + B.slug + "/measurement/coverage?ras=" + need.join(",")))
+        .then((j) => { j.ras.forEach((x) => { DL.mcov[x.id] = x; }); })
+        .catch((e) => { need.forEach((id) => { DL.mcov[id] = { error: briefErr(e) }; }); })
+        .finally(() => { DL.mcovBusy = false; if ($("bl-dl-go")) upd(); });
+    };
     const bothCard = (ck) => {
       const svs = ov.services.filter((sv) => bothOf(sv));
       if (!svs.length) return "";
@@ -1049,6 +1076,7 @@
         <div class="bl-lbl">2 · Sheets in the invoice workbook</div>
         <div class="bl-shs ${DL.invoice ? "" : "off"}">${SHEETS.map(([k, n, d]) => `<label class="bl-ck ${DL.sheets[k] ? "on" : ""}" title="${esc(d)}"><input type="checkbox" data-sh="${k}"${ck(DL.sheets[k])}${DL.invoice ? "" : " disabled"}><span>${esc(n)}</span></label>`).join("")}</div>
         <div class="bl-hint">Challan Abstract and Challan exist only for services whose supply quantity comes from delivery challans.</div>
+        <div class="bl-hint">With supporting backup adds a Measurement Sheet as the last sheet of the workbook, for installation bills: where each quantity was fitted (floor / level / zone), what was billed before and what is new, and boxes for the client to sign. Quantities only, no rates.</div>
         <div class="bl-dlq"><div class="bl-lbl">3 · Which RAs</div><div class="bl-qk">
           <button type="button" class="btn" data-q="latest">Latest of each service</button><button type="button" class="btn" data-q="locked">All invoiced</button>
           <button type="button" class="btn" data-q="all">All</button><button type="button" class="btn" data-q="none">Clear</button></div>
@@ -1087,6 +1115,7 @@
       $("bl-dlsum").textContent = P.files.length ? `${P.files.length} ${P.files.length === 1 ? "file" : "files"}${P.zip ? " · one zip" : ""} · ${P.chosen.length} RA` : "Tick what you need";
       wire();
       ensurePb();
+      ensureMcov();
     };
     const wire = () => {
       const m = $("bl-modal");

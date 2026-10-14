@@ -68,7 +68,7 @@ from pathlib import Path
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Response, UploadFile, File, Form, Query
 
-from . import siteprogress as sp, itemprog, linkage, boq, projectbase as pbx
+from . import siteprogress as sp, itemprog, linkage, boq, locqty, projectbase as pbx
 
 router = APIRouter(prefix="/api/billing", tags=["billing"])
 
@@ -959,10 +959,14 @@ def _stage_this(bill):
     return {st: t.get("this") or 0.0 for st, t in (bill.get("totals") or {}).items()}
 
 
-def _get_bill(slug, d, store, ra):
+def _get_bill(slug, d, store, ra, keep_loc=False):
     if ra["status"] == "locked":
         b = dict(ra["snap"])
         b["ra"] = _ra_summary(ra, b["this_total"])
+        if not keep_loc and any((r.get("install") or {}).get("loc") for r in b.get("lines") or []):
+            # the location records are for the Measurement Sheet only; the screens never carry them
+            b["lines"] = [{**r, "install": {k: v for k, v in r["install"].items() if k != "loc"}} if (r.get("install") or {}).get("loc") else r
+                          for r in b["lines"]]
         return b
     return _bill(slug, d, store, ra)
 
@@ -1925,6 +1929,7 @@ def lock_ra(slug: str, ra_id: str):
         raise HTTPException(409, "this RA is already locked")
     _need_setup(store, ra["service"], ra["series"])
     b = _bill(slug, d, store, ra)
+    _attach_loc(slug, d, store, ra, b)               # where the installed quantity was fitted, frozen with the bill
     ra["snap"] = {k: v for k, v in b.items() if k != "ra"}
     # the GST rates of the submitted invoice freeze with the bill (a later rate change must not move it)
     ra["inv_gst"] = {"sgst": store["meta"].get("sgst"), "cgst": store["meta"].get("cgst")}
@@ -3857,6 +3862,7 @@ def _invoice_layout(d, store, service, lines, groups):
 
 
 SHEET_KEYS = ("invoice", "summary", "boq", "abstract", "challan")
+MEAS_KEY = "meas"        # the supporting Measurement Sheet: an extra sheet of the invoice workbook, written LAST
 _SERIES_PHRASE = {"supply": "Supply of", "install": "Installation of", "together": "Supply and Installation of"}
 _SERIES_GST = {"supply": "Supply Amount", "install": "Installation Amount", "together": "Supply and Installation Amount"}
 
@@ -4013,7 +4019,7 @@ def _write_ra(wb, slug, d, store, ra, names, want):
     live = ra["status"] == "draft"
     setup = store["setup"].get(service) or {}
     meta = store["meta"]
-    bill = _get_bill(slug, d, store, ra)
+    bill = _get_bill(slug, d, store, ra, keep_loc=True)
     lines = _lines(d, service)
     if not lines:
         raise HTTPException(409, f"{service} has no billable lines.")
@@ -4397,6 +4403,256 @@ def _write_ra(wb, slug, d, store, ra, names, want):
         ws_wire.sheet_properties.tabColor = "FFD966"
     if extra_rows and "boq" in want:
         _fill_extra_sheet(wb.create_sheet(_extra_sheet_name(names, wb.sheetnames)), extra_rows, stages, bill, service, meta, live)
+    if MEAS_KEY in want and "install" in stages:      # the supporting backup goes LAST
+        ws_m = wb.create_sheet(_meas_sheet_name(names, wb.sheetnames))
+        _fill_meas_sheet(ws_m, store, d, ra, _meas_items_for_write(slug, d, store, ra, bill, layout), service, live)
+        return ws_m.title
+    return None
+
+
+# ------------------------------------------------- supporting Measurement Sheet
+# "Where was each installed quantity fitted?" -- the backup a client certifies. It is built from what the site
+# recorded (locqty.py); a place is never invented. The sheet always ties to the bill: whatever the location
+# records do not explain (a quantity capped at the BOQ, a hand-typed quantity) is one visible Adjustment line.
+def _attach_loc(slug, d, store, ra, bill):
+    """Add c["loc"] = {"now", "prev", "mode"} to every Installation cell of `bill` (a LIVE bill of a draft, or the
+    bill being locked). `prev` is the location record of the last LOCKED RA that billed the item; when an earlier RA
+    billed it without recording locations, mode is "legacy" -- the sheet then says so instead of guessing."""
+    if "install" not in STAGES[ra["series"]]:
+        return
+    service = ra["service"]
+    base = _base(service)
+    ctx = sp.location_context(d, base)
+    done = sorted((r for r in store["ras"] if r["service"] == service and r["status"] == "locked" and r["id"] != ra["id"]
+                   and "install" in STAGES[r["series"]] and r.get("snap")), key=lambda r: r["no"], reverse=True)
+    for row in bill["lines"]:
+        c = row.get("install")
+        if not c:
+            continue
+        code = row["item_code"]
+        mode, prev = "none", None
+        if (c.get("prev") or 0) > 1e-9:
+            mode = "legacy"
+            for r in done:
+                prow = next((x for x in r["snap"]["lines"] if x["item_code"] == code), None)
+                if prow is None:
+                    continue
+                loc = (prow.get("install") or {}).get("loc")
+                if loc:
+                    mode, prev = "loc", loc["now"]
+                break
+        c["loc"] = {"now": sp.item_location_qty(d, base, code, ctx), "prev": prev, "mode": mode}
+
+
+def _meas_items(d, store, ra, bill, layout):
+    """The items of one RA's Measurement Sheet, in the same order and numbering as Annexure B-BOQ:
+    [{sr, desc, unit, boq, lines: [{label, prev, this, total, remark}], adj, prev, this, total, note, located}].
+    Only items billed in this RA (a quantity this bill, or one typed by hand)."""
+    info = sp.location_info(d)
+    brow = {r["item_code"]: r for r in bill["lines"]}
+    out = []
+    for x in layout:
+        ln = x.get("line") if x["kind"] == "item" else None
+        row = brow.get(ln["item_code"]) if ln else None
+        c = (row or {}).get("install")
+        if not c:
+            continue
+        this = c.get("this")
+        if this is None or (this == 0 and not c.get("overridden")):
+            continue
+        prev_b = c.get("prev") or 0.0
+        total = round(prev_b + this, 4)
+        loc = c.get("loc")
+        it = {"sr": x["sr"], "desc": x["desc"], "unit": x["unit"], "boq": x["qty"], "prev": round(prev_b, 4), "this": round(this, 4),
+              "total": total, "lines": [], "adj": None, "note": "", "located": bool(loc), "item_code": ln["item_code"], "tracked": True}
+        if not loc:                                   # a bill locked before locations were kept
+            it["lines"] = [{"label": "Location not recorded", "prev": round(prev_b, 4), "this": round(this, 4), "total": total, "remark": ""}]
+            it["located"] = False
+            it["norec"] = True
+        else:
+            lines = locqty.lines_for(loc["now"], loc.get("prev"), loc.get("mode") or "none", info)
+            it["lines"] = lines
+            tracked = loc.get("mode") != "legacy"
+            if not tracked:
+                it["note"] = locqty.LEGACY_REMARK
+                it["tracked"] = False
+            adj_total = round(total - sum(l["total"] for l in lines), 4)
+            adj_prev = round(prev_b - sum(l["prev"] for l in lines), 4) if tracked else None
+            adj_this = round(this - sum(l["this"] for l in lines), 4) if tracked else None
+            if abs(adj_total) > 0.005 or (tracked and (abs(adj_prev) > 0.005 or abs(adj_this) > 0.005)):
+                if c.get("overridden"):
+                    why = "quantity entered by hand in this bill"
+                elif adj_total < 0:
+                    why = "capped at the BOQ quantity"
+                else:
+                    why = "not covered by the location records"
+                it["adj"] = {"label": why, "prev": adj_prev, "this": adj_this, "total": adj_total}
+            it["located"] = bool(lines) and loc.get("mode") != "legacy"
+        out.append(it)
+    return out
+
+
+def _fill_meas_sheet(ws, store, d, ra, items, service, live):
+    """Annexure C: the Measurement Sheet, in the same plain format as Annexure B-BOQ (black borders, green RA bar,
+    peach column heads). No rates, no amounts: quantities only."""
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    meta = store["meta"]
+    BOLD, NORM = Font(name="Calibri", bold=True, size=11), Font(name="Calibri", size=11)
+    SMALL = Font(name="Calibri", italic=True, size=10, color="595959")
+    thin = Side(style="thin", color="000000")
+    BOX = Border(left=thin, right=thin, top=thin, bottom=thin)
+    GREEN, PEACH = PatternFill("solid", fgColor="C6E0B4"), PatternFill("solid", fgColor="FCE4D6")
+    mid = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    QTY = '#,##0.00;-#,##0.00;"-"'
+    ws.sheet_view.showGridLines = False
+    for col, wd in zip("ABCDEFGH", (12, 62, 8, 12, 13, 13, 13, 34)):
+        ws.column_dimensions[col].width = wd
+    ws["A1"] = meta.get("client") or ""
+    ws["A1"].font = Font(name="Calibri", bold=True, size=13)
+    for r_, (k, v) in enumerate([("WO. No.", _wo_no(meta, service) or ""), ("Work", f"{_unit_text(service)} works"),
+                                 ("Contractor", meta.get("contractor") or "")], start=2):
+        ws.cell(r_, 1, k).font = BOLD
+        ws.cell(r_, 2, v).font = NORM
+    if live:
+        ws.cell(5, 2, "DRAFT — not invoiced yet, numbers can still change").font = Font(name="Calibri", bold=True, color="A02622")
+    ws["A6"], ws["B6"] = "Annexure C", "Measurement Sheet — supporting backup to the installation bill"
+    ws["A6"].font = ws["B6"].font = BOLD
+    ws.merge_cells("E7:G7")
+    ws["E7"] = f"RA-{ra['no']:02d}"
+    for c_ in "EFG":
+        ws[f"{c_}7"].fill, ws[f"{c_}7"].border = GREEN, BOX
+    ws["E7"].font, ws["E7"].alignment = BOLD, mid
+    for j, t in enumerate(["Sr. No", "Description / Location", "Unit", "BOQ QTY", "PREVIOUS BILL QTY", "THIS BILL QTY", "TOTAL QTY", "Remarks"], start=1):
+        c_ = ws.cell(8, j, t)
+        c_.font, c_.fill, c_.border, c_.alignment = BOLD, PEACH, BOX, mid
+    ws.row_dimensions[8].height = 32
+    r = 9
+
+    def put(row, vals, bold=False, italic=False, fill=None):
+        for j in range(1, 9):
+            c_ = ws.cell(row, j)
+            c_.border = BOX
+            c_.font = BOLD if bold else (Font(name="Calibri", size=11, italic=True) if italic else NORM)
+            if fill:
+                c_.fill = fill
+        for j, v in vals.items():
+            ws.cell(row, j, v)
+        for j in (4, 5, 6, 7):
+            ws.cell(row, j).number_format = QTY
+
+    for it in items:
+        put(r, {1: it["sr"] if it["sr"] != "" else None, 2: it["desc"], 3: it["unit"], 4: it["boq"]}, bold=True)
+        ws.cell(r, 1).alignment = Alignment(horizontal="center", vertical="top")
+        ws.cell(r, 2).alignment = Alignment(wrap_text=True, vertical="top")
+        ws.cell(r, 3).alignment = Alignment(horizontal="center", vertical="top")
+        ws.cell(r, 4).alignment = Alignment(vertical="top")
+        if it["note"]:
+            ws.cell(r, 8, it["note"]).font = SMALL
+            ws.cell(r, 8).alignment = Alignment(wrap_text=True, vertical="top")
+        r += 1
+        first = r
+        for l in it["lines"]:
+            put(r, {2: "   " + l["label"], 5: l["prev"], 6: l["this"], 7: l["total"] if l["prev"] is None else (f"=E{r}+F{r}" if live else l["total"]), 8: l["remark"] or None})
+            if l["prev"] is None:
+                ws.cell(r, 7).value = l["total"]
+            ws.cell(r, 8).font = SMALL
+            ws.cell(r, 8).alignment = Alignment(wrap_text=True, vertical="top")
+            r += 1
+        if it["adj"]:
+            a = it["adj"]
+            put(r, {2: "   Less / add: " + a["label"], 5: a["prev"], 6: a["this"], 7: a["total"]}, italic=True)
+            r += 1
+        last = r - 1
+        put(r, {2: "Total qty in bill (as in Annexure B-BOQ)", 3: it["unit"]}, bold=True)
+        ws.cell(r, 2).alignment = Alignment(horizontal="right")
+        ws.cell(r, 3).alignment = Alignment(horizontal="center")
+        if live and last >= first:
+            ws.cell(r, 5, f"=SUM(E{first}:E{last})" if it["tracked"] else it["prev"])
+            ws.cell(r, 6, f"=SUM(F{first}:F{last})" if it["tracked"] else it["this"])
+            ws.cell(r, 7, f"=SUM(G{first}:G{last})")
+        else:
+            ws.cell(r, 5, it["prev"]); ws.cell(r, 6, it["this"]); ws.cell(r, 7, it["total"])
+        r += 1
+    if not items:
+        put(r, {2: "No installation quantity is billed in this RA."})
+        r += 1
+    r += 1
+    ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=8)
+    ws.cell(r, 1, "Note: Quantities are the installed quantities recorded at site in Material Intelligence. “Total for the whole area” "
+                  "means one quantity was recorded for the whole area, not split zone-wise.").font = SMALL
+    ws.cell(r, 1).alignment = Alignment(wrap_text=True, vertical="top")
+    ws.row_dimensions[r].height = 28
+    r += 2
+    for a, b, t in ((1, 3, "Prepared by (Contractor)"), (4, 6, "Checked by (Contractor)"), (7, 8, "Certified by (Client / Consultant)")):
+        ws.merge_cells(start_row=r, start_column=a, end_row=r, end_column=b)
+        ws.cell(r, a, t).font = BOLD
+        ws.cell(r, a).alignment = mid
+        ws.merge_cells(start_row=r + 1, start_column=a, end_row=r + 3, end_column=b)
+        ws.merge_cells(start_row=r + 4, start_column=a, end_row=r + 4, end_column=b)
+        ws.cell(r + 4, a, "Name / Sign / Date").font = SMALL
+        for rr in range(r, r + 5):
+            for cc in range(a, b + 1):
+                ws.cell(rr, cc).border = Border(left=thin if cc == a else None, right=thin if cc == b else None,
+                                                top=thin if rr in (r, r + 4) else None, bottom=thin if rr in (r, r + 3, r + 4) else None)
+    ws.print_area = f"A1:H{r + 4}"
+    ws.page_setup.orientation, ws.page_setup.paperSize = "landscape", 9
+    ws.page_setup.fitToWidth, ws.page_setup.fitToHeight = 1, 0
+    ws.sheet_properties.pageSetUpPr = __import__("openpyxl").worksheet.properties.PageSetupProperties(fitToPage=True)
+    ws.print_title_rows = "7:8"
+    ws.freeze_panes = "A9"
+    if live:
+        ws.sheet_properties.tabColor = "FFD966"
+
+
+def _meas_items_for_write(slug, d, store, ra, bill, layout):
+    if ra["status"] == "draft":
+        _attach_loc(slug, d, store, ra, bill)
+    return _meas_items(d, store, ra, bill, layout)
+
+
+def _meas_for(slug, d, store, ra, bill=None):
+    """(items, layout-free) -- the Measurement Sheet items of one RA, from its bill (a draft's location records are read now;
+    a locked RA's were frozen into its snapshot when it was locked)."""
+    service = ra["service"]
+    bill = bill if bill is not None else _get_bill(slug, d, store, ra, keep_loc=True)
+    lines = _lines(d, service)
+    groups, _ = _groups_for(d, store, service, lines)
+    if not groups:
+        groups = [{"sr": "", "name": f"{_unit_text(service)} works", "sheet": None, "from": 1, "to": 10 ** 6, "wo": None}]
+    layout = _invoice_layout(d, store, service, lines, groups)
+    if ra["status"] == "draft":
+        _attach_loc(slug, d, store, ra, bill)
+    return _meas_items(d, store, ra, bill, layout)
+
+
+@router.get("/{slug}/measurement/coverage")
+def measurement_coverage(slug: str, ras: str = ""):
+    """What the Download dialog tells the person BEFORE the Measurement Sheet is downloaded: per RA, how many lines it has,
+    which were billed earlier without locations (the sheet says so), and how many carry an adjustment line."""
+    d = sp._need(slug)
+    store = _load(d)
+    out = []
+    for rid in [x for x in ras.split(",") if x]:
+        ra = _ra(store, rid)
+        if "install" not in STAGES[ra["series"]]:
+            out.append({"id": ra["id"], "applies": False, "items": 0, "earlier": [], "legacy_ra": False, "adjusted": 0})
+            continue
+        items = _meas_for(slug, d, store, ra)
+        out.append({"id": ra["id"], "applies": True, "items": len(items),
+                    "earlier": [{"sr": i["sr"], "desc": i["desc"], "qty": i["prev"]} for i in items if not i["tracked"]],
+                    "legacy_ra": any(i.get("norec") for i in items),
+                    "adjusted": sum(1 for i in items if i["adj"])})
+    return {"ras": out}
+
+
+def _meas_sheet_name(names, taken):
+    """'Annexure C-Measurement' in the plain layout; else the BOQ tab's own prefix + ' MEASUREMENT' (never a clash, 31 characters at most)."""
+    base = "Annexure C-Measurement" if names["boq"] == "Annexure B-BOQ" else _sheet_safe(names["boq"][:-len("BOQ")].rstrip() + " MEASUREMENT")
+    n, i, low = base, 2, {x.lower() for x in taken}
+    while n.lower() in low:
+        n = base[:28] + f" {i}"
+        i += 1
+    return n
 
 
 def _extra_sheet_name(names, taken):
@@ -5204,7 +5460,7 @@ def download_files(slug, ra_ids, mode="files", want=None, combined=False, pb=Fal
     import openpyxl
     d = sp._need(slug)
     store = _load(d)
-    want = {k for k in (want if want is not None else SHEET_KEYS) if k in SHEET_KEYS}
+    want = {k for k in (want if want is not None else SHEET_KEYS) if k in SHEET_KEYS or k == MEAS_KEY}
     ras = []
     for rid in ra_ids:
         ras.append(_ra(store, rid))
@@ -5215,14 +5471,18 @@ def download_files(slug, ra_ids, mode="files", want=None, combined=False, pb=Fal
         if mode == "one":
             wb = openpyxl.Workbook()
             wb.remove(wb.active)
-            taken = set()
+            taken, meas_names = set(), set()
             both = {(r["service"], r["no"]) for r in ras if sum(1 for x in ras if (x["service"], x["no"]) == (r["service"], r["no"])) > 1}
             for r in ras:
                 nm = _sheet_names(r, taken, plain=False, tag=(r["service"], r["no"]) in both)
                 taken |= set(nm.values())
-                _write_ra(wb, slug, d, store, r, nm, want)
+                made = _write_ra(wb, slug, d, store, r, nm, want)
+                if made:
+                    meas_names.add(made)
             if not wb.sheetnames:
                 raise HTTPException(400, "Tick at least one sheet.")
+            meas = [ws for ws in wb._sheets if ws.title in meas_names]       # the supporting backups close the workbook
+            wb._sheets = [ws for ws in wb._sheets if ws.title not in meas_names] + meas
             buf = io.BytesIO()
             wb.save(buf)
             out.append((f"{sp._slugify(slug)}_RA_invoices_{dt.date.today().isoformat()}.xlsx", buf.getvalue()))

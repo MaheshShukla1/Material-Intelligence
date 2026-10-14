@@ -1476,8 +1476,33 @@
   // so a room ticked/marked done by mistake is a one-click fix, not a
   // dead end.
   async function markRoomsDone(code, done, getPlan) {
-    const ids = [...document.querySelectorAll("#sp-modal input[data-room]")].filter((c) => c.checked).map((c) => c.dataset.room);
-    if (!ids.length) return toast(`Tick at least one ${dlgLeafLower()} to ${done ? "mark done" : "undo"}.`);
+    // an area switched to "Whole <area>" is ONE entry (its zones are hidden and not part of the zone list)
+    const areaG = [...document.querySelectorAll('#sp-modal .sp-roomgroup[data-mode="area"]')];
+    const inArea = new Set(areaG.flatMap((g) => JSON.parse(g.dataset.ids || "[]")));
+    const areaTick = areaG.filter((g) => g.querySelector("input[data-area]").checked);
+    const ids = [...document.querySelectorAll("#sp-modal input[data-room]")].filter((c) => c.checked && !inArea.has(c.dataset.room)).map((c) => c.dataset.room);
+    if (!ids.length && !areaTick.length) return toast(`Tick at least one ${dlgLeafLower()} to ${done ? "mark done" : "undo"}.`);
+    if (areaTick.length) {
+      const unit = (S._byCode[code] || {}).unit || "";
+      const made = [];
+      try {
+        for (const g of areaTick) {
+          const inp = g.querySelector("input[data-areaqty]"), P = Number(g.dataset.plan), v = Number(inp.value);
+          const typed = inp.dataset.touched && inp.value.trim() !== "" && !isNaN(v);
+          const qty = done ? (typed ? Math.min(Math.max(v, 0), P) : P) : 0;
+          const was = Number(g.dataset.was || 0), nm = g.querySelector("b").textContent.split(" › ").pop();
+          if (done && !g.dataset.pooled && was > 0 && Math.abs(was - qty) > 1e-9
+              && !confirm(`${nm} already has ${qf(was, unit)} ${unit} recorded. Replace it with this one total of ${qf(qty, unit)} ${unit}?`)) return;
+          S.svc = await jpost(api("/" + S.slug + "/progress/area-total" + roomQ()), { service: S.service, item_code: code, rooms: JSON.parse(g.dataset.ids), qty });
+          made.push(`${nm}: ${qf(qty, unit)} ${unit}`);
+        }
+      } catch (e) { return toast("Failed: " + briefErr(e)); }
+      if (!ids.length) {
+        closeModal();
+        await afterSvc();
+        return toast(done ? `Saved whole-area total for ${code} — ${made.join(", ")}.` : `Cleared the whole-area total on ${code}.`);
+      }
+    }
     // Rows with a quantity box (a zone planned at more than one unit) carry a
     // REAL installed quantity -- tick = the full plan, or whatever was typed.
     // Only when at least one ticked row is genuinely partial does the
@@ -1765,6 +1790,70 @@
         h.textContent = `Sets the PLAN. What's actually fitted goes in the box next to each name below.`;
         q.insertAdjacentElement("afterend", h);
       }
+      addAreaTotals(plan);
+    }
+
+    // ---- ONE quantity for a whole floor / level / wing ----
+    // Often the site only knows "B3 total = 420 Rmt", not the split by zone. Each area (a group below) gets a
+    // small "By zone | Whole <area>" switch. Whole <area> shows one box for the area; the quantity is spread over
+    // its rooms for progress (so every % and report is unchanged) and remembered as ONE total, which is how the
+    // bill's backup sheet prints it -- as one line, never as invented per-zone numbers. Nothing is sent until
+    // "Mark ticked as done", like every other quantity here.
+    function addAreaTotals(plan) {
+      const leafW = dlgLeafLower(), unit = it.unit;
+      let added = 0;
+      modalEl.querySelectorAll(".sp-roomgroup").forEach((g) => {
+        if (g.querySelector(".sp-areacell")) return;
+        const gcells = cells.filter((c) => g.contains(c.cell));
+        if (gcells.length < 2) return;                                    // one room: the room IS the area
+        const ids = gcells.map((c) => c.cb.dataset.room);
+        const sumPlan = gcells.reduce((a, c) => a + c.planned, 0);
+        const path = g.querySelector("b").textContent;
+        const last = path.split(" › ").pop();
+        const pool = (plan.pools || []).find((p) => ids.every((id) => p.rooms.includes(id)));
+        const was = gcells.reduce((a, c) => a + c.done0, 0);
+        const hd = g.firstElementChild;
+        hd.style.flexWrap = "wrap";
+        const chip = document.createElement("span");
+        chip.className = "sp-areachip"; chip.textContent = `Whole-${leafW === "zone" ? "level" : "area"} total`; chip.hidden = !pool;
+        const seg = document.createElement("span");
+        seg.className = "sp-areaseg";
+        seg.innerHTML = `<button type="button" data-m="zone">By ${esc(leafW)}</button><button type="button" data-m="area">Whole ${esc(last)}</button>`;
+        hd.appendChild(chip); hd.appendChild(seg);
+        const grid = g.lastElementChild;
+        const card = document.createElement("div");
+        card.className = "sp-areacell"; card.hidden = true;
+        card.innerHTML = `<label style="display:flex;align-items:center;gap:5px;font-size:12.5px;cursor:pointer"><input type="checkbox" data-area="1">Whole ${esc(last)}</label><span class="sp-roomqty"><input class="ctl" type="number" min="0" max="${esc(String(sumPlan))}" step="${isCountItem ? "1" : "any"}" inputmode="${isCountItem ? "numeric" : "decimal"}" data-areaqty="1" value="${fmtQ(pool ? pool.qty : 0)}" aria-label="Quantity done in the whole area"><span class="u">of ${fmtQ(sumPlan)} ${esc(unit)}</span></span>`;
+        const note = document.createElement("p");
+        note.className = "sp-areahint"; note.hidden = true;
+        note.textContent = `One total for the whole ${last}. Progress % still counts; the bill backup shows it as one line.`;
+        grid.insertAdjacentElement("beforebegin", card);
+        card.insertAdjacentElement("afterend", note);
+        g.dataset.ids = JSON.stringify(ids); g.dataset.plan = String(sumPlan); g.dataset.was = String(pool ? 0 : was); g.dataset.pooled = pool ? "1" : "";
+        const cb = card.querySelector("input[data-area]"), inp = card.querySelector("input[data-areaqty]");
+        const c = { cb, inp, cell: card, planned: sumPlan, done0: pool ? pool.qty : 0 };
+        cells.push(c);
+        paintCell(c, c.done0);
+        inp.addEventListener("input", () => { inp.dataset.touched = "1"; cb.checked = true; const v = Number(inp.value); paintCell(c, isNaN(v) ? 0 : v); });
+        inp.addEventListener("change", () => {
+          let v = Number(inp.value);
+          if (inp.value.trim() === "" || isNaN(v) || v < 0) { delete inp.dataset.touched; cb.checked = false; syncCells(); return; }
+          if (v > sumPlan) { v = sumPlan; toast(`Planned for the whole ${last} is ${fmtQ(sumPlan)} ${unit}. To record more, raise the plan first.`); }
+          inp.value = fmtQ(v); paintCell(c, v);
+        });
+        cb.addEventListener("change", () => { delete inp.dataset.touched; syncCells(); });
+        const setMode = (m) => {
+          g.dataset.mode = m;
+          seg.querySelectorAll("button").forEach((b) => { b.classList.toggle("on", b.dataset.m === m); b.setAttribute("aria-pressed", String(b.dataset.m === m)); });
+          card.hidden = note.hidden = m !== "area"; grid.hidden = m === "area";
+          g.querySelectorAll("[data-gall],[data-gnone]").forEach((b) => { b.hidden = m === "area"; });
+        };
+        seg.querySelectorAll("button").forEach((b) => b.addEventListener("click", () => setMode(b.dataset.m)));
+        setMode(pool ? "area" : "zone");
+        added++;
+      });
+      const zh = $("sp-zhelp");
+      if (added && zh && !zh.dataset.area) { zh.dataset.area = "1"; zh.textContent += " Only know the total for a whole floor / level? Switch that area to “Whole …”."; }
     }
     jget(api("/" + S.slug + "/item-room-plan?service=" + encodeURIComponent(S.service) + "&item_code=" + encodeURIComponent(code)))
       .then(applyRoomPlan).catch(() => {});

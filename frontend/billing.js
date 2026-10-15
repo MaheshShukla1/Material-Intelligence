@@ -46,7 +46,8 @@
   // a long list of blank details, cut after n with "+N more" (the full list is in the form itself)
   const brief = (list, n) => list.length > (n || 4) + 1 ? list.slice(0, n || 4).join(", ") + ` … +${list.length - (n || 4)} more` : list.join(", ");
 
-  const B = { slug: null, projects: [], view: "home", ov: null, pre: null, bill: null, raId: null, setup: null, expanded: new Set(), seq: 0, live: null };
+  // lens: the whole Billing home read as "all" (today's view), "supply" only or "install" only; svcOpen: services opened into their two stages
+  const B = { slug: null, projects: [], view: "home", ov: null, pre: null, bill: null, raId: null, setup: null, expanded: new Set(), seq: 0, live: null, lens: "all", svcOpen: new Set() };
   const OV = { base: null, data: null, drafts: true, all: false };      // overall annexure screen
   // a Work Order is its own billing unit "Service › Name"; a plain service is its own unit
   const WOSEP = " \u203a ";
@@ -128,7 +129,7 @@
   }
   function wireProj() {
     const p = $("bl-proj");
-    if (p) p.onchange = () => { B.slug = p.value; B.expanded = new Set(); showHome(); };
+    if (p) p.onchange = () => { B.slug = p.value; B.expanded = new Set(); B.svcOpen = new Set(); showHome(); };
   }
 
   // ------------------------------------------------------------- overview
@@ -180,33 +181,34 @@
     const s = section();
     B.view = "home";
     const anySet = ov.services.some((x) => x.set);
-    const snap = snapshotOf(ov);
+    const lens = B.lens === "supply" || B.lens === "install" ? B.lens : "all";
+    const snap = snapshotOf(ov, lens);
     s.innerHTML = head("Billing",
       "The bill builds itself: installation from Site Progress, supply from delivery challans (or the stock register), rate from your BOQ sheet.",
       `<button class="btn" id="bl-setup">Billing setup</button>
        ${ov.ras.length ? `<button class="btn" id="bl-dl">Download</button>` : ""}
        ${uploadUnits(ov).length ? `<button class="btn" id="bl-imph" title="Filled the downloaded RA workbook? Bring it back here: typed quantities and challans in one go">Upload filled sheet</button>` : ""}
-       <button class="btn primary" id="bl-new" ${anySet ? "" : "disabled"}>+ New RA bill</button>`) + `
+       <button class="btn primary" id="bl-new" ${anySet ? "" : "disabled"}>+ New RA bill</button>`) + lensRow(lens) + `
       <div class="bl-kpis bl-snap">
-        <div class="bl-kpi"><span>Contract value</span><b title="${esc(inr(ov.contract_value))}"><em class="full">${inr(ov.contract_value)}</em><em class="cmp" aria-hidden="true">${inrShort(ov.contract_value)}</em></b><i>${basesOf(ov).length} services${ov.services.length > basesOf(ov).length ? " · " + ov.services.length + " Work Orders" : ""}</i></div>
-        <div class="bl-kpi good"><span>Invoiced so far</span><b>${inr(ov.billed)}</b><i>${snap.nInv} RA invoiced</i></div>
-        <div class="bl-kpi warn bl-ni"><span>Not invoiced yet</span><b>${inr(snap.notInvoiced)}</b><i>${snap.n} draft${snap.n === 1 ? "" : "s"} ${inr(snap.draftTotal)}<br>Ready, no draft ${inr(snap.ready)}</i></div>
+        <div class="bl-kpi"><span>Contract value</span><b title="${esc(inr(ov.contract_value))}"><em class="full">${inr(ov.contract_value)}</em><em class="cmp" aria-hidden="true">${inrShort(ov.contract_value)}</em></b><i>${basesOf(ov).length} services${ov.services.length > basesOf(ov).length ? " · " + ov.services.length + " Work Orders" : ""}${lens === "all" ? "" : " · all stages"}</i></div>
+        <div class="bl-kpi good"><span>Invoiced so far</span><b>${inr(snap.billed)}</b><i>${lens !== "all" && !snap.nInv ? "No " + LENS[lens] + " RA invoiced yet" : snap.nInv + " RA invoiced"}</i></div>
+        <div class="bl-kpi warn bl-ni"><span>Not invoiced yet</span><b>${inr(snap.notInvoiced)}</b><i>${snap.n} draft${snap.n === 1 ? "" : "s"} ${inr(snap.draftTotal)}<br>Ready, no draft ${inr(snap.ready)}${snap.togetherReady > 0 ? `<br><span class="bl-tg" title="A Together bill covers both stages and the overview does not split it, so it is not added into a one-stage view.">+ ${inr(snap.togetherReady)} Together, not split by stage</span>` : ""}</i>${lens === "all" ? splitBar(ov, snap) : ""}</div>
       </div>
       <div class="bl-snaprow"><button class="btn primary" id="bl-share">Share snapshot</button><span>One tap copies a short summary, ready for WhatsApp or email.</span></div>
       ${anySet ? "" : `<div class="bl-callout">No service has a payment term yet. Open <b>Billing setup</b> and set Supply % / Installation % for each service. Until it is set, that service cannot be billed — no % is ever guessed.</div>`}
       <div class="bl-sech"><h3>Services</h3><span class="bl-live"><i></i>Live · refreshes every minute</span></div>
-      <div class="bl-card bl-svcl" id="bl-svcl">${snap.n ? `<div class="bl-grp"><b>Not invoiced yet · ${snap.n} draft${snap.n === 1 ? "" : "s"}</b><b>${inr(snap.draftTotal)}</b></div>` : ""}${basesOf(ov).flatMap((b) => b.units.map((u) => ov.services.find((x) => x.service === u)).filter(Boolean).map((x) => svcRow(ov, b, x))).join("")}</div>
+      <div class="bl-card bl-svcl" id="bl-svcl">${snap.n ? `<div class="bl-grp"><b>Not invoiced yet · ${snap.n} draft${snap.n === 1 ? "" : "s"}</b><b>${inr(snap.draftTotal)}</b></div>` : ""}${basesOf(ov).flatMap((b) => b.units.map((u) => ov.services.find((x) => x.service === u)).filter(Boolean).map((x) => svcRow(ov, b, x, lens))).join("")}</div>
       <div class="bl-sech"><h3>RA bills</h3><span class="bl-live">Each row shows what is inside, stage by stage</span></div>
       <div class="bl-card bl-scroll"><div class="bl-ras">
         <div class="bl-rah"><div>RA</div><div>Cut-off</div><div>Status</div><div>What is inside</div><div class="n">This bill</div><div class="n">Up to date</div><div></div></div>
-        ${ov.ras.length ? ov.ras.map((r) => `
+        ${ov.ras.length ? (lens === "all" ? ov.ras : ov.ras.filter((r) => hasStage(r, lens))).map((r) => `
         <div class="bl-rar" data-ra="${esc(r.id)}" tabindex="0" role="button">
           <div><b>${esc(r.service)} · RA ${r.no}</b><small>${esc(SERIES[r.series])} · ${r.lines} line${r.lines === 1 ? "" : "s"}${xChip(r)}</small></div>
           <div>${esc(r.cutoff || "")}</div>
           <div><span class="bl-chip ${r.status}">${r.status === "draft" ? "Draft" : "Invoiced"}</span></div>
-          <div class="ins">${stageChips(r)}</div>
-          <div class="n"><b>${inr(r.this_total)}</b></div><div class="n">${inr(r.up_to_date)}</div>
-          <div class="go">${r.status === "draft" ? "Open →" : "View →"}</div></div>`).join("")
+          <div class="ins">${stageChips(r, lens)}</div>
+          <div class="n"><b>${inr(lens === "all" ? r.this_total : stAmt(r, lens))}</b></div><div class="n">${lens === "all" ? inr(r.up_to_date) : upToDateIn(ov, r, lens)}</div>
+          <div class="go">${r.status === "draft" ? "Open →" : "View →"}</div></div>`).join("") || `<div class="bl-none">No ${LENS[lens]} RA yet.</div>`
           : `<div class="bl-none">No RA yet. Click “+ New RA bill”.</div>`}
       </div></div>
       ${ov.notes.length ? `<div class="bl-notes">${ov.notes.map((n) => `<div class="bl-note ${n.kind}" ${n.ra ? `data-ra="${esc(n.ra)}"` : ""}><b>${n.kind === "over" ? "Check" : "Needs your input"}</b>${esc(n.msg)}</div>`).join("")}</div>` : ""}`;
@@ -219,6 +221,17 @@
     s.querySelectorAll("[data-ra]").forEach((el) => {
       el.onclick = () => showRA(el.dataset.ra);
       el.onkeydown = (e) => { if (e.key === "Enter") showRA(el.dataset.ra); };
+    });
+    // the page lens and a service's Supply / Installation rows: a repaint of this screen only; the scroll position and the focus stay
+    const again = (sel) => {
+      const y = window.scrollY; paintHome(B.ov); window.scrollTo(0, y);
+      const el = sel && section().querySelector(sel); if (el) el.focus();
+    };
+    s.querySelectorAll("[data-lens]").forEach((el) => el.onclick = () => { B.lens = el.dataset.lens; again('[data-lens="' + el.dataset.lens + '"]'); });
+    s.querySelectorAll("[data-exp]").forEach((el) => el.onclick = (e) => {
+      e.stopPropagation();
+      const u = el.dataset.exp; B.svcOpen.has(u) ? B.svcOpen.delete(u) : B.svcOpen.add(u);
+      again('[data-exp="' + u.replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"]');
     });
     s.querySelectorAll("[data-ch]").forEach((el) => el.onclick = () => showChallans(el.dataset.ch));
     s.querySelectorAll("[data-wire]").forEach((el) => el.onclick = () => showWire(el.dataset.wire));
@@ -234,18 +247,57 @@
   // The three cards are the whole picture for a manager: what is invoiced, what is not invoiced yet, what the contract is.
   // "Not invoiced yet" is only a SUM of figures the screen already has: the open drafts + what is ready with no draft. Nothing is
   // estimated; a figure the overview does not carry is not shown as a number.
-  function snapshotOf(ov) {
-    const drafts = ov.ras.filter((r) => r.status === "draft");
-    const draftTotal = drafts.reduce((a, r) => a + (r.this_total || 0), 0);
-    const ready = Number(ov.ready_total) || 0;
+  // `lens` "supply" / "install" reads the same figures one stage at a time (the stage part of each RA, see stAmt); "all" (the default) is
+  // exactly the whole-RA picture the screen has always had.
+  function snapshotOf(ov, lens) {
+    lens = lens === "supply" || lens === "install" ? lens : "all";
+    const part = (r) => (lens === "all" ? (r.this_total || 0) : (stAmt(r, lens) || 0));
+    const inLens = (r) => lens === "all" || hasStage(r, lens);
+    const drafts = ov.ras.filter((r) => r.status === "draft" && inLens(r));
+    const locked = ov.ras.filter((r) => r.status === "locked" && inLens(r));
+    const draftTotal = drafts.reduce((a, r) => a + part(r), 0);
+    // ready with no draft: the overview carries it per bill type. A Together bill is not split by stage there, so in a one-stage view it
+    // is reported apart (togetherReady) and never divided by a guessed share.
+    const rdy = (key) => ov.services.reduce((a, x) => { const v = (x.ready || {})[key]; return a + (v && v.ready > 0 && !v.has_draft ? v.ready : 0); }, 0);
+    const ready = lens === "all" ? (Number(ov.ready_total) || 0) : rdy(lens);
     const order = ov.services.map((x) => x.service);
     const names = [...order, ...drafts.map((r) => r.service).filter((n) => order.indexOf(n) < 0)];
     const per = [...new Set(names)].map((n) => {
       const mine = drafts.filter((r) => r.service === n);
-      return mine.length ? { service: n, n: mine.length, amt: mine.reduce((a, r) => a + (r.this_total || 0), 0) } : null;
+      return mine.length ? { service: n, n: mine.length, amt: mine.reduce((a, r) => a + part(r), 0) } : null;
     }).filter(Boolean);
     return { n: drafts.length, draftTotal, ready, notInvoiced: draftTotal + ready, per,
-             nInv: ov.ras.filter((r) => r.status === "locked").length };
+             nInv: locked.length, billed: lens === "all" ? ov.billed : locked.reduce((a, r) => a + part(r), 0),
+             togetherReady: lens === "all" ? 0 : rdy("together") };
+  }
+  // ----------------------------------------------------- Supply / Installation read apart
+  // The client gets a Supply invoice and an Installation invoice separately, so the page can be read one stage at a time. Nothing here is a
+  // new figure: every number is a stage part an RA already carries (stage_this), or a sum of those.
+  const LENS = { supply: "Supply", install: "Installation" };
+  const hasStage = (r, k) => (r.stages || []).includes(k);
+  // what ONE stage of an RA holds; null when the RA does not carry that stage (so it is never shown as a made-up 0)
+  const stAmt = (r, k) => (hasStage(r, k) && (r.stage_this || {})[k] != null ? Number(r.stage_this[k]) : null);
+  const LENS_HINT = { all: "Totals add both stages, as today.", supply: "Showing Supply only: every number on this page.", install: "Showing Installation only: every number on this page." };
+  function lensRow(lens) {
+    return `<div class="bl-lensrow"><div class="bl-lens" role="group" aria-label="Show">${["all", "supply", "install"].map((k) =>
+      `<button type="button" data-lens="${k}" class="${lens === k ? "on" : ""}" aria-pressed="${lens === k}">${k === "all" ? "All" : LENS[k]}</button>`).join("")}</div>
+      <span class="bl-lenshint">${LENS_HINT[lens]}</span></div>`;
+  }
+  // "Not invoiced yet" cut into Supply and Installation. Drawn only when the two parts add up to the whole (a Together bill that is ready but
+  // not drafted cannot be cut by stage, and then the bar is left out rather than drawn from a guess).
+  function splitBar(ov, snap) {
+    const sum = (k) => ov.ras.filter((r) => r.status === "draft").reduce((a, r) => a + (stAmt(r, k) || 0), 0);
+    const rdy = (k) => ov.services.reduce((a, x) => { const v = (x.ready || {})[k]; return a + (v && v.ready > 0 && !v.has_draft ? v.ready : 0); }, 0);
+    const sp = sum("supply") + rdy("supply"), ins = sum("install") + rdy("install");
+    if (!(snap.notInvoiced > 0) || sp < 0 || ins < 0 || Math.abs(sp + ins - snap.notInvoiced) > 0.5) return "";
+    return `<div class="bl-nibar" role="img" aria-label="Supply ${esc(inr(sp))}, Installation ${esc(inr(ins))}"><s class="sp" style="width:${(sp / snap.notInvoiced * 100).toFixed(2)}%"></s><s class="in" style="width:${(ins / snap.notInvoiced * 100).toFixed(2)}%"></s></div>
+      <div class="bl-nikey"><u class="a">Supply ${inr(sp)}</u><u class="b">Installation ${inr(ins)}</u></div>`;
+  }
+  // "Up to date" of an RA row in a one-stage view. Only where it is certain to be that stage alone: a Supply RA in the Supply view (or an
+  // Installation RA in the Installation view) of a service that has no Together bill. Otherwise "—".
+  function upToDateIn(ov, r, lens) {
+    const mixed = ov.ras.some((o) => o.service === r.service && o.series === "together");
+    return r.series === lens && !mixed ? inr(r.up_to_date) : `<span title="Mixed with a Together bill, so it is not split by stage">—</span>`;
   }
   // "₹ 114.7 Cr" / "₹ 3.29 L": only for the phone's half-width Contract card; the full number stays in its tooltip and on wider screens
   function inrShort(v) {
@@ -260,13 +312,14 @@
   // asterisks), one figure per line, exact rupees in Indian grouping, the same words as the cards on the screen. Only figures the
   // overview already has; a part that is zero is left out rather than shown as "0".
   function snapshotText(ov) {
-    const sn = snapshotOf(ov);
+    const lens = B.lens === "supply" || B.lens === "install" ? B.lens : "all";
+    const sn = snapshotOf(ov, lens);
     const d = new Date();
     const pr = B.projects.find((p) => p.slug === B.slug);
     const ras = (n) => `${n} RA${n === 1 ? "" : "s"}`;
-    const L = [`${pr ? pr.project : B.slug} – Billing status`, `As on ${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`, "",
-      `Contract value: ${inr(ov.contract_value)}`,
-      `Invoiced so far: ${inr(ov.billed)}${sn.nInv ? ` (${ras(sn.nInv)})` : ""}`,
+    const L = [`${pr ? pr.project : B.slug} – Billing status${lens === "all" ? "" : " (" + LENS[lens] + " only)"}`, `As on ${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`, "",
+      `Contract value: ${inr(ov.contract_value)}${lens === "all" ? "" : " (all stages)"}`,
+      `Invoiced so far: ${inr(sn.billed)}${sn.nInv ? ` (${ras(sn.nInv)})` : ""}`,
       `Not yet invoiced: ${inr(sn.notInvoiced)}`];
     if (sn.n) L.push(`• RA bills prepared, awaiting invoice (${sn.n}): ${inr(sn.draftTotal)}`);
     if (sn.ready > 0) L.push(`• Ready to bill, RA not prepared yet: ${inr(sn.ready)}`);
@@ -345,11 +398,47 @@
     if (rd.length) return { k: "ready", series: rd.map((e) => e[0]), amt: readyAmt };
     return { k: "none" };
   }
-  function svcRow(ov, b, x) {
-    const st = unitState(ov, x), split = !!b.split, enc = esc(x.service);
+  // the same question for ONE stage: its open drafts, what is ready to bill, else the latest invoiced RA that carries it
+  function unitStateLens(ov, x, lens) {
+    if (!x.set) return { k: "unset" };
+    const mine = ov.ras.filter((r) => r.service === x.service && hasStage(r, lens)).sort((p, q) => q.no - p.no);
+    const drafts = mine.filter((r) => r.status === "draft");
+    if (drafts.length) return { k: "draft", drafts, top: drafts[0], total: drafts.reduce((a, r) => a + (stAmt(r, lens) || 0), 0), readyAmt: 0, readySeries: [] };
+    const v = (x.ready || {})[lens];
+    if (v && v.ready > 0 && !v.has_draft) return { k: "ready", series: [lens], amt: v.ready };
+    const last = mine.find((r) => r.status === "locked");
+    return last ? { k: "locked", ra: last, amt: stAmt(last, lens) } : { k: "none" };
+  }
+  // a service with an RA for each stage can be opened into those two rows (the stage RAs are the latest per stage, draft or invoiced)
+  function stageRAs(ov, x) {
+    const bv = x.both_view || {}, out = {};
+    ["supply", "install"].forEach((k) => { out[k] = bv[k] ? ov.ras.find((r) => r.id === bv[k].id) || null : null; });
+    return out;
+  }
+  function subBlock(ov, x) {
+    const sr = stageRAs(ov, x);
+    const row = (k) => {
+      const r = sr[k], a = stAmt(r, k);
+      return `<div class="bl-strow"><b>${LENS[k]}</b><span><span class="bl-chip ${r.status}">RA ${r.no} · ${r.status === "draft" ? "Draft" : "Invoiced"}</span></span>
+        <span class="am">${inr(a)}</span><small>${r.lines} line${r.lines === 1 ? "" : "s"}${r.series === "together" ? " · Together bill" : ""}</small>
+        <span><button class="bl-link" data-ra="${esc(r.id)}">${r.status === "draft" ? "Open draft →" : "View →"}</button></span></div>`;
+    };
+    const tot = (stAmt(sr.supply, "supply") || 0) + (stAmt(sr.install, "install") || 0);
+    return `<div class="bl-stsub" data-sub="${esc(x.service)}">${row("supply")}${row("install")}
+      <div class="bl-sttot"><span>Supply + Installation, latest RAs<em>view only, not a bill</em></span><b class="am">${inr(tot)}</b></div></div>`;
+  }
+  function svcRow(ov, b, x, lens) {
+    lens = lens === "supply" || lens === "install" ? lens : "all";
+    const st = lens === "all" ? unitState(ov, x) : unitStateLens(ov, x, lens), split = !!b.split, enc = esc(x.service);
     const name = esc(x.service);
+    const sr = lens === "all" && x.set ? stageRAs(ov, x) : null;
+    const canOpen = !!(sr && sr.supply && sr.install);
+    const open = canOpen && B.svcOpen.has(x.service);
     let status = "", act = "";
-    if (st.k === "draft") {
+    if (st.k === "locked") {
+      status = `<span class="bl-chip locked">RA ${st.ra.no} · Invoiced</span><b class="am">${inr(st.amt)}</b>`;
+      act = `<button class="btn" data-ra="${esc(st.ra.id)}">View →</button>`;
+    } else if (st.k === "draft") {
       const n = st.drafts.length;
       status = `<span class="bl-chip draft">${n === 1 ? "RA " + st.top.no + " · Draft" : n + " drafts open"}</span><b class="am">${inr(st.total)}</b>`
         + (st.readyAmt ? `<small class="also" title="${esc(st.readySeries.map((k) => SERIES[k]).join(" + "))}: ${st.readySeries.length === 1 && st.readySeries[0] === "supply" ? "delivery challans / stock are in" : "the work is done"}, but no ${esc(st.readySeries.map((k) => SERIES[k]).join(" + "))} RA is drafted yet. Open + New RA bill to create it.">+ ${inr(st.readyAmt)} ${esc(st.readySeries.map((k) => SERIES[k]).join(" + "))} ready</small>` : "");
@@ -369,15 +458,15 @@
       <div class="stt">${status}</div>
       <div class="act">${act}</div>
       <div class="lks">${ch}${wire}<button class="bl-link" data-overall="${esc(b.base)}">Annexure →</button></div>
-      <div class="mn"><button class="bl-dots" data-menu="${esc(b.base)}" data-split="${split ? 1 : 0}" aria-label="More for ${name}" aria-haspopup="true">···</button></div></div>`;
+      <div class="mn">${canOpen ? `<button class="bl-chev ${open ? "open" : ""}" data-exp="${enc}" aria-expanded="${open}" aria-label="Show Supply and Installation separately for ${name}" title="Supply and Installation separately">▾</button>` : ""}<button class="bl-dots" data-menu="${esc(b.base)}" data-split="${split ? 1 : 0}" aria-label="More for ${name}" aria-haspopup="true">···</button></div></div>${open ? subBlock(ov, x) : ""}`;
   }
   // quantity above the BOQ, on a Billing-home row: only a pointer (the details and the accept live inside that draft)
   const xChip = (r) => r.status === "draft" && r.over_n ? ` <span class="bl-xchip" title="Open the draft to review">${r.over_n} above BOQ</span>`
     : r.extra_n ? ` <span class="bl-xchip ok" title="Billed above the BOQ quantity, accepted">Extra · ${r.extra_n}</span>` : "";
   // "What is inside" of an RA: both stages, a stage that carries nothing is greyed (never hidden, never a made-up 0)
-  function stageChips(r) {
+  function stageChips(r, lens) {
     const t = r.stage_this || {};
-    return ["supply", "install"].map((k) => {
+    return (lens === "supply" || lens === "install" ? [lens] : ["supply", "install"]).map((k) => {
       const v = r.stages.includes(k) ? t[k] : null;
       const nm = k === "install" ? "Install" : "Supply";
       return v ? `<span class="bl-sg on">${nm} ${inr(v)}</span>` : `<span class="bl-sg">${nm} —</span>`;
@@ -584,6 +673,30 @@
   }
 
   // ------------------------------------------------------------- RA bill
+  // Supply | Installation tabs on a one-stage RA: the other tab is the latest RA of the same service that carries the other stage (draft or
+  // invoiced), or "Nothing billed yet". A Together bill holds both stages in one screen, so it gets no tabs. The extra card is a view-only
+  // sum of the two stage amounts and is never a bill.
+  function stageTabs(ra, b) {
+    const none = { tabs: "", kpi: "" };
+    if (!B.ov || (ra.stages || []).length !== 1) return none;
+    const cur = ra.stages[0], oth = cur === "supply" ? "install" : "supply";
+    const x = (B.ov.services || []).find((y) => y.service === ra.service);
+    const bv = x && x.both_view && x.both_view[oth];
+    const o = bv ? (B.ov.ras || []).find((r) => r.id === bv.id) : null;
+    const curAmt = b.totals && b.totals[cur] ? b.totals[cur].this : null;
+    const meta = (r, n) => `RA ${r.no} · ${r.status === "draft" ? "Draft" : "Invoiced"} · ${n} line${n === 1 ? "" : "s"}${r.series === "together" ? " · Together bill" : ""}`;
+    const tab = (k) => {
+      if (k === cur) return `<div class="bl-stab on" aria-current="true"><span>${LENS[k]}</span><b>${inr(curAmt)}</b><small>${meta(ra, b.lines.length)}</small></div>`;
+      if (!o) return `<div class="bl-stab off" aria-disabled="true"><span>${LENS[k]}</span><b>Nothing billed yet</b></div>`;
+      return `<button type="button" class="bl-stab" data-stab="${esc(o.id)}"><span>${LENS[k]}</span><b>${inr(stAmt(o, oth))}</b><small>${meta(o, o.lines)}</small></button>`;
+    };
+    const oAmt = o ? stAmt(o, oth) : null;
+    const both = (curAmt || 0) + (oAmt || 0);
+    const sub = (k, v) => v == null ? LENS[k] + " not billed" : LENS[k] + " " + inr(v);
+    const sup = cur === "supply" ? curAmt : oAmt, ins = cur === "install" ? curAmt : oAmt;
+    return { tabs: `<div class="bl-stabs">${tab("supply")}${tab("install")}</div>`,
+             kpi: `<div class="bl-kpi view"><span>Service total, both stages</span><b>${inr(both)}</b><i>${sub("supply", sup)} · ${sub("install", ins)} · view only</i></div>` };
+  }
   async function showRA(id) {
     const s = section();
     B.view = "ra"; B.raId = id;
@@ -629,11 +742,11 @@
        <button class="btn" id="bl-dl" title="Invoice workbook, All services Excel — tick what you need">Download</button>
        ${!locked ? `<button class="btn" id="bl-impra" title="Filled the downloaded Excel? Bring it back here: the quantities you typed and the challans, in one go">Upload filled sheet</button>` : ""}
        ${locked ? `<button class="btn" id="bl-reopen">Reopen</button>`
-        : `<button class="btn danger" id="bl-del">Delete draft</button><button class="btn primary" id="bl-lock">Mark as invoiced</button>`}`) + `
+        : `<button class="btn danger" id="bl-del">Delete draft</button><button class="btn primary" id="bl-lock">Mark as invoiced</button>`}`) + stageTabs(ra, b).tabs + `
       <div class="bl-kpis">
         <div class="bl-kpi"><span>This bill</span><b>${inr(b.this_total)}</b><i>${stages.map((k) => STAGE[k] + " " + inr(b.totals[k].this)).join(" · ")}</i>${b.extra_total > 0 ? `<i class="bl-xi" id="bl-xsum">of which <span class="bl-xtag">Extra over BOQ ${inr(b.extra_total)}</span> · ${b.extra_lines.length} line${b.extra_lines.length === 1 ? "" : "s"}</i>` : ""}</div>
         <div class="bl-kpi"><span>Billed before</span><b>${inr(stages.reduce((a, k) => a + b.totals[k].prev, 0))}</b><i>from invoiced RAs</i></div>
-        <div class="bl-kpi"><span>Contract value (service)</span><b>${inr(b.contract_value)}</b><i>${stages.map((k) => STAGE[k] + " " + (b.pct[k] == null ? "—" : b.pct[k] + "%")).join(" · ")}</i></div>
+        <div class="bl-kpi"><span>Contract value (service)</span><b>${inr(b.contract_value)}</b><i>${stages.map((k) => STAGE[k] + " " + (b.pct[k] == null ? "—" : b.pct[k] + "%")).join(" · ")}</i></div>${stageTabs(ra, b).kpi}
       </div>
       <div class="bl-card pad bl-inv">
         <div class="bl-invh"><b>Tax invoice</b><span class="bl-chip ${(ra.inv_missing || []).length ? "draft" : "locked"}" id="bl-invchip">${(ra.inv_missing || []).length ? (ra.inv_missing || []).length + " blank" : "Complete"}</span>
@@ -668,6 +781,7 @@
         ${b.removed.map((r) => `<div class="rr"><span class="t">${esc(r.desc)} <small>${esc(r.unit || "")}</small></span><button class="btn" data-restore="${esc(r.item_code)}">Restore</button></div>`).join("")}</div>` : ""}`;
     wireProj();
     $("bl-back").onclick = showHome;
+    s.querySelectorAll("[data-stab]").forEach((el) => el.onclick = () => showRA(el.dataset.stab));
     if ($("bl-tochallans")) $("bl-tochallans").onclick = () => showChallans(ra.service);
     if ($("bl-toverall")) $("bl-toverall").onclick = () => showOverall(ra.base || unitBase(ra.service));
     $("bl-dl").onclick = async () => { if (B.invSaving) await B.invSaving(); openDownload([ra.id]); };

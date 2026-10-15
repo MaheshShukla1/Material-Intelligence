@@ -262,7 +262,7 @@ body[data-view="billing"] #report{display:none !important}
 .bl-live{color:var(--ink3);font-size:12.5px;display:inline-flex;align-items:center;gap:7px}
 .bl-live i{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 0 3px var(--greenbg)}
 .bl-svcl{overflow:visible}
-.bl-hr{display:grid;grid-template-columns:minmax(170px,1.7fr) minmax(150px,1.4fr) 128px 300px 34px;gap:12px;padding:10px 18px;align-items:center;min-height:58px;border-top:1px solid var(--line2)}
+.bl-hr{display:grid;grid-template-columns:minmax(170px,1.7fr) minmax(150px,1.4fr) 128px 300px 72px;gap:12px;padding:10px 18px;align-items:center;min-height:58px;border-top:1px solid var(--line2)}
 .bl-hr:first-child{border-top:0}
 .bl-hr .nm b{display:block;font-weight:600}
 .bl-hr .nm small{display:block;color:var(--ink3);font-size:12.5px}
@@ -282,7 +282,7 @@ body[data-view="billing"] #report{display:none !important}
 .bl-sg{display:inline-block;padding:2px 10px;border-radius:20px;font-size:11.5px;font-weight:600;background:#efeee9;color:var(--ink3);white-space:nowrap}
 .bl-sg.on{background:var(--violetbg);color:var(--violet)}
 @media(max-width:1000px) and (min-width:761px){
-  .bl-hr{grid-template-columns:minmax(150px,1.6fr) minmax(140px,1.3fr) 128px 34px;row-gap:4px}
+  .bl-hr{grid-template-columns:minmax(150px,1.6fr) minmax(140px,1.3fr) 128px 72px;row-gap:4px}
   .bl-hr .lks{grid-column:1/-1;grid-row:2}
 }
 
@@ -810,3 +810,57 @@ body[data-view="billing"] #report{display:none !important}
 
 /* Download dialog: notes about the supporting Measurement Sheet (what it can and cannot show) */
 .bl-wn.measinfo{background:#f6fbf1;border-color:#c4dcb2;color:#3b6d11}
+
+/* ---------------- Supply / Installation read apart: page lens, service sub-rows, draft tabs ---------------- */
+.bl-lensrow{display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin:0 0 14px}
+.bl-lens{display:inline-flex;background:#efeee9;border-radius:10px;padding:3px;gap:2px}
+.bl-lens button{font:inherit;font-size:13px;border:0;background:transparent;padding:7px 16px;border-radius:8px;color:var(--ink2);min-height:36px;cursor:pointer}
+.bl-lens button.on{background:var(--panel);color:var(--ink);font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.08)}
+.bl-lens button:focus-visible,.bl-chev:focus-visible,.bl-stab:focus-visible{outline:2px solid var(--violet);outline-offset:2px}
+.bl-lenshint{font-size:12.5px;color:var(--ink3)}
+.bl-tg{display:block;margin-top:2px}
+/* Not invoiced yet, cut into Supply and Installation */
+.bl-nibar{display:flex;height:6px;border-radius:3px;overflow:hidden;gap:2px;margin-top:10px;background:#ecd9a8}
+.bl-nibar s{display:block;height:6px;text-decoration:none}
+.bl-nibar .sp{background:var(--amber)}
+.bl-nibar .in{background:#d1a24a}
+.bl-nikey{display:flex;flex-wrap:wrap;gap:4px 14px;margin-top:6px;font-size:12px;color:var(--amber)}
+.bl-nikey u{text-decoration:none;display:inline-flex;align-items:center;gap:5px}
+.bl-nikey u:before{content:"";width:9px;height:9px;border-radius:2px;display:inline-block}
+.bl-nikey .a:before{background:var(--amber)}
+.bl-nikey .b:before{background:#d1a24a}
+/* a service opened into its Supply and Installation rows */
+.bl-hr .mn{display:flex;justify-content:flex-end;align-items:center;gap:2px}
+.bl-chev{font:inherit;font-size:12px;line-height:1;width:34px;height:34px;border-radius:8px;border:1px solid var(--line);background:var(--panel);color:var(--ink2);cursor:pointer;padding:0}
+.bl-chev.open{background:var(--ink);color:var(--panel);border-color:var(--ink)}
+.bl-stsub{background:var(--bg);border-top:1px solid var(--line2);padding:6px 18px 12px 54px}
+.bl-strow{display:grid;grid-template-columns:130px 150px 130px 130px 1fr;gap:12px;align-items:center;padding:7px 0;border-bottom:1px dashed var(--line)}
+.bl-strow small{color:var(--ink3)}
+.bl-strow .bl-link{padding:0;white-space:nowrap}
+.bl-sttot{display:flex;flex-wrap:wrap;justify-content:space-between;gap:8px;padding:10px 0 2px;font-size:13px}
+.bl-sttot span{color:var(--ink2)}
+.bl-sttot em{font-style:normal;color:var(--ink3);font-size:12px;margin-left:8px}
+/* Supply | Installation tabs inside a one-stage draft */
+.bl-stabs{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:16px}
+.bl-stab{flex:1 1 260px;text-align:left;font:inherit;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 16px;display:flex;flex-direction:column;gap:2px;min-height:64px;cursor:pointer}
+.bl-stab span{font-size:11.5px;text-transform:uppercase;letter-spacing:.4px;color:var(--ink3)}
+.bl-stab b{font-size:17px;font-variant-numeric:tabular-nums}
+.bl-stab small{color:var(--ink2);font-size:12.5px}
+.bl-stab.on{border:2px solid var(--ink);padding:11px 15px;cursor:default}
+.bl-stab.off{background:var(--bg);border-style:dashed;color:var(--ink3);cursor:default}
+.bl-stab.off b{color:var(--ink3);font-weight:500;font-size:14px}
+.bl-kpi.view{background:var(--violetbg);border-color:#d9d4f3}
+.bl-kpi.view span,.bl-kpi.view b,.bl-kpi.view i{color:var(--violet)}
+@media(max-width:760px){
+  .bl-lensrow{gap:8px;margin-bottom:12px}
+  .bl-lens{display:flex;width:100%}
+  .bl-lens button{flex:1 1 0;min-height:44px;padding:0 6px}
+  .bl-lenshint{display:none}
+  .bl-chev{width:44px;height:44px}
+  .bl-stsub{padding:4px 16px 12px}
+  .bl-strow{grid-template-columns:1fr auto;grid-template-areas:"a c" "b c" "d e";gap:4px 10px;padding:10px 0}
+  .bl-strow>:nth-child(1){grid-area:a}.bl-strow>:nth-child(2){grid-area:b}.bl-strow>:nth-child(3){grid-area:c;text-align:right}
+  .bl-strow>:nth-child(4){grid-area:d}.bl-strow>:nth-child(5){grid-area:e;text-align:right}
+  .bl-strow .bl-link{min-height:44px;display:inline-flex;align-items:center}
+  .bl-stab{flex-basis:100%}
+}

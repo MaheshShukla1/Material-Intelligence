@@ -864,3 +864,95 @@ body[data-view="billing"] #report{display:none !important}
   .bl-strow .bl-link{min-height:44px;display:inline-flex;align-items:center}
   .bl-stab{flex-basis:100%}
 }
+
+/* ---------------- Item history: search any BOQ line and read it across every RA (Challans page) ---------------- */
+.bl-ibslim{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:6px 14px;padding:11px 18px}
+.bl-ibslim .bl-ovh{margin-left:6px}
+.bl-chip.ihover{background:var(--redbg);color:var(--red)}
+.bl-ih{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.2fr);gap:18px;align-items:start;margin-bottom:4px}
+.bl-ih-find{padding:16px 18px;border-color:var(--violet);box-shadow:0 0 0 3px var(--violetbg)}
+.bl-ih-find label b{font-size:15px}
+.bl-ih-seg{display:flex;flex-wrap:wrap;gap:6px}
+.bl-ih-b{font:inherit;font-weight:600;font-size:13px;min-height:34px;padding:0 13px;border-radius:8px;border:1px solid var(--line);background:var(--panel);color:var(--ink2);cursor:pointer}
+.bl-ih-b.on{background:var(--ink);border-color:var(--ink);color:#fff}
+.bl-ih-more{padding:9px 18px;border-top:1px solid var(--line);font-size:13px}
+.bl-ih-more .bl-link{padding:0}
+.bl-ih-find p{margin:2px 0 10px;font-size:12.5px;color:var(--ink3)}
+.bl-ih-find #bl-ihq{width:100%;min-height:46px;font-size:15px}
+.bl-ih-tools{display:flex;flex-wrap:wrap;gap:10px;margin-top:12px;align-items:center}
+.bl-ih-chips{display:flex;flex-wrap:wrap;gap:6px}
+.bl-ih-res{overflow:hidden}
+.bl-ih-rh{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:6px 10px;padding:11px 18px}
+.bl-ih-row{display:flex;width:100%;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:8px 12px;padding:11px 18px;min-height:44px;text-align:left;font:inherit;color:inherit;background:var(--panel);border:0;border-top:1px solid var(--line2);cursor:pointer}
+.bl-ih-row:hover{background:var(--bg)}
+.bl-ih-row.on{background:#f3f1fb}
+.bl-ih-row .m{flex:1 1 220px;min-width:0}
+.bl-ih-row .m small{display:block;color:var(--ink3);font-size:11.5px}
+.bl-ih-row .m b{display:block;font-weight:500}
+.bl-ih-row .c{display:flex;flex-wrap:wrap;gap:6px;justify-content:flex-end}
+.bl-ih-card{padding:18px 18px 8px;min-width:0}
+.bl-ih-l,.bl-ih-r{min-width:0}
+.bl-ih-back{display:none}
+.bl-ih-hd{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
+.bl-ih-hd small{color:var(--ink3);font-size:12px}
+.bl-ih-hd h3{margin:2px 0 0;font-size:17px;font-weight:600;line-height:1.35}
+.bl-ih-hd .acts{display:flex;gap:8px;flex:none}
+.bl-ih-ans{margin:14px 0 12px;display:grid;gap:4px}
+.bl-ih-ans .ln{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 8px}
+.bl-ih-ans .k{min-width:88px;color:var(--ink3);font-size:12.5px}
+.bl-ih-ans b{font-size:18px;font-weight:600;font-variant-numeric:tabular-nums}
+.bl-ih-ans .tot{margin:2px 0 0;font-size:14px;color:var(--ink2)}
+.bl-ih-ans .tot b{font-size:15px}
+.bl-ih-ans em{font-style:normal;font-weight:600;color:var(--red)}
+.bl-ih-ans i.dr{font-style:normal;font-size:11.5px;color:var(--amber)}
+.bl-ih-ans .sep{color:var(--ink3)}
+.bl-ih-bar{position:relative;height:16px;background:#efeee9;border-radius:6px;overflow:hidden;display:flex;gap:2px;margin-top:4px}
+.bl-ih-bar .seg{height:100%}
+.bl-ih-bar .seg.a,.bl-ih-leg .sw.a{background:var(--violet)}
+.bl-ih-bar .seg.b,.bl-ih-leg .sw.b{background:#8a7fd6}
+.bl-ih-bar .seg.c,.bl-ih-leg .sw.c{background:#b9b2ea}
+.bl-ih-bar .xs{position:absolute;top:0;bottom:0;background:repeating-linear-gradient(135deg,rgba(160,38,34,.85) 0 3px,rgba(160,38,34,.25) 3px 6px)}
+.bl-ih-bar .boq{position:absolute;top:0;bottom:0;width:2px;background:var(--ink)}
+.bl-ih-leg{display:flex;flex-wrap:wrap;gap:4px 14px;margin-top:6px;font-size:12px;color:var(--ink3)}
+.bl-ih-leg .sw{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px}
+.bl-ih-leg .sw.boqm{width:2px;height:11px;background:var(--ink);vertical-align:-1px}
+.bl-ih-leg .sw.xs{background:repeating-linear-gradient(135deg,var(--red) 0 2px,#e6b8b6 2px 4px)}
+.bl-ih-leg .ov{color:var(--red)}
+.bl-ih-x{display:flex;flex-wrap:wrap;align-items:center;gap:8px;background:var(--amberbg);color:#5a3704;border-radius:8px;padding:10px 12px;margin:14px 0 4px;font-size:13.5px}
+.bl-ih-x .btn{min-height:34px}
+.bl-ih-card h4{margin:18px 0 6px;font-size:11.5px;font-weight:600;color:var(--ink3);text-transform:uppercase;letter-spacing:.4px}
+.bl-ih-led{--c:2;overflow-x:auto}
+.bl-ih-led.amt{--c:3}
+.bl-ih-lh,.bl-ih-lr{display:grid;grid-template-columns:minmax(150px,1.5fr) repeat(var(--c),minmax(78px,1fr)) 64px;gap:8px;align-items:center;min-width:430px}
+.bl-ih-lh{padding:6px 0;border-bottom:1px solid var(--line);font-size:11.5px;color:var(--ink3)}
+.bl-ih-lr{padding:11px 0;border-bottom:1px solid var(--line2);font-size:13.5px}
+.bl-ih-lr .n,.bl-ih-lh .n{text-align:right;font-variant-numeric:tabular-nums}
+.bl-ih-lr small{display:block;color:var(--ink3);font-size:11.5px}
+.bl-ih-lr .go{text-align:right}
+.bl-ih-lr .go .bl-link{padding:0}
+.bl-ih-grp{margin:0 0 6px}
+.bl-ih-grp summary{cursor:pointer;padding:8px 0;font-size:13.5px;font-weight:600;min-height:32px}
+.bl-ih-grp summary small{color:var(--ink3);font-weight:400}
+.bl-ih-ch{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:4px 10px;margin-left:8px;padding:4px 6px 4px 12px;border-left:2px solid var(--line);font-size:13.5px}
+.bl-ih-ch .bl-link{padding:0}
+.bl-ih-ch small{color:var(--ink3)}
+.bl-ih-empty{display:flex;flex-direction:column;gap:4px;padding:40px 24px;text-align:center;border-style:dashed;color:var(--ink2)}
+.bl-ih-empty b{color:var(--ink)}
+.bl-ih-flash{background:#f3f1fb !important}
+@media(max-width:900px){
+  .bl-ih{grid-template-columns:minmax(0,1fr)}
+  .bl-ih.has-sel .bl-ih-l{display:none}
+  .bl-ih:not(.has-sel) .bl-ih-r{display:none}
+  .bl-ih-back{display:inline-flex;margin-bottom:12px;min-height:44px;align-items:center}
+}
+@media(max-width:760px){
+  .bl-ih-find #bl-ihq{font-size:16px;min-height:48px}
+  .bl-ih .bl-ih-b,.bl-ih .btn{min-height:44px}
+  .bl-ih-row{padding-left:14px;padding-right:14px}
+  .bl-ih-hd{flex-direction:column}
+  .bl-ih-hd .acts{width:100%}
+  .bl-ih-hd .acts .btn{flex:1}
+  .bl-ih-grp summary{min-height:44px;display:flex;align-items:center}
+  .bl-ih-ch .bl-link{min-height:44px;display:inline-flex;align-items:center}
+  .bl-ih-lr .go .bl-link{min-height:44px}
+}

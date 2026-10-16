@@ -1624,7 +1624,7 @@
     try { j = await jget(api("/" + B.slug + "/challans/" + encodeURIComponent(service))); }
     catch (e) { toast(briefErr(e)); return showHome(); }
     B.ch = j;
-    if (IB.unit !== service) Object.assign(IB, { unit: service, q: "", scope: "this", tab: "waiting", earlier: false, sel: new Set(), pick: {}, nos: {} });
+    if (IB.unit !== service) Object.assign(IB, { unit: service, q: "", scope: "this", tab: "waiting", earlier: false, sel: new Set(), pick: {}, nos: {}, open: false });
     IB.data = null;
     if (j.source === "challan") {
       try { IB.data = await jget(api("/" + B.slug + "/stock-inbox/" + encodeURIComponent(service) + (IB.earlier ? "?earlier=1" : ""))); } catch (e) { IB.data = null; }
@@ -1667,8 +1667,9 @@
         <div class="bl-kpi ${by((c) => c.state === "held").length ? "warn" : ""}"><span>On hold</span><b>${by((c) => c.state === "held").length}</b><i>not in any RA</i></div>
       </div>
       ${j.source !== "challan" ? `<div class="bl-callout">This service takes its supply quantity from the stock register. Choose “Delivery challans” in Billing setup to bill from challans.</div>` : ""}
+      <div id="bl-ih"></div>
       <div id="bl-ib"></div>
-      ${j.over.length ? `<div class="bl-notes">${j.over.map((o) => `<div class="bl-note over"><b>Check</b>${esc(o.desc.slice(0, 90))}: challans total ${qn(o.challan)} ${esc(o.unit)}, BOQ qty is ${qn(o.boq_qty)}. The bill takes the BOQ qty; accept the extra inside the RA.</div>`).join("")}</div>` : ""}
+      ${j.over.length ? `<div class="bl-notes">${j.over.map((o) => `<div class="bl-note over"><b>Check</b>${esc(o.desc.slice(0, 90))}: challans total ${qn(o.challan)} ${esc(o.unit)}, BOQ qty is ${qn(o.boq_qty)}. The bill takes the BOQ qty; accept the extra inside the RA. <button class="bl-link" data-ihopen="${esc(o.item_code)}">See its history →</button></div>`).join("")}</div>` : ""}
       ${j.challans.length ? groupsDef.filter((g) => g.list.length).map((g) => `
         <h3 class="bl-h3">${esc(g.title)} <small>${esc(g.sub)}</small></h3>
         <div class="bl-card"><div class="bl-chs">${g.list.map(row).join("")}</div></div>`).join("")
@@ -1690,12 +1691,14 @@
           else if (r.left < 8) menu.style.marginLeft = (8 - r.left) + "px";
         }
       };
-      $("bl-chfrom").onclick = () => { menu.hidden = true; IB.tab = "waiting"; IB.scope = "this"; drawInbox(); const q = $("bl-ibq"); if (q) { q.scrollIntoView({ block: "center" }); q.focus(); } };
+      $("bl-chfrom").onclick = () => { menu.hidden = true; IB.tab = "waiting"; IB.scope = "this"; IB.open = true; drawInbox(); const q = $("bl-ibq"); if (q) { q.scrollIntoView({ block: "center" }); q.focus(); } };
       $("bl-chtype").onclick = () => { menu.hidden = true; editChallan(null); };
       if (!B.menuClose) { B.menuClose = true; document.addEventListener("click", () => { const m = $("bl-chmenu"); if (m) m.hidden = true; }); }
       drawInbox();
     } else $("bl-chadd").onclick = () => editChallan(null);
     $("bl-chimp").onclick = () => uploadFilled();
+    s.querySelectorAll("[data-ihopen]").forEach((el) => el.onclick = (e) => { e.stopPropagation(); ihOpen(service, el.dataset.ihopen); });
+    ihInit(service);
     s.querySelectorAll("[data-resync]").forEach((el) => el.onclick = async () => {
       try { await jsend(api("/" + B.slug + "/challans/" + encodeURIComponent(service) + "/" + el.dataset.resync + "/resync")); toast("Quantity taken from the stock register."); showChallans(service); }
       catch (e) { toast(briefErr(e)); }
@@ -1736,11 +1739,197 @@
     });
   }
 
+  // ------------------------------------------------------------- item history
+  // Search any BOQ line of this service (or of every service) and read it across all its RAs: the quantity each RA took, the running
+  // total against the BOQ, and the challans behind it. Read-only. The RA rows are the same numbers the RA screens show (server:
+  // /item-history/<unit>), so this card can never disagree with a bill. Unknown stays "—"; nothing is worked out here.
+  const IH = { svc: null, data: {}, q: "", scope: "this", chip: "all", sel: null, all: false, amt: false };
+  try { IH.amt = localStorage.getItem("bl-ih-amt") === "1"; } catch (e) { /* private window: the toggle just starts off */ }
+  const ihKey = (u, code) => u + "\u0001" + code;
+  const ihUnits = () => { const l = ((B.ov && B.ov.services) || []).map((x) => x.service); return l.length ? l : [IH.svc]; };
+  const ihSum = (a, f) => a.reduce((t, x) => t + (Number(f(x)) || 0), 0);
+  const ihCut = (t, n) => { t = String(t || ""); return t.length > n ? t.slice(0, n - 1).trim() + "…" : t; };
+  async function ihLoad(units) {
+    await Promise.all(units.filter((u) => !IH.data[u]).map(async (u) => {
+      try { IH.data[u] = await jget(api("/" + B.slug + "/item-history/" + encodeURIComponent(u))); }
+      catch (e) { IH.data[u] = { lines: [], ras: [], failed: true }; }
+    }));
+  }
+  function ihView(u, l) {
+    const rows = Array.isArray(l.rows) ? l.rows : [], chs = Array.isArray(l.challans) ? l.challans : [];
+    const sup = rows.filter((r) => r.stage === "supply"), ins = rows.filter((r) => r.stage === "install");
+    const sBilled = ihSum(sup, (r) => r.qty), chTotal = ihSum(chs, (c) => c.qty);
+    return { svc: u, key: ihKey(u, l.item_code), l, rows, chs, sup, ins, sBilled, iBilled: ihSum(ins, (r) => r.qty), chTotal,
+      over: Math.max(0, Math.max(sBilled, chTotal) - (Number(l.boq_qty) || 0)), billed: rows.length > 0, draft: rows.some((r) => r.status === "draft") };
+  }
+  function ihItems(all) {
+    const out = [];
+    (all ? Object.keys(IH.data) : IH.scope === "all" ? ihUnits() : [IH.svc]).forEach((u) => {
+      const d = IH.data[u]; if (d && Array.isArray(d.lines)) d.lines.forEach((l) => out.push(ihView(u, l)));
+    });
+    return out;
+  }
+  const ihChipOk = (i, c) => c === "billed" ? i.billed : c === "over" ? i.over > 1e-9 : c === "draft" ? i.draft : c === "unbilled" ? !i.billed : true;
+  function ihPool() {
+    const words = IH.q.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    const items = ihItems();
+    if (!words.length) return items.filter((i) => i.rows.length || i.chs.length);          // nothing typed: what has moved, not the whole BOQ
+    return items.filter((i) => {
+      const hay = [i.l.item_code, i.l.internal_ref, i.l.desc, i.l.section, ...i.chs.map((c) => c.no), IH.scope === "all" ? i.svc : ""].join(" ").toLowerCase();
+      return words.every((w) => hay.includes(w));
+    });
+  }
+  const ihSvcName = (u) => String(u).replace(WOSEP, " › ");
+  function ihShell() {
+    const host = $("bl-ih"); if (!host) return;
+    host.innerHTML = `<div class="bl-ih ${IH.sel ? "has-sel" : ""}" id="bl-ihroot">
+      <div class="bl-ih-l">
+        <div class="bl-card bl-ih-find">
+          <label for="bl-ihq"><b>Find any BOQ item</b></label>
+          <p>Type the line, its Ref no. or a challan no. Every RA it went into, and its challans, open next to it.</p>
+          <input id="bl-ihq" class="ctl" type="search" value="${esc(IH.q)}" placeholder="e.g. 15 mm, 2.01.b.2, 1355" autocomplete="off" aria-label="Find a BOQ item">
+          <div class="bl-ih-tools">
+            <div class="bl-ih-seg" role="group" aria-label="Where to search"><button class="bl-ih-b" data-ihscope="this">This service</button><button class="bl-ih-b" data-ihscope="all">All services</button></div>
+            <div class="bl-ih-chips" id="bl-ihchips" role="group" aria-label="Show"></div>
+          </div>
+        </div>
+        <div class="bl-card bl-ih-res" id="bl-ihres"><div class="bl-none sm">Loading…</div></div>
+      </div>
+      <div class="bl-ih-r" id="bl-ihcard"></div></div>`;
+    $("bl-ihq").oninput = () => { IH.q = $("bl-ihq").value; IH.all = false; drawIHRes(); };
+    host.querySelectorAll("[data-ihscope]").forEach((el) => {
+      el.classList.toggle("on", el.dataset.ihscope === IH.scope);
+      el.onclick = async () => {
+        IH.scope = el.dataset.ihscope; IH.all = false;
+        host.querySelectorAll("[data-ihscope]").forEach((x) => x.classList.toggle("on", x.dataset.ihscope === IH.scope));
+        if (IH.scope === "all") { $("bl-ihres").innerHTML = `<div class="bl-none sm">Loading…</div>`; await ihLoad(ihUnits()); }
+        if ($("bl-ihroot")) drawIHRes();
+      };
+    });
+  }
+  function drawIHRes() {
+    const host = $("bl-ihres"); if (!host) return;
+    const pool = ihPool(), words = IH.q.trim();
+    const defs = [["all", "All"], ["billed", "Billed"], ["over", "Above BOQ"], ["draft", "In open draft"], ["unbilled", "Not billed yet"]];
+    $("bl-ihchips").innerHTML = defs.map((d) => `<button class="bl-ih-b ${IH.chip === d[0] ? "on" : ""}" data-ihchip="${d[0]}" aria-pressed="${IH.chip === d[0]}">${d[1]} · ${pool.filter((i) => ihChipOk(i, d[0])).length}</button>`).join("");
+    $("bl-ihchips").querySelectorAll("[data-ihchip]").forEach((el) => el.onclick = () => { IH.chip = el.dataset.ihchip; IH.all = false; drawIHRes(); });
+    const list = pool.filter((i) => ihChipOk(i, IH.chip)).sort((a, b) => (b.billed ? 1 : 0) - (a.billed ? 1 : 0));
+    const failed = IH.scope === "this" && IH.data[IH.svc] && IH.data[IH.svc].failed;
+    const shown = IH.all ? list : list.slice(0, 8);
+    IH.shown = shown;
+    const row = (i, n) => {
+      const nos = [...new Set(i.rows.map((r) => r.no))];
+      const chips = nos.map((no) => `<span class="bl-chip ${i.rows.some((r) => r.no === no && r.status === "draft") ? "draft" : "locked"}">${raL(no)}</span>`).join("")
+        + (i.over > 1e-9 ? `<span class="bl-chip ihover">Above BOQ</span>` : "") + (!i.billed ? `<span class="bl-chip none">Not billed yet</span>` : "");
+      return `<button class="bl-ih-row ${i.key === IH.sel ? "on" : ""}" data-ihpick="${n}" aria-pressed="${i.key === IH.sel}">
+        <span class="m"><small>${esc(i.l.item_code)}${i.l.internal_ref ? " · ref " + esc(i.l.internal_ref) : ""}${IH.scope === "all" ? " · " + esc(ihSvcName(i.svc)) : ""}${i.l.section ? " · " + esc(ihCut(i.l.section, 40)) : ""}</small><b>${esc(ihCut(i.l.desc, 110))}</b></span>
+        <span class="c">${chips}</span></button>`;
+    };
+    host.innerHTML = `<div class="bl-ih-rh"><b>${words ? list.length + " match" + (list.length === 1 ? "" : "es") : "Lines billed or delivered"}</b> <span class="bl-ovh">${words ? "for “" + esc(words) + "”" : list.length + " lines"}</span></div>`
+      + (failed ? `<div class="bl-none sm">The item history could not be loaded. Reload the page and try again.</div>`
+        : list.length ? shown.map(row).join("") : `<div class="bl-none sm">${words ? "Nothing matches. Try a shorter word, or search All services." : "No line of this service has an RA or a challan yet."}</div>`)
+      + (list.length > 8 ? `<div class="bl-ih-more"><button class="bl-link" id="bl-ihmore">${IH.all ? "Show fewer" : "Show all " + list.length}</button></div>` : "");
+    host.querySelectorAll("[data-ihpick]").forEach((el) => el.onclick = () => { const i = IH.shown[+el.dataset.ihpick]; if (i) ihSelect(i.key); });
+    if ($("bl-ihmore")) $("bl-ihmore").onclick = () => { IH.all = !IH.all; drawIHRes(); };
+  }
+  function ihFind(key) { return ihItems(true).find((i) => i.key === key) || null; }
+  function ihSelect(key) {
+    IH.sel = key;
+    const r = $("bl-ihroot"); if (r) r.classList.toggle("has-sel", !!key);
+    drawIHRes(); drawIHCard();
+    const c = $("bl-ihcard"); if (c && key && c.scrollIntoView) c.scrollIntoView({ block: "nearest" });
+  }
+  const ihBar = (i) => {
+    const boq = Number(i.l.boq_qty) || 0, mx = Math.max(boq, i.sBilled, i.chTotal) || 1, pc = (v) => (Math.max(0, v) / mx * 100) + "%";
+    const tone = ["a", "b", "c"];
+    return `<div class="bl-ih-bar" role="img" aria-label="Supply billed ${qn(i.sBilled)} of BOQ ${qn(boq)} ${esc(i.l.unit)}">
+        ${i.sup.map((r, k) => `<div class="seg ${tone[k % 3]}" style="width:${pc(r.qty)}"></div>`).join("")}
+        ${i.sBilled > boq + 1e-9 ? `<div class="xs" style="left:${pc(boq)};width:${pc(i.sBilled - boq)}"></div>` : ""}
+        <div class="boq" style="left:${pc(boq)}"></div></div>
+      <div class="bl-ih-leg">${i.sup.map((r, k) => `<span><i class="sw ${tone[k % 3]}"></i>${raL(r.no)} ${qn(r.qty)}</span>`).join("")}<span><i class="sw boqm"></i>BOQ ${qn(boq)}</span>
+        ${i.sBilled > boq + 1e-9 ? `<span class="ov"><i class="sw xs"></i>above BOQ ${qn(i.sBilled - boq)}</span>` : ""}</div>`;
+  };
+  function ihCard(i) {
+    const l = i.l, u = esc(l.unit), boq = Number(l.boq_qty) || 0;
+    const part = (r) => `${raL(r.no)}${r.status === "draft" ? ` <i class="dr">draft</i>` : ""} <b>${qn(r.qty)}</b>`;
+    const supLine = i.sup.length ? i.sup.map(part).join(` <span class="sep">·</span> `) : (i.chTotal > 0 ? `Challans received ${qn(i.chTotal)} ${u}, not in any RA yet` : "Not in any RA yet");
+    const total = i.sup.length ? `Total <b>${qn(i.sBilled)}</b> of BOQ ${qn(boq)} ${u}${i.over > 1e-9 ? ` · <em>${qn(i.over)} above the BOQ</em>` : ` · ${qn(boq - i.sBilled)} left`}` : `BOQ ${qn(boq)} ${u}`;
+    const insLine = i.ins.length ? `<div class="ln"><span class="k">Installation</span> ${i.ins.map(part).join(` <span class="sep">·</span> `)}</div>` : "";
+    const done = Number(l.done) > 0 ? `<div class="ln"><span class="k">Work done</span> <b>${qn(l.done)}</b> ${u} <span class="bl-ovh">(Site Progress)</span></div>` : "";
+    const mism = i.chTotal > 0 && i.sup.length && Math.abs(i.chTotal - i.sBilled) > 1e-6 ? `<div class="bl-ovh">Challans received ${qn(i.chTotal)} ${u} · billed ${qn(i.sBilled)} ${u}</div>` : "";
+    const xr = i.sup.filter((r) => r.extra > 0);
+    const xnote = xr.length ? `<div class="bl-ih-x"><b>Extra over BOQ.</b> ${xr.map((r) => `${raL(r.no)} (${r.status === "draft" ? "draft" : "invoiced"}) bills ${qn(r.extra)} ${u} above the BOQ${IH.amt && r.extra_amount != null ? " = " + inr(r.extra_amount) : ""}.`).join(" ")}
+        ${xr.filter((r) => r.status === "draft").map((r) => `<button class="btn" data-ihra="${esc(r.ra_id)}">Open ${raL(r.no)} draft →</button>`).join("")}</div>` : "";
+    const lr = (r, first) => `<div class="bl-ih-lr">
+        <span class="ra">${first ? `<b>${raL(r.no)}</b> <span class="bl-chip ${r.status === "draft" ? "draft" : "locked"}">${r.status === "draft" ? "Draft" : "Invoiced"}</span>` : ""}<small>${STAGE[r.stage]}${r.series === "together" ? " · billed together" : ""}${r.pct != null ? " · " + r.pct + "%" : ""}</small></span>
+        <span class="n"><b>${qn(r.qty)}</b></span><span class="n">${qn(r.to_date)}</span>${IH.amt ? `<span class="n">${inr(r.amount)}</span>` : ""}
+        <span class="go">${first ? `<button class="bl-link" data-ihra="${esc(r.ra_id)}" data-code="${esc(l.item_code)}">${r.status === "draft" ? "Open" : "View"} →</button>` : ""}</span></div>`;
+    const seen = new Set();
+    const ledger = i.rows.map((r) => { const first = !seen.has(r.no); seen.add(r.no); return lr(r, first); }).join("");
+    const groups = [];
+    i.chs.forEach((c) => { const k = c.ra == null ? "hold" : c.ra; let g = groups.find((x) => x.k === k); if (!g) groups.push(g = { k, list: [] }); g.list.push(c); });
+    groups.sort((a, b) => (a.k === "hold" ? 1 : b.k === "hold" ? -1 : a.k - b.k));
+    const chRows = (g) => g.list.map((c) => `<div class="bl-ih-ch"><span><button class="bl-link" data-ihch="${esc(c.id)}">${c.virtual ? esc(c.no) : "Challan " + esc(c.no)}</button><small> · ${esc(fDate(c.date))}${c.no_missing ? " · no. missing" : ""}${c.virtual ? " · from wire metres" : ""}</small></span><b>${qn(c.qty)} ${u}</b></div>`).join("");
+    const chBlock = groups.length ? groups.map((g) => `<details class="bl-ih-grp" ${g.list.length <= 4 ? "open" : ""}><summary>${g.k === "hold" ? "On hold (not in any RA)" : "Challans in " + raL(g.k)}<small> · ${g.list.length} · ${qn(ihSum(g.list, (c) => c.qty))} ${u}</small></summary>${chRows(g)}</details>`).join("")
+      : `<div class="bl-ovh">No challan for this line.</div>`;
+    return `<div class="bl-card bl-ih-card">
+      <button class="btn bl-ih-back" data-ihback="1">← Back to search</button>
+      <div class="bl-ih-hd"><div><small>${esc(l.item_code)}${l.internal_ref ? " · ref " + esc(l.internal_ref) : ""} · ${esc(ihSvcName(i.svc))}${l.section ? " · " + esc(l.section) : ""}</small><h3>${esc(l.desc)}</h3></div>
+        <div class="acts"><button class="btn" data-ihamt="1" aria-pressed="${IH.amt}">${IH.amt ? "Hide ₹" : "Show ₹"}</button><button class="btn" data-ihclose="1" aria-label="Close this item">Close</button></div></div>
+      <div class="bl-ih-ans"><div class="ln"><span class="k">Supply</span> ${supLine}</div><div class="tot">${total}</div>${insLine}${done}${mism}</div>
+      ${i.sup.length ? ihBar(i) : ""}${xnote}
+      <h4>RA-wise</h4>
+      ${i.rows.length ? `<div class="bl-ih-led ${IH.amt ? "amt" : ""}"><div class="bl-ih-lh"><span>RA</span><span class="n">This bill</span><span class="n">Up to date</span>${IH.amt ? `<span class="n">Amount</span>` : ""}<span></span></div>${ledger}</div>` : `<div class="bl-ovh">No RA has this line yet.</div>`}
+      <h4>Challans</h4>${chBlock}</div>`;
+  }
+  function drawIHCard() {
+    const host = $("bl-ihcard"); if (!host) return;
+    const i = IH.sel ? ihFind(IH.sel) : null;
+    if (IH.sel && !i) IH.sel = null;
+    if (!i) { host.innerHTML = `<div class="bl-card bl-ih-empty"><b>Pick an item to see its history</b><span>Every RA it went into, the quantity in each, and the challans behind them.</span></div>`; return; }
+    host.innerHTML = ihCard(i);
+    host.querySelector("[data-ihback]").onclick = () => ihSelect(null);
+    host.querySelector("[data-ihclose]").onclick = () => ihSelect(null);
+    host.querySelector("[data-ihamt]").onclick = () => { IH.amt = !IH.amt; try { localStorage.setItem("bl-ih-amt", IH.amt ? "1" : "0"); } catch (e) {} drawIHCard(); };
+    host.querySelectorAll("[data-ihra]").forEach((el) => el.onclick = () => ihGoRA(el.dataset.ihra, el.dataset.code || i.l.item_code));
+    host.querySelectorAll("[data-ihch]").forEach((el) => el.onclick = () => ihGoChallan(el.dataset.ihch));
+  }
+  async function ihGoRA(raId, code) {
+    B.expanded.add(code);                                  // the line opens by itself in the RA, as if you had tapped it
+    await showRA(raId);
+    const row = [...document.querySelectorAll("#billing .bl-lr")].find((x) => x.dataset.code === code);
+    if (row) { row.classList.add("open", "bl-ih-flash"); if (row.scrollIntoView) row.scrollIntoView({ block: "center" }); }
+  }
+  function ihGoChallan(id) {
+    const row = [...document.querySelectorAll("#billing .bl-ch")].find((x) => x.dataset.id === id);
+    if (!row) return toast("That challan is worked out from wire metres. It has no row in the list below.");
+    B.expanded.add("c" + id); row.classList.add("ex", "bl-ih-flash");
+    if (row.scrollIntoView) row.scrollIntoView({ block: "center" });
+    setTimeout(() => row.classList.remove("bl-ih-flash"), 2600);
+  }
+  async function ihOpen(service, code) {                   // from a "Check" note: straight to that line's history
+    if (IH.svc !== service) Object.assign(IH, { svc: service, q: "", scope: "this", chip: "all", all: false });
+    IH.q = ""; IH.scope = "this"; IH.chip = "all"; IH.all = false; IH.sel = ihKey(service, code);
+    await ihLoad([service]);
+    if (!$("bl-ihroot")) return;
+    ihShell(); drawIHRes(); drawIHCard();
+    const r = $("bl-ihroot"); if (r && r.scrollIntoView) r.scrollIntoView({ block: "start" });
+  }
+  async function ihInit(service) {
+    if (IH.svc !== service) Object.assign(IH, { svc: service, q: "", scope: "this", chip: "all", sel: null, all: false });
+    IH.data = {};
+    ihShell();
+    drawIHCard();
+    await ihLoad(IH.scope === "all" ? ihUnits() : [service]);
+    if (B.view !== "challans" || B.svc !== service || !$("bl-ihroot")) return;      // the person moved on while it loaded
+    drawIHRes(); drawIHCard();
+  }
+
   // ------------------------------------------- challans straight from the stock register
   // Material reaches site and is entered in the stock register, so a delivery challan is made from that, not retyped.
   // The register's dated IN rows are an inbox (server: /stock-inbox/<unit>). Nothing is added until the engineer adds
   // it to an RA; an added delivery is a frozen copy that locks with its RA like any typed challan.
-  const IB = { unit: null, q: "", scope: "this", tab: "waiting", earlier: false, sel: new Set(), pick: {}, nos: {}, data: null };
+  const IB = { unit: null, q: "", scope: "this", tab: "waiting", earlier: false, sel: new Set(), pick: {}, nos: {}, data: null, open: false };
   const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   const fDate = (iso) => { const m = /^(\d{4})-(\d\d)-(\d\d)$/.exec(iso || ""); return m ? `${m[3]} ${MON[+m[2] - 1]} ${m[1].slice(2)}` : (iso || ""); };
   const ibApi = (p) => api("/" + B.slug + "/stock-inbox/" + encodeURIComponent(B.svc) + p);
@@ -1797,6 +1986,13 @@
   function drawInbox() {
     const d = IB.data, host = $("bl-ib"); if (!host || !d || d.ready !== true || !d.counts) return;
     const c = d.counts, open = d.open_no;
+    if (c.waiting === 0 && c.held === 0 && IB.tab === "waiting" && !IB.q.trim() && !IB.open) {       // nothing to act on: one line, not a card
+      host.innerHTML = `<div class="bl-card bl-ibslim"><span><b>Stock register</b> <span class="bl-chip stock">0 waiting</span>
+        <small class="bl-ovh">Nothing new for ${esc(d.service_label)}${d.since ? " after " + esc(fDate(d.since)) : ""}${d.last_in ? ". Last stock IN: " + esc(fDate(d.last_in)) : ""}.</small></span>
+        <button class="bl-link" id="bl-ibopen" aria-expanded="false">Details</button></div>`;
+      $("bl-ibopen").onclick = () => { IB.open = true; drawInbox(); };
+      return;
+    }
     const units = ((B.ov && B.ov.services) || []).filter((x) => x.supply_source === "challan");
     host.innerHTML = `<div class="bl-card bl-ibcard">
       <div class="bl-ibhd"><div><b>New in stock register</b> <span class="bl-chip stock">${c.waiting} waiting</span>

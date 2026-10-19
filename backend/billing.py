@@ -1574,6 +1574,56 @@ def service_lines(slug: str, service: str):
                       for ln in _lines(d, service)]}
 
 
+# ------------------------------------------------------- item history
+# One BOQ line read across every RA of its service: what each RA took (this bill, to date, amount, extra over the
+# BOQ), the challans behind it, and the work done in Site Progress. Read-only: the RA rows come from the same bills
+# the RA screens show (a locked RA from its snapshot), so this page can never disagree with an invoice.
+def _item_history(slug, d, store, service):
+    lines = _lines(d, service)
+    groups, _ = _groups_for(d, store, service, lines)
+    ras = sorted([r for r in store["ras"] if r["service"] == service], key=lambda r: (r["no"], r["series"]))
+    last = _last_locked_no(store, service)
+    inst = _install_qty(d, service)
+    rows_by = {}
+    for r in ras:
+        b = _get_bill(slug, d, store, r)
+        for row in b["lines"]:
+            for stage in STAGES[r["series"]]:
+                c = row.get(stage) or {}
+                if not c.get("this"):                    # nothing taken by this RA for this stage (or not known)
+                    continue
+                rows_by.setdefault(row["item_code"], []).append({
+                    "ra_id": r["id"], "no": r["no"], "series": r["series"], "status": r["status"], "stage": stage,
+                    "pct": c.get("pct"), "qty": c["this"], "prev": c.get("prev") or 0.0,
+                    "to_date": round((c.get("prev") or 0.0) + c["this"], 4), "amount": c.get("amount"),
+                    "extra": c.get("extra") or 0.0, "extra_amount": c.get("extra_amount"),
+                    "accepted": bool(c.get("accepted"))})
+    ch_by = {}
+    for c in sorted(_challans(store, service), key=lambda c: (c["date"], str(c["no"]))):
+        ra = c.get("ra")
+        state = "held" if ra is None else ("locked" if ra <= last else ("open" if ra == last + 1 else "later"))
+        for code, q in c["qty"].items():
+            ch_by.setdefault(code, []).append({"id": c["id"], "no": c["no"], "date": c["date"], "ra": ra, "state": state,
+                                               "qty": q, "virtual": bool(c.get("virtual")),
+                                               "no_missing": bool(c.get("no_missing"))})
+    out = []
+    for ln in lines:
+        gi = _group_of(groups, ln)
+        out.append({"item_code": ln["item_code"], "desc": ln["desc"], "unit": ln["unit"], "boq_qty": ln["boq_qty"],
+                    "rate": ln["rate"], "internal_ref": ln["internal_ref"],
+                    "section": groups[gi]["name"] if gi is not None else "",
+                    "done": inst.get(ln["item_code"]),
+                    "rows": rows_by.get(ln["item_code"], []), "challans": ch_by.get(ln["item_code"], [])})
+    return {"service": service, "ras": [_ra_summary(r) for r in ras], "lines": out}
+
+
+@router.get("/{slug}/item-history/{service}")
+def item_history(slug: str, service: str):
+    d = sp._need(slug)
+    _svc_check(d, service)
+    return _item_history(slug, d, _load(d), service)
+
+
 # ------------------------------------------------------- overall annexure
 # One service, every Work Order, outside any single RA: what each annexure group is worth, what is already
 # invoiced, what still sits in an open draft. Nothing is typed here -- it only adds up the RAs.

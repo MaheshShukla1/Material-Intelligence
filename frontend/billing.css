@@ -423,6 +423,30 @@ body[data-view="billing"] #report{display:none !important}
 .bl-ovtot .inv{color:#9fe0ae}
 .bl-ovtot .drf{color:#f3cf7a}
 .bl-ovnote{font-size:12.5px;color:var(--ink3);max-width:760px}
+/* overall annexure: Supply / Installation said once in the cards, opened per group, one chip per open draft */
+.bl-ovr{display:flex;flex-wrap:wrap;gap:6px 16px;align-items:center;justify-content:flex-end}
+.bl-or .ex{display:flex;justify-content:flex-end}
+.bl-or .ex:empty{display:none}
+.bl-or .ex .lbl{display:none}
+.bl-or .ex .bl-chev{display:inline-flex;align-items:center;justify-content:center;gap:6px}
+.bl-or.sub{background:var(--bg);border-top:1px solid var(--line2);font-size:13px;color:var(--ink2)}
+.bl-or.sub .gn{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding-left:14px}
+.bl-or.sub .gn small{color:var(--ink3);font-size:12px}
+.bl-stp{display:inline-block;padding:2px 10px;border-radius:20px;font-size:11.5px;font-weight:600}
+.bl-stp.k-sup{background:var(--violetbg);color:var(--violet)}
+.bl-stp.k-ins{background:#dcefec;color:#0d5a55}
+.bl-rach{font:inherit;font-size:12.5px;cursor:pointer;border:1px solid var(--line);background:var(--panel);min-height:34px;padding:0 12px}
+.bl-rach .amt{margin-left:8px;font-variant-numeric:tabular-nums}
+.bl-rach.k-sup{border-color:#d9d4f3;color:var(--violet)}
+.bl-rach.k-ins{border-color:#b9dcd7;color:#0d5a55}
+.bl-rach.k-tog{border-color:#ecd9a8;color:var(--amber)}
+.bl-rach:focus-visible{outline:2px solid var(--violet);outline-offset:2px}
+.bl-kpi.good .bl-nibar{background:#c9dfb5}
+.bl-kpi.good .bl-nibar .sp{background:var(--green)}
+.bl-kpi.good .bl-nibar .in{background:#7fa85a}
+.bl-kpi.good .bl-nikey{color:var(--green)}
+.bl-kpi.good .bl-nikey .a:before{background:var(--green)}
+.bl-kpi.good .bl-nikey .b:before{background:#7fa85a}
 
 @media(max-width:760px){
   .bl-svc.bl-split{padding:12px}
@@ -445,6 +469,13 @@ body[data-view="billing"] #report{display:none !important}
   .bl-ovtot>div{flex:1 1 40%}
   .bl-wosplit .btn,.bl-wosplit .ctl{min-height:44px}
   .bl-woact .bl-link,.bl-wo .bl-link{min-height:44px;display:inline-flex;align-items:center}
+  .bl-or .ex{grid-column:1/-1}
+  .bl-or .ex .bl-chev{width:100%;height:44px;font-size:13px}
+  .bl-or .ex .lbl{display:inline}
+  .bl-or.sub .gn{padding-left:0}
+  .bl-ovr{justify-content:flex-start}
+  .bl-rach{min-height:44px;width:100%;text-align:left;border-radius:12px}
+  .bl-rach .amt{float:right}
 }
 
 /* ---- wire metres -> points */

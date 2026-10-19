@@ -75,6 +75,7 @@ router = APIRouter(prefix="/api/billing", tags=["billing"])
 STAGES = {"supply": ["supply"], "install": ["install"], "together": ["supply", "install"]}
 STAGE_NAME = {"supply": "Supply", "install": "Installation"}
 SERIES_NAME = {"supply": "Supply", "install": "Installation", "together": "Supply + Installation"}
+OVERALL_STAGES = ("supply", "install")      # the overall annexure reads each Work Order cut into these two
 QUICK_SECTION = "Quick-added (from stock)"
 SEP = " \u203a "            # "Electrical › Only point wiring": the key of one Work Order inside a service
 
@@ -1635,27 +1636,53 @@ def _overall(slug, d, store, base):
         lines = _lines(d, u)
         groups, _ = _groups_for(d, store, u, lines)
         n = len(groups)
+        setup_u = store["setup"].get(u) or {}
         wo, inv, drf = [0.0] * (n + 1), [0.0] * (n + 1), [0.0] * (n + 1)      # last slot = lines in no group
+        # the same amounts cut by stage (Supply / Installation); a stage's share of a group is only known when every
+        # line in it has a % for that stage -- otherwise it stays None ("not set"), never a guessed number
+        s_inv = {st: [0.0] * (n + 1) for st in OVERALL_STAGES}
+        s_drf = {st: [0.0] * (n + 1) for st in OVERALL_STAGES}
+        s_wo = {st: [0.0] * (n + 1) for st in OVERALL_STAGES}
+        s_wo_ok = {st: [True] * (n + 1) for st in OVERALL_STAGES}
         for ln in lines:
             gi = _group_of(groups, ln)
             wo[n if gi is None else gi] += ln["rate"] * ln["boq_qty"]
+            for st in OVERALL_STAGES:
+                p_ = _stage_pct(setup_u, ln["item_code"], st)
+                slot_ = n if gi is None else gi
+                if p_ is None:
+                    s_wo_ok[st][slot_] = False
+                else:
+                    s_wo[st][slot_] += ln["rate"] * ln["boq_qty"] * p_ / 100.0
         ras = []
         for r in sorted([x for x in store["ras"] if x["service"] == u], key=lambda x: (x["no"], x["series"])):
             b = _get_bill(slug, d, store, r)
             tgt = inv if r["status"] == "locked" else drf
+            by_stage_tgt = s_inv if r["status"] == "locked" else s_drf
             for row in b["lines"]:
                 gi = _group_of(groups, row)
                 tgt[n if gi is None else gi] += sum(((row.get(st) or {}).get("amount") or 0.0) for st in STAGES[r["series"]])
+                for st in STAGES[r["series"]]:
+                    by_stage_tgt[st][n if gi is None else gi] += ((row.get(st) or {}).get("amount") or 0.0)
             ras.append({"id": r["id"], "no": r["no"], "series": r["series"], "status": r["status"],
-                        "label": f"{SERIES_NAME[r['series']]} RA {r['no']}", "this_total": b["this_total"]})
+                        "label": f"{SERIES_NAME[r['series']]} RA {r['no']}", "this_total": b["this_total"],
+                        "by_stage": _stage_this(b)})
+        def _stages_of(i):
+            """Supply / Installation cut of one row: the stage's share of the Work Order (None when not known), what is
+            invoiced and what sits in a draft. A group whose Work Order value is typed in the BOQ sheet and differs from
+            rate x qty has no known stage share (cutting it by % would be a guess)."""
+            typed = i < n and groups[i].get("wo") is not None and abs(groups[i]["wo"] - wo[i]) > 0.5
+            return {st: {"wo": (s_wo[st][i] if (s_wo_ok[st][i] and not typed) else None),
+                         "invoiced": s_inv[st][i], "draft": s_drf[st][i]} for st in OVERALL_STAGES}
+
         rows = []
         for i, g in enumerate(groups):
             w = g["wo"] if g.get("wo") is not None else wo[i]
             rows.append({"sr": g.get("sr") or "", "name": g.get("name") or "Items", "wo": w, "invoiced": inv[i],
-                         "draft": drf[i], "todate": inv[i] + drf[i]})
+                         "draft": drf[i], "todate": inv[i] + drf[i], "stages": _stages_of(i)})
         if wo[n] or inv[n] or drf[n]:
             rows.append({"sr": "", "name": "Other items (not in any group)", "wo": wo[n], "invoiced": inv[n],
-                         "draft": drf[n], "todate": inv[n] + drf[n]})
+                         "draft": drf[n], "todate": inv[n] + drf[n], "stages": _stages_of(n)})
         for x in rows:
             x["pct"] = (x["todate"] / x["wo"] * 100.0) if x["wo"] else None
             x["billed"] = abs(x["todate"]) > 1e-9
@@ -1665,21 +1692,179 @@ def _overall(slug, d, store, base):
             top = sorted(ras, key=lambda x: (x["no"], x["status"] == "draft"))[-1]
             latest = {"id": top["id"], "no": top["no"], "status": top["status"], "label": top["label"]}
         meta = store["meta"]
+        ustages = {}
+        for st in OVERALL_STAGES:
+            shares = [x["stages"][st]["wo"] for x in rows]
+            ustages[st] = {"set": _num(setup_u.get(st + "_pct")) is not None, "pct": _num(setup_u.get(st + "_pct")),
+                           "wo": (None if any(v is None for v in shares) else sum(shares)),
+                           "invoiced": sum(x["stages"][st]["invoiced"] for x in rows),
+                           "draft": sum(x["stages"][st]["draft"] for x in rows)}
         units.append({"unit": u, "package": _uname(u), "wo_no": _wo_no(meta, u) or "", "work": (meta.get("work") or {}).get(u) or "",
-                      "wo_value": t_wo, "invoiced": t_inv, "draft": t_drf, "todate": t_inv + t_drf,
+                      "wo_value": t_wo, "invoiced": t_inv, "draft": t_drf, "todate": t_inv + t_drf, "stages": ustages,
                       "pct": ((t_inv + t_drf) / t_wo * 100.0) if t_wo else None,
                       "latest": latest, "ras": ras, "rows": rows, "source": _source(store, u),
                       "set": bool((store["setup"].get(u) or {}).get("mode"))})
     tw, ti, td = (sum(x[k] for x in units) for k in ("wo_value", "invoiced", "draft"))
+    tstages = {}
+    for st in OVERALL_STAGES:
+        shares = [x["stages"][st]["wo"] for x in units]
+        tstages[st] = {"wo": (None if any(v is None for v in shares) else sum(shares)),
+                       "invoiced": sum(x["stages"][st]["invoiced"] for x in units),
+                       "draft": sum(x["stages"][st]["draft"] for x in units)}
     return {"base": base, "split": len(units) > 1 or any(SEP in x["unit"] for x in units), "units": units,
             "totals": {"wo_value": tw, "invoiced": ti, "draft": td, "todate": ti + td,
-                       "pct": ((ti + td) / tw * 100.0) if tw else None}}
+                       "pct": ((ti + td) / tw * 100.0) if tw else None, "stages": tstages}}
 
 
 @router.get("/{slug}/overall/{base}")
 def overall(slug: str, base: str):
     d = sp._need(slug)
     return _overall(slug, d, _load(d), base)
+
+
+def _overall_stage_sheet(wb, o, meta, base, drafts):
+    """Second sheet of the overall annexure: the same rows cut into a Supply block and an Installation block.
+    Sheet 1 is left exactly as it was. Billed to date and Done are formulas, like sheet 1; a figure that is not known
+    (a stage with no % set, or a group value typed in the BOQ sheet) is written as a dash, never as a number."""
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter as L
+    ws = wb.create_sheet("Supply vs Installation")
+    thin = Side(style="thin", color="000000")
+    BOX = Border(left=thin, right=thin, top=thin, bottom=thin)
+    BOLD = Font(name="Calibri", bold=True, size=11)
+    PEACH = PatternFill("solid", fgColor="FCE4D6")
+    TINT = {"supply": PatternFill("solid", fgColor="EBE8FA"), "install": PatternFill("solid", fgColor="DCEFEC")}
+    ws["A1"] = meta.get("client") or ""
+    ws["A1"].font = Font(name="Calibri", bold=True, size=13)
+    ws["A2"], ws["B2"] = "Work", f"{base}, Supply vs Installation annexure"
+    ws["A3"], ws["B3"] = "Contractor", meta.get("contractor") or ""
+    ws["A4"], ws["B4"] = "As on", dt.date.today().strftime("%d.%m.%Y")
+    ws["A5"], ws["B5"] = "Includes", "Invoiced RAs and open drafts" if drafts else "Invoiced RAs only"
+    for r_ in range(2, 6):
+        ws.cell(r_, 1).font = BOLD
+    sub = ["Value", "Invoiced"] + (["In draft"] if drafts else []) + ["Billed to date", "Done %"]
+    w = len(sub)                                          # columns per stage block
+    first = {"supply": 4, "install": 4 + w}               # first column of each block (A Sr, B Description, C Work Order amount)
+    ncol = 3 + 2 * w
+    row = 7
+    totals = []
+
+    def put(r_, c_, v, fmt=None, bold=False, fill=None, right=True):
+        c = ws.cell(r_, c_, v)
+        c.border = BOX
+        if fmt:
+            c.number_format = fmt
+        if bold:
+            c.font = BOLD
+        if fill:
+            c.fill = fill
+        if right and c_ >= 3:
+            c.alignment = Alignment(horizontal="right")
+        return c
+
+    def head(r_, u_stages):
+        for c_ in range(1, 4):
+            ws.cell(r_, c_).fill, ws.cell(r_, c_).border = PEACH, BOX
+        for st, nm in (("supply", "Supply"), ("install", "Installation")):
+            p_ = (u_stages or {}).get(st) or {}
+            lab = nm + (f" · {p_['pct']:g}%" if p_.get("pct") is not None else "")
+            ws.merge_cells(start_row=r_, start_column=first[st], end_row=r_, end_column=first[st] + w - 1)
+            c = ws.cell(r_, first[st], lab)
+            c.font, c.alignment = BOLD, Alignment(horizontal="center")
+            for k in range(w):
+                ws.cell(r_, first[st] + k).fill, ws.cell(r_, first[st] + k).border = TINT[st], BOX
+        for i, h_ in enumerate(["Sr.No.", "Description", "Work Order amount"], start=1):
+            c = ws.cell(r_ + 1, i, h_)
+            c.font, c.fill, c.border = BOLD, PEACH, BOX
+            c.alignment = Alignment(wrap_text=True, horizontal="center", vertical="center")
+        for st in ("supply", "install"):
+            for k, h_ in enumerate(sub):
+                c = ws.cell(r_ + 1, first[st] + k, h_)
+                c.font, c.fill, c.border = BOLD, PEACH, BOX
+                c.alignment = Alignment(wrap_text=True, horizontal="center", vertical="center")
+
+    def stage_cells(r_, st, v, wo_known, unknown, subtotal_of=None):
+        """value / invoiced / [draft] / billed / done of one stage on one row. subtotal_of = (first_row, last_row) -> SUM formulas."""
+        c0 = first[st]
+        col = lambda k: L(c0 + k)
+        n_amt = 1 + (1 if drafts else 0)                  # invoiced (+ draft)
+        bill_col, val_col = col(w - 2), col(0)
+        fills = {"fill": PEACH} if subtotal_of else {}
+        bold = bool(subtotal_of)
+        if unknown:                                       # the stage has no % set: nothing is known, nothing is shown as a number
+            for k in range(w):
+                put(r_, c0 + k, "—", bold=bold, **fills)
+            return
+        if subtotal_of:
+            a, b = subtotal_of
+            put(r_, c0, (f"=SUM({val_col}{a}:{val_col}{b})" if wo_known else "—"), "#,##0.00", bold, **fills)
+            for k in range(1, 1 + n_amt):
+                put(r_, c0 + k, f"=SUM({col(k)}{a}:{col(k)}{b})", "#,##0.00", bold, **fills)
+        else:
+            put(r_, c0, v["wo"] if wo_known else "—")
+            if wo_known:
+                ws.cell(r_, c0).number_format = "#,##0.00"
+            put(r_, c0 + 1, v["invoiced"], "#,##0.00")
+            if drafts:
+                put(r_, c0 + 2, v["draft"], "#,##0.00")
+        amt = "+".join(f"{col(k)}{r_}" for k in range(1, 1 + n_amt))
+        put(r_, c0 + w - 2, "=" + amt, "#,##0.00", bold, **fills)
+        put(r_, c0 + w - 1, f'=IF(ISNUMBER({val_col}{r_}),IF({val_col}{r_}=0,"",{bill_col}{r_}/{val_col}{r_}),"")', "0.0%", bold, **fills)
+
+    for u in o["units"]:
+        title = (f"Work Order: {u['package']}" if u["package"] else f"Work Order: {base}")
+        if u["wo_no"]:
+            title += f" (W/O {u['wo_no']})"
+        ws.cell(row, 1, title).font = BOLD
+        row += 1
+        head(row, u.get("stages"))
+        row += 2
+        first_row = row
+        for x in u["rows"]:
+            put(row, 1, x["sr"])
+            put(row, 2, x["name"])
+            put(row, 3, x["wo"], "#,##0.00")
+            for st in ("supply", "install"):
+                us = (u.get("stages") or {}).get(st) or {}
+                v = x["stages"][st]
+                stage_cells(row, st, v, v["wo"] is not None, not us.get("set") and v["wo"] is None)
+            row += 1
+        last_row = row - 1
+        put(row, 1, None, fill=PEACH)
+        put(row, 2, "Subtotal", bold=True, fill=PEACH)
+        put(row, 3, f"=SUM(C{first_row}:C{last_row})", "#,##0.00", True, PEACH)
+        for st in ("supply", "install"):
+            us = (u.get("stages") or {}).get(st) or {}
+            stage_cells(row, st, None, us.get("wo") is not None, not us.get("set") and us.get("wo") is None, (first_row, last_row))
+        totals.append(row)
+        row += 2
+    # all Work Orders: the unit subtotals added up; a stage that is not known in some Work Order stays a dash
+    put(row, 1, None, fill=PEACH)
+    put(row, 2, f"{base}, all Work Orders", bold=True, fill=PEACH)
+    put(row, 3, "=" + "+".join(f"C{t}" for t in totals), "#,##0.00", True, PEACH)
+    for st in ("supply", "install"):
+        c0 = first[st]
+        unknown = any(not ((u.get("stages") or {}).get(st) or {}).get("set") and ((u.get("stages") or {}).get(st) or {}).get("wo") is None for u in o["units"])
+        wo_known = ((o["totals"].get("stages") or {}).get(st) or {}).get("wo") is not None
+        if unknown:
+            for k in range(w):
+                put(row, c0 + k, "—", bold=True, fill=PEACH)
+            continue
+        for k in range(w - 2):
+            col = L(c0 + k)
+            if k == 0 and not wo_known:
+                put(row, c0, "—", bold=True, fill=PEACH)
+            else:
+                put(row, c0 + k, "=" + "+".join(f"{col}{t}" for t in totals), "#,##0.00", True, PEACH)
+        val_col, bill_col = L(c0), L(c0 + w - 2)
+        put(row, c0 + w - 2, "=" + "+".join(f"{L(c0 + k)}{row}" for k in range(1, w - 2)), "#,##0.00", True, PEACH)
+        put(row, c0 + w - 1, f'=IF(ISNUMBER({val_col}{row}),IF({val_col}{row}=0,"",{bill_col}{row}/{val_col}{row}),"")', "0.0%", True, PEACH)
+    ws.column_dimensions["A"].width = 9
+    ws.column_dimensions["B"].width = 52
+    ws.column_dimensions["C"].width = 20
+    for c_ in range(4, ncol + 1):
+        ws.column_dimensions[L(c_)].width = 10 if (c_ - 4) % w == w - 1 else 17
+    ws.sheet_view.showGridLines = False
 
 
 def overall_xlsx(slug, base, drafts=True):
@@ -1768,6 +1953,7 @@ def overall_xlsx(slug, base, drafts=True):
     for col, w in zip("ABCDEFG", (9, 60, 20, 18, 18, 18, 10)):
         ws.column_dimensions[col].width = w
     ws.sheet_view.showGridLines = False
+    _overall_stage_sheet(wb, o, meta, base, drafts)       # sheet 2: Supply vs Installation (sheet 1 above is unchanged)
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()

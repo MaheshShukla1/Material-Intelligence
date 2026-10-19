@@ -48,7 +48,7 @@
 
   // lens: the whole Billing home read as "all" (today's view), "supply" only or "install" only; svcOpen: services opened into their two stages
   const B = { slug: null, projects: [], view: "home", ov: null, pre: null, bill: null, raId: null, setup: null, expanded: new Set(), seq: 0, live: null, lens: "all", svcOpen: new Set() };
-  const OV = { base: null, data: null, drafts: true, all: false };      // overall annexure screen
+  const OV = { base: null, data: null, drafts: true, all: false, open: new Set() };      // overall annexure screen
   // a Work Order is its own billing unit "Service › Name"; a plain service is its own unit
   const WOSEP = " \u203a ";
   const unitBase = (u) => String(u).split(WOSEP)[0];
@@ -504,7 +504,7 @@
   async function showOverall(base, keep) {
     const s = section();
     B.view = "overall";
-    if (!keep || OV.base !== base) { OV.drafts = true; OV.all = false; }
+    if (!keep || OV.base !== base) { OV.drafts = true; OV.all = false; OV.open = new Set(); }
     OV.base = base;
     const my = ++B.seq;
     let o;
@@ -516,35 +516,89 @@
     drawOverall();
   }
 
+  // Supply / Installation inside the overall annexure: nothing is repeated down the table. The "In draft" card says it once,
+  // a group opens (chevron) into its two stages, and every Work Order header lists each open draft with its stage.
+  const OV_STAGES = [["supply", "Supply", "k-sup"], ["install", "Installation", "k-ins"]];
+  const OV_ORDER = { supply: 0, together: 1, install: 2 };
+  const ovNZ = (v) => Math.abs(v || 0) > 1e-9;
+
   function drawOverall() {
     const s = section(), o = OV.data, dr = OV.drafts;
     const val = (r) => (dr ? r.todate : r.invoiced);
     const T = o.totals, billed = dr ? T.todate : T.invoiced;
     const share = (v) => (T.wo_value ? Math.max(0, Math.min(100, v / T.wo_value * 100)) : 0);
+    const split = o.units.some((u) => u.stages && u.rows.some((r) => r.stages));     // an older server sends no stage cut: then nothing is drawn
+    const rkey = (u, i) => u.unit + "|" + i;
     let hidden = 0;
-    const cols = `46px minmax(170px,2.4fr) repeat(${dr ? 5 : 4},minmax(100px,1fr))`;
-    const rowHtml = (r, sub) => `<div class="bl-or${sub ? " tot" : ""}" style="grid-template-columns:${cols}">
+    const shownKeys = [];
+    const cols = `46px minmax(170px,2.4fr) repeat(${dr ? 5 : 4},minmax(100px,1fr))` + (split ? " 44px" : "");
+    const exCell = (key, name) => {
+      const open = OV.open.has(key);
+      return `<div class="ex"><button type="button" class="bl-chev${open ? " open" : ""}" data-ovx="${esc(key)}" aria-expanded="${open}" aria-label="${open ? "Hide" : "Show"} Supply and Installation of ${esc(name)}"><span class="ico">${open ? "▾" : "▸"}</span><span class="lbl">Supply · Installation</span></button></div>`;
+    };
+    const rowHtml = (r, sub, key) => `<div class="bl-or${sub ? " tot" : ""}" style="grid-template-columns:${cols}">
       <div class="sr">${esc(r.sr || "")}</div><div class="gn">${esc(r.name)}</div>
       <div class="n" data-l="Work Order">${inr(r.wo)}</div><div class="n inv" data-l="Invoiced">${inr(r.invoiced)}</div>
       ${dr ? `<div class="n drf" data-l="In draft">${inr(r.draft)}</div>` : ""}
-      <div class="n" data-l="To date"><b>${inr(val(r))}</b></div><div class="n" data-l="Done">${pctText(r.wo ? val(r) / r.wo * 100 : null)}</div></div>`;
-    const head2 = `<div class="bl-oh" style="grid-template-columns:${cols}"><div>Sr</div><div>Description</div><div class="n">Work Order</div><div class="n">Invoiced</div>${dr ? `<div class="n">In draft</div>` : ""}<div class="n">To date</div><div class="n">Done</div></div>`;
+      <div class="n" data-l="To date"><b>${inr(val(r))}</b></div><div class="n" data-l="Done">${pctText(r.wo ? val(r) / r.wo * 100 : null)}</div>
+      ${split ? (key ? exCell(key, r.name) : `<div class="ex"></div>`) : ""}</div>`;
+    // one stage of one group. A stage with no % set, or a group whose Work Order value is typed in the BOQ sheet, shows a dash: never a guess.
+    const stageRow = (u, r, g) => {
+      const [k, nm, cls] = g, c = r.stages[k], us = (u.stages || {})[k] || {};
+      const unset = !us.set && c.wo == null;
+      const v = dr ? c.invoiced + c.draft : c.invoiced;
+      const note = unset ? nm + " % not set" : (c.wo == null ? "share not known" : "share of the group");
+      return `<div class="bl-or sub" style="grid-template-columns:${cols}">
+        <div class="sr"></div><div class="gn"><span class="bl-stp ${cls}">${nm}</span><small>${esc(note)}</small></div>
+        <div class="n" data-l="Work Order">${c.wo == null ? "—" : inr(c.wo)}</div><div class="n inv" data-l="Invoiced">${unset ? "—" : inr(c.invoiced)}</div>
+        ${dr ? `<div class="n drf" data-l="In draft">${unset ? "—" : inr(c.draft)}</div>` : ""}
+        <div class="n" data-l="To date"><b>${unset ? "—" : inr(v)}</b></div><div class="n" data-l="Done">${unset || !c.wo ? "—" : pctText(v / c.wo * 100)}</div>
+        <div class="ex"></div></div>`;
+    };
+    const head2 = `<div class="bl-oh" style="grid-template-columns:${cols}"><div>Sr</div><div>Description</div><div class="n">Work Order</div><div class="n">Invoiced</div>${dr ? `<div class="n">In draft</div>` : ""}<div class="n">To date</div><div class="n">Done</div>${split ? "<div></div>" : ""}</div>`;
+    // every open draft gets its own chip with its stage; with no draft open the latest RA is shown as before
+    const raChips = (u) => {
+      const drafts = u.ras.filter((r) => r.status === "draft").sort((a, b) => (OV_ORDER[a.series] - OV_ORDER[b.series]) || (a.no - b.no));
+      if (drafts.length) {
+        return drafts.map((r) => `<button type="button" class="bl-chip bl-rach ${r.series === "supply" ? "k-sup" : r.series === "install" ? "k-ins" : "k-tog"}" data-ra="${esc(r.id)}" title="Open this draft">${esc(r.label)} · Draft <span class="amt">${inr(r.this_total)}</span> →</button>`).join("");
+      }
+      const l = u.latest;
+      return l ? `<span class="bl-chip ${l.status}">RA ${l.no} · ${l.status === "draft" ? "Draft" : "Invoiced"}</span>
+            <button class="bl-link" data-ra="${esc(l.id)}">${l.status === "draft" ? "Open draft →" : "View →"}</button>` : `<span class="bl-chip none">No RA yet</span>`;
+    };
     const block = (u) => {
       const shown = u.rows.filter((r) => OV.all || Math.abs(val(r)) > 1e-9);
       hidden += u.rows.length - shown.length;
-      const l = u.latest;
+      const body = shown.map((r) => {
+        const i = u.rows.indexOf(r), cut = split && r.stages;
+        const key = cut ? rkey(u, i) : null;
+        if (key) shownKeys.push(key);
+        return rowHtml(r, false, key) + (key && OV.open.has(key) ? OV_STAGES.map((g) => stageRow(u, r, g)).join("") : "");
+      }).join("");
       return `<div class="bl-card bl-wob" data-unit="${esc(u.unit)}">
         <div class="bl-wohd"><div><b>${esc(u.package || o.base)}</b>
           <small>${u.wo_no ? "W/O " + esc(u.wo_no) + " · " : ""}Work Order ${inr(u.wo_value)}${u.set ? "" : " · payment term not set"}</small></div>
-          <div class="bl-woact">${l ? `<span class="bl-chip ${l.status}">RA ${l.no} · ${l.status === "draft" ? "Draft" : "Invoiced"}</span>
-            <button class="bl-link" data-ra="${esc(l.id)}">${l.status === "draft" ? "Open draft →" : "View →"}</button>` : `<span class="bl-chip none">No RA yet</span>`}
+          <div class="bl-woact">${raChips(u)}
             ${u.source === "challan" && u.set ? `<button class="bl-link" data-ch="${esc(u.unit)}">Challans</button>` : ""}</div></div>
         <div class="bl-scroll"><div class="bl-ovg">${head2}
-          ${shown.length ? shown.map((r) => rowHtml(r)).join("") : `<div class="bl-none sm">${u.rows.length ? "Nothing billed in this Work Order yet." : "No annexure group."}</div>`}
+          ${shown.length ? body : `<div class="bl-none sm">${u.rows.length ? "Nothing billed in this Work Order yet." : "No annexure group."}</div>`}
           ${rowHtml({ sr: "", name: "Subtotal", wo: u.wo_value, invoiced: u.invoiced, draft: u.draft, todate: u.todate }, true)}</div></div></div>`;
     };
     const blocks = o.units.map(block).join("");
     const firstSet = (o.units.find((u) => u.set) || {}).unit;
+    // Supply / Installation said once, in the cards. Only drawn when the two parts add up to the whole.
+    const TS = T.stages || {};
+    const sp = (TS.supply || {}), ins = (TS.install || {});
+    const stageLine = (a, b, whole) => {
+      if (!split || !(whole > 0) || a < -0.5 || b < -0.5 || Math.abs(a + b - whole) > 0.5) return { bar: "", only: "" };
+      if (ovNZ(a) && ovNZ(b)) {
+        return { only: "", bar: `<div class="bl-nibar" role="img" aria-label="Supply ${esc(inr(a))}, Installation ${esc(inr(b))}"><s class="sp" style="width:${(a / whole * 100).toFixed(2)}%"></s><s class="in" style="width:${(b / whole * 100).toFixed(2)}%"></s></div>
+          <div class="bl-nikey"><u class="a">Supply ${inr(a)}</u><u class="b">Installation ${inr(b)}</u></div>` };
+      }
+      return { bar: "", only: ovNZ(a) ? " · all Supply" : " · all Installation" };
+    };
+    const invSplit = stageLine(sp.invoiced || 0, ins.invoiced || 0, T.invoiced);
+    const drfSplit = stageLine(sp.draft || 0, ins.draft || 0, T.draft);
     s.innerHTML = head(o.base + ", overall annexure",
       "Every Work Order of this service in one place: what the contract is, what is already invoiced, what is sitting in a draft. Nothing is typed here, it reads the RAs.",
       `<button class="btn" id="bl-back">← Billing</button>
@@ -552,26 +606,38 @@
        <button class="btn primary" id="bl-ovnew" ${firstSet ? "" : "disabled"}>+ New RA bill</button>`) + `
       <div class="bl-kpis">
         <div class="bl-kpi"><span>Work Order value</span><b>${inr(T.wo_value)}</b><i>${o.units.length} Work Order${o.units.length === 1 ? "" : "s"}</i></div>
-        <div class="bl-kpi good"><span>Invoiced</span><b>${inr(T.invoiced)}</b><i>${o.units.reduce((a, u) => a + u.ras.filter((r) => r.status === "locked").length, 0)} RA invoiced</i></div>
-        ${dr ? `<div class="bl-kpi warn"><span>In draft</span><b>${inr(T.draft)}</b><i>${o.units.reduce((a, u) => a + u.ras.filter((r) => r.status === "draft").length, 0)} open draft(s)</i></div>` : ""}
+        <div class="bl-kpi good"><span>Invoiced</span><b>${inr(T.invoiced)}</b><i>${o.units.reduce((a, u) => a + u.ras.filter((r) => r.status === "locked").length, 0)} RA invoiced${invSplit.only}</i>${invSplit.bar}</div>
+        ${dr ? `<div class="bl-kpi warn"><span>In draft</span><b>${inr(T.draft)}</b><i>${o.units.reduce((a, u) => a + u.ras.filter((r) => r.status === "draft").length, 0)} open draft(s)${drfSplit.only}</i>${drfSplit.bar}</div>` : ""}
         <div class="bl-kpi"><span>Billed to date</span><b>${inr(billed)} <small>${pctText(T.wo_value ? billed / T.wo_value * 100 : null)}</small></b>
           <div class="bl-bar" aria-hidden="true"><i class="inv" style="width:${share(T.invoiced)}%"></i>${dr ? `<i class="drf" style="width:${share(T.draft)}%"></i>` : ""}</div></div>
       </div>
       <div class="bl-ovbar"><div class="bl-tgl" role="radiogroup" aria-label="What to add up">
           <button type="button" class="${dr ? "" : "on"}" data-ovm="inv" role="radio" aria-checked="${!dr}">Invoiced only</button>
           <button type="button" class="${dr ? "on" : ""}" data-ovm="all" role="radio" aria-checked="${dr}">Invoiced + drafts</button></div>
-        <span class="bl-ovh" id="bl-ovh"></span></div>
+        <div class="bl-ovr"><span class="bl-ovh" id="bl-ovh"></span>${split && shownKeys.length ? `<button type="button" class="bl-link" id="bl-ovall"></button>` : ""}</div></div>
       ${blocks}
       <div class="bl-ovtot"><b>${esc(o.base)}${o.units.length > 1 ? ", all Work Orders" : ""}</b>
         <div><span>Work Order</span><b>${inr(T.wo_value)}</b></div><div><span>Invoiced</span><b class="inv">${inr(T.invoiced)}</b></div>
         ${dr ? `<div><span>In draft</span><b class="drf">${inr(T.draft)}</b></div>` : ""}
         <div><span>Billed to date</span><b>${inr(billed)}</b></div><div><span>Done</span><b>${pctText(T.wo_value ? billed / T.wo_value * 100 : null)}</b></div></div>
-      <p class="bl-ovnote">Work Order values are the contract values of each Work Order. Billed amounts are the supply and installation percentages of the certified quantities, exactly as in each RA. “Invoiced” is what is marked invoiced; “In draft” is what an open draft would add.</p>`;
+      <p class="bl-ovnote">Work Order values are the contract values of each Work Order. Billed amounts are the supply and installation percentages of the certified quantities, exactly as in each RA. “Invoiced” is what is marked invoiced; “In draft” is what an open draft would add.${split ? " Open a group (▸) to see its Supply and Installation apart." : ""}</p>`;
     const h = $("bl-ovh");
     if (h) {
       h.innerHTML = hidden || OV.all ? (OV.all ? `Showing every group. <button type="button" class="bl-link" id="bl-ovhide">Hide groups with nothing billed</button>`
         : `Groups with nothing billed are hidden. <button type="button" class="bl-link" id="bl-ovshow">Show ${hidden} hidden group${hidden === 1 ? "" : "s"}</button>`) : "";
     }
+    const allBtn = $("bl-ovall");
+    const allOpen = shownKeys.length > 0 && shownKeys.every((k) => OV.open.has(k));
+    if (allBtn) { allBtn.textContent = allOpen ? "Close all groups ▴" : "Open all groups ▾"; allBtn.onclick = () => { shownKeys.forEach((k) => (allOpen ? OV.open.delete(k) : OV.open.add(k))); again("#bl-ovall"); }; }
+    // a repaint of this screen only: the scroll position and the focus stay where they were
+    function again(sel) {
+      const y = window.scrollY; drawOverall(); window.scrollTo(0, y);
+      const el = sel && section().querySelector(sel); if (el) el.focus();
+    }
+    s.querySelectorAll("[data-ovx]").forEach((el) => el.onclick = () => {
+      const k = el.dataset.ovx; OV.open.has(k) ? OV.open.delete(k) : OV.open.add(k);
+      again('[data-ovx="' + k.replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"]');
+    });
     wireProj();
     $("bl-back").onclick = showHome;
     $("bl-ovnew").onclick = async () => { try { B.ov = await jget(api("/" + B.slug)); } catch (e) { toast(briefErr(e)); return; } openNewRA(firstSet); };

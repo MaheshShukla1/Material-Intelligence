@@ -48,7 +48,7 @@
 
   // lens: the whole Billing home read as "all" (today's view), "supply" only or "install" only; svcOpen: services opened into their two stages
   const B = { slug: null, projects: [], view: "home", ov: null, pre: null, bill: null, raId: null, setup: null, expanded: new Set(), seq: 0, live: null, lens: "all", svcOpen: new Set() };
-  const OV = { base: null, data: null, drafts: true, all: false };      // overall annexure screen
+  const OV = { base: null, data: null, drafts: true, all: false, open: new Set() };      // overall annexure screen
   // a Work Order is its own billing unit "Service › Name"; a plain service is its own unit
   const WOSEP = " \u203a ";
   const unitBase = (u) => String(u).split(WOSEP)[0];
@@ -194,6 +194,7 @@
         <div class="bl-kpi good"><span>Invoiced so far</span><b>${inr(snap.billed)}</b><i>${lens !== "all" && !snap.nInv ? "No " + LENS[lens] + " RA invoiced yet" : snap.nInv + " RA invoiced"}</i></div>
         <div class="bl-kpi warn bl-ni"><span>Not invoiced yet</span><b>${inr(snap.notInvoiced)}</b><i>${snap.n} draft${snap.n === 1 ? "" : "s"} ${inr(snap.draftTotal)}<br>Ready, no draft ${inr(snap.ready)}${snap.togetherReady > 0 ? `<br><span class="bl-tg" title="A Together bill covers both stages and the overview does not split it, so it is not added into a one-stage view.">+ ${inr(snap.togetherReady)} Together, not split by stage</span>` : ""}</i>${lens === "all" ? splitBar(ov, snap) : ""}</div>
       </div>
+      ${noBackupStrip(ov, lens)}
       <div class="bl-snaprow"><button class="btn primary" id="bl-share">Share snapshot</button><span>One tap copies a short summary, ready for WhatsApp or email.</span></div>
       ${anySet ? "" : `<div class="bl-callout">No service has a payment term yet. Open <b>Billing setup</b> and set Supply % / Installation % for each service. Until it is set, that service cannot be billed — no % is ever guessed.</div>`}
       <div class="bl-sech"><h3>Services</h3><span class="bl-live"><i></i>Live · refreshes every minute</span></div>
@@ -218,6 +219,7 @@
     $("bl-share").onclick = shareSnapshot;
     if ($("bl-dl")) $("bl-dl").onclick = () => openDownload();
     if ($("bl-imph")) $("bl-imph").onclick = importFromHome;
+    if ($("bl-nobkgo")) $("bl-nobkgo").onclick = () => showRA($("bl-nobkgo").dataset.ra);
     s.querySelectorAll("[data-ra]").forEach((el) => {
       el.onclick = () => showRA(el.dataset.ra);
       el.onkeydown = (e) => { if (e.key === "Enter") showRA(el.dataset.ra); };
@@ -504,7 +506,7 @@
   async function showOverall(base, keep) {
     const s = section();
     B.view = "overall";
-    if (!keep || OV.base !== base) { OV.drafts = true; OV.all = false; }
+    if (!keep || OV.base !== base) { OV.drafts = true; OV.all = false; OV.open = new Set(); }
     OV.base = base;
     const my = ++B.seq;
     let o;
@@ -516,35 +518,89 @@
     drawOverall();
   }
 
+  // Supply / Installation inside the overall annexure: nothing is repeated down the table. The "In draft" card says it once,
+  // a group opens (chevron) into its two stages, and every Work Order header lists each open draft with its stage.
+  const OV_STAGES = [["supply", "Supply", "k-sup"], ["install", "Installation", "k-ins"]];
+  const OV_ORDER = { supply: 0, together: 1, install: 2 };
+  const ovNZ = (v) => Math.abs(v || 0) > 1e-9;
+
   function drawOverall() {
     const s = section(), o = OV.data, dr = OV.drafts;
     const val = (r) => (dr ? r.todate : r.invoiced);
     const T = o.totals, billed = dr ? T.todate : T.invoiced;
     const share = (v) => (T.wo_value ? Math.max(0, Math.min(100, v / T.wo_value * 100)) : 0);
+    const split = o.units.some((u) => u.stages && u.rows.some((r) => r.stages));     // an older server sends no stage cut: then nothing is drawn
+    const rkey = (u, i) => u.unit + "|" + i;
     let hidden = 0;
-    const cols = `46px minmax(170px,2.4fr) repeat(${dr ? 5 : 4},minmax(100px,1fr))`;
-    const rowHtml = (r, sub) => `<div class="bl-or${sub ? " tot" : ""}" style="grid-template-columns:${cols}">
+    const shownKeys = [];
+    const cols = `46px minmax(170px,2.4fr) repeat(${dr ? 5 : 4},minmax(100px,1fr))` + (split ? " 44px" : "");
+    const exCell = (key, name) => {
+      const open = OV.open.has(key);
+      return `<div class="ex"><button type="button" class="bl-chev${open ? " open" : ""}" data-ovx="${esc(key)}" aria-expanded="${open}" aria-label="${open ? "Hide" : "Show"} Supply and Installation of ${esc(name)}"><span class="ico">${open ? "▾" : "▸"}</span><span class="lbl">Supply · Installation</span></button></div>`;
+    };
+    const rowHtml = (r, sub, key) => `<div class="bl-or${sub ? " tot" : ""}" style="grid-template-columns:${cols}">
       <div class="sr">${esc(r.sr || "")}</div><div class="gn">${esc(r.name)}</div>
       <div class="n" data-l="Work Order">${inr(r.wo)}</div><div class="n inv" data-l="Invoiced">${inr(r.invoiced)}</div>
       ${dr ? `<div class="n drf" data-l="In draft">${inr(r.draft)}</div>` : ""}
-      <div class="n" data-l="To date"><b>${inr(val(r))}</b></div><div class="n" data-l="Done">${pctText(r.wo ? val(r) / r.wo * 100 : null)}</div></div>`;
-    const head2 = `<div class="bl-oh" style="grid-template-columns:${cols}"><div>Sr</div><div>Description</div><div class="n">Work Order</div><div class="n">Invoiced</div>${dr ? `<div class="n">In draft</div>` : ""}<div class="n">To date</div><div class="n">Done</div></div>`;
+      <div class="n" data-l="To date"><b>${inr(val(r))}</b></div><div class="n" data-l="Done">${pctText(r.wo ? val(r) / r.wo * 100 : null)}</div>
+      ${split ? (key ? exCell(key, r.name) : `<div class="ex"></div>`) : ""}</div>`;
+    // one stage of one group. A stage with no % set, or a group whose Work Order value is typed in the BOQ sheet, shows a dash: never a guess.
+    const stageRow = (u, r, g) => {
+      const [k, nm, cls] = g, c = r.stages[k], us = (u.stages || {})[k] || {};
+      const unset = !us.set && c.wo == null;
+      const v = dr ? c.invoiced + c.draft : c.invoiced;
+      const note = unset ? nm + " % not set" : (c.wo == null ? "share not known" : "share of the group");
+      return `<div class="bl-or sub" style="grid-template-columns:${cols}">
+        <div class="sr"></div><div class="gn"><span class="bl-stp ${cls}">${nm}</span><small>${esc(note)}</small></div>
+        <div class="n" data-l="Work Order">${c.wo == null ? "—" : inr(c.wo)}</div><div class="n inv" data-l="Invoiced">${unset ? "—" : inr(c.invoiced)}</div>
+        ${dr ? `<div class="n drf" data-l="In draft">${unset ? "—" : inr(c.draft)}</div>` : ""}
+        <div class="n" data-l="To date"><b>${unset ? "—" : inr(v)}</b></div><div class="n" data-l="Done">${unset || !c.wo ? "—" : pctText(v / c.wo * 100)}</div>
+        <div class="ex"></div></div>`;
+    };
+    const head2 = `<div class="bl-oh" style="grid-template-columns:${cols}"><div>Sr</div><div>Description</div><div class="n">Work Order</div><div class="n">Invoiced</div>${dr ? `<div class="n">In draft</div>` : ""}<div class="n">To date</div><div class="n">Done</div>${split ? "<div></div>" : ""}</div>`;
+    // every open draft gets its own chip with its stage; with no draft open the latest RA is shown as before
+    const raChips = (u) => {
+      const drafts = u.ras.filter((r) => r.status === "draft").sort((a, b) => (OV_ORDER[a.series] - OV_ORDER[b.series]) || (a.no - b.no));
+      if (drafts.length) {
+        return drafts.map((r) => `<button type="button" class="bl-chip bl-rach ${r.series === "supply" ? "k-sup" : r.series === "install" ? "k-ins" : "k-tog"}" data-ra="${esc(r.id)}" title="Open this draft">${esc(r.label)} · Draft <span class="amt">${inr(r.this_total)}</span> →</button>`).join("");
+      }
+      const l = u.latest;
+      return l ? `<span class="bl-chip ${l.status}">RA ${l.no} · ${l.status === "draft" ? "Draft" : "Invoiced"}</span>
+            <button class="bl-link" data-ra="${esc(l.id)}">${l.status === "draft" ? "Open draft →" : "View →"}</button>` : `<span class="bl-chip none">No RA yet</span>`;
+    };
     const block = (u) => {
       const shown = u.rows.filter((r) => OV.all || Math.abs(val(r)) > 1e-9);
       hidden += u.rows.length - shown.length;
-      const l = u.latest;
+      const body = shown.map((r) => {
+        const i = u.rows.indexOf(r), cut = split && r.stages;
+        const key = cut ? rkey(u, i) : null;
+        if (key) shownKeys.push(key);
+        return rowHtml(r, false, key) + (key && OV.open.has(key) ? OV_STAGES.map((g) => stageRow(u, r, g)).join("") : "");
+      }).join("");
       return `<div class="bl-card bl-wob" data-unit="${esc(u.unit)}">
         <div class="bl-wohd"><div><b>${esc(u.package || o.base)}</b>
           <small>${u.wo_no ? "W/O " + esc(u.wo_no) + " · " : ""}Work Order ${inr(u.wo_value)}${u.set ? "" : " · payment term not set"}</small></div>
-          <div class="bl-woact">${l ? `<span class="bl-chip ${l.status}">RA ${l.no} · ${l.status === "draft" ? "Draft" : "Invoiced"}</span>
-            <button class="bl-link" data-ra="${esc(l.id)}">${l.status === "draft" ? "Open draft →" : "View →"}</button>` : `<span class="bl-chip none">No RA yet</span>`}
+          <div class="bl-woact">${raChips(u)}
             ${u.source === "challan" && u.set ? `<button class="bl-link" data-ch="${esc(u.unit)}">Challans</button>` : ""}</div></div>
         <div class="bl-scroll"><div class="bl-ovg">${head2}
-          ${shown.length ? shown.map((r) => rowHtml(r)).join("") : `<div class="bl-none sm">${u.rows.length ? "Nothing billed in this Work Order yet." : "No annexure group."}</div>`}
+          ${shown.length ? body : `<div class="bl-none sm">${u.rows.length ? "Nothing billed in this Work Order yet." : "No annexure group."}</div>`}
           ${rowHtml({ sr: "", name: "Subtotal", wo: u.wo_value, invoiced: u.invoiced, draft: u.draft, todate: u.todate }, true)}</div></div></div>`;
     };
     const blocks = o.units.map(block).join("");
     const firstSet = (o.units.find((u) => u.set) || {}).unit;
+    // Supply / Installation said once, in the cards. Only drawn when the two parts add up to the whole.
+    const TS = T.stages || {};
+    const sp = (TS.supply || {}), ins = (TS.install || {});
+    const stageLine = (a, b, whole) => {
+      if (!split || !(whole > 0) || a < -0.5 || b < -0.5 || Math.abs(a + b - whole) > 0.5) return { bar: "", only: "" };
+      if (ovNZ(a) && ovNZ(b)) {
+        return { only: "", bar: `<div class="bl-nibar" role="img" aria-label="Supply ${esc(inr(a))}, Installation ${esc(inr(b))}"><s class="sp" style="width:${(a / whole * 100).toFixed(2)}%"></s><s class="in" style="width:${(b / whole * 100).toFixed(2)}%"></s></div>
+          <div class="bl-nikey"><u class="a">Supply ${inr(a)}</u><u class="b">Installation ${inr(b)}</u></div>` };
+      }
+      return { bar: "", only: ovNZ(a) ? " · all Supply" : " · all Installation" };
+    };
+    const invSplit = stageLine(sp.invoiced || 0, ins.invoiced || 0, T.invoiced);
+    const drfSplit = stageLine(sp.draft || 0, ins.draft || 0, T.draft);
     s.innerHTML = head(o.base + ", overall annexure",
       "Every Work Order of this service in one place: what the contract is, what is already invoiced, what is sitting in a draft. Nothing is typed here, it reads the RAs.",
       `<button class="btn" id="bl-back">← Billing</button>
@@ -552,26 +608,38 @@
        <button class="btn primary" id="bl-ovnew" ${firstSet ? "" : "disabled"}>+ New RA bill</button>`) + `
       <div class="bl-kpis">
         <div class="bl-kpi"><span>Work Order value</span><b>${inr(T.wo_value)}</b><i>${o.units.length} Work Order${o.units.length === 1 ? "" : "s"}</i></div>
-        <div class="bl-kpi good"><span>Invoiced</span><b>${inr(T.invoiced)}</b><i>${o.units.reduce((a, u) => a + u.ras.filter((r) => r.status === "locked").length, 0)} RA invoiced</i></div>
-        ${dr ? `<div class="bl-kpi warn"><span>In draft</span><b>${inr(T.draft)}</b><i>${o.units.reduce((a, u) => a + u.ras.filter((r) => r.status === "draft").length, 0)} open draft(s)</i></div>` : ""}
+        <div class="bl-kpi good"><span>Invoiced</span><b>${inr(T.invoiced)}</b><i>${o.units.reduce((a, u) => a + u.ras.filter((r) => r.status === "locked").length, 0)} RA invoiced${invSplit.only}</i>${invSplit.bar}</div>
+        ${dr ? `<div class="bl-kpi warn"><span>In draft</span><b>${inr(T.draft)}</b><i>${o.units.reduce((a, u) => a + u.ras.filter((r) => r.status === "draft").length, 0)} open draft(s)${drfSplit.only}</i>${drfSplit.bar}</div>` : ""}
         <div class="bl-kpi"><span>Billed to date</span><b>${inr(billed)} <small>${pctText(T.wo_value ? billed / T.wo_value * 100 : null)}</small></b>
           <div class="bl-bar" aria-hidden="true"><i class="inv" style="width:${share(T.invoiced)}%"></i>${dr ? `<i class="drf" style="width:${share(T.draft)}%"></i>` : ""}</div></div>
       </div>
       <div class="bl-ovbar"><div class="bl-tgl" role="radiogroup" aria-label="What to add up">
           <button type="button" class="${dr ? "" : "on"}" data-ovm="inv" role="radio" aria-checked="${!dr}">Invoiced only</button>
           <button type="button" class="${dr ? "on" : ""}" data-ovm="all" role="radio" aria-checked="${dr}">Invoiced + drafts</button></div>
-        <span class="bl-ovh" id="bl-ovh"></span></div>
+        <div class="bl-ovr"><span class="bl-ovh" id="bl-ovh"></span>${split && shownKeys.length ? `<button type="button" class="bl-link" id="bl-ovall"></button>` : ""}</div></div>
       ${blocks}
       <div class="bl-ovtot"><b>${esc(o.base)}${o.units.length > 1 ? ", all Work Orders" : ""}</b>
         <div><span>Work Order</span><b>${inr(T.wo_value)}</b></div><div><span>Invoiced</span><b class="inv">${inr(T.invoiced)}</b></div>
         ${dr ? `<div><span>In draft</span><b class="drf">${inr(T.draft)}</b></div>` : ""}
         <div><span>Billed to date</span><b>${inr(billed)}</b></div><div><span>Done</span><b>${pctText(T.wo_value ? billed / T.wo_value * 100 : null)}</b></div></div>
-      <p class="bl-ovnote">Work Order values are the contract values of each Work Order. Billed amounts are the supply and installation percentages of the certified quantities, exactly as in each RA. “Invoiced” is what is marked invoiced; “In draft” is what an open draft would add.</p>`;
+      <p class="bl-ovnote">Work Order values are the contract values of each Work Order. Billed amounts are the supply and installation percentages of the certified quantities, exactly as in each RA. “Invoiced” is what is marked invoiced; “In draft” is what an open draft would add.${split ? " Open a group (▸) to see its Supply and Installation apart." : ""}</p>`;
     const h = $("bl-ovh");
     if (h) {
       h.innerHTML = hidden || OV.all ? (OV.all ? `Showing every group. <button type="button" class="bl-link" id="bl-ovhide">Hide groups with nothing billed</button>`
         : `Groups with nothing billed are hidden. <button type="button" class="bl-link" id="bl-ovshow">Show ${hidden} hidden group${hidden === 1 ? "" : "s"}</button>`) : "";
     }
+    const allBtn = $("bl-ovall");
+    const allOpen = shownKeys.length > 0 && shownKeys.every((k) => OV.open.has(k));
+    if (allBtn) { allBtn.textContent = allOpen ? "Close all groups ▴" : "Open all groups ▾"; allBtn.onclick = () => { shownKeys.forEach((k) => (allOpen ? OV.open.delete(k) : OV.open.add(k))); again("#bl-ovall"); }; }
+    // a repaint of this screen only: the scroll position and the focus stay where they were
+    function again(sel) {
+      const y = window.scrollY; drawOverall(); window.scrollTo(0, y);
+      const el = sel && section().querySelector(sel); if (el) el.focus();
+    }
+    s.querySelectorAll("[data-ovx]").forEach((el) => el.onclick = () => {
+      const k = el.dataset.ovx; OV.open.has(k) ? OV.open.delete(k) : OV.open.add(k);
+      again('[data-ovx="' + k.replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"]');
+    });
     wireProj();
     $("bl-back").onclick = showHome;
     $("bl-ovnew").onclick = async () => { try { B.ov = await jget(api("/" + B.slug)); } catch (e) { toast(briefErr(e)); return; } openNewRA(firstSet); };
@@ -641,6 +709,45 @@
   const xStrip = (xs) => `<div class="bl-xstrip" id="bl-xstrip"><div><b>${xs.length} line${xs.length === 1 ? " is" : "s are"} above the BOQ quantity</b>
       <small>Extra${xSum(xs) == null ? "" : " worth " + inr(xSum(xs))} · billed only up to the BOQ for now. Works the same for challans and Site Progress.</small></div>
       <button class="btn primary" id="bl-xreview">Review extra →</button></div>`;
+  // ------------------------------------------------------------- measurement backup (From-To)
+  // A Mtr / RMT line of an Installation bill can come with the client's measurement sheet (From, To, drum readings: Annexure D). It is never
+  // required and never blocks the bill: these are only the facts, in rupees, so the person making the bill SEES what has no backup yet.
+  // The entries are made in the same small "Measurement" sheet as in Site Progress (window.MIMeasure, siteprogress.js).
+  const ftOf = (b, code) => (b && b.fromto && b.fromto.lines && b.fromto.lines[code]) || null;
+  function ftChip(b, l, locked) {
+    const f = ftOf(b, l.item_code); if (!f) return "";
+    const full = f.unbacked <= 0.005;
+    const label = f.n === 0 ? "No From–To" : full ? "From–To ✓" : `From–To ${qn(f.backed)} of ${qn(f.this)} ${esc(l.unit)}`;
+    const tip = f.n === 0 ? "No measurement entered for this line. Optional: add From, To and the drum readings so the bill comes with the client's measurement sheet."
+      : full ? "All of this bill's quantity of the line has a measurement behind it." : `${qn(f.unbacked)} ${l.unit} of this bill has no measurement behind it yet.`;
+    const cls = "bl-ft " + (full ? "ok" : "warn");
+    return locked || !window.MIMeasure ? `<span class="${cls}" title="${esc(tip)}">📏 ${label}</span>`
+      : `<button type="button" class="${cls}" data-meas="${esc(l.item_code)}" title="${esc(tip)}">📏 ${label}</button>`;
+  }
+  function ftStrip(b, locked) {
+    const f = b.fromto; if (!f) return "";
+    const ok = f.unbacked_items === 0, withE = Object.values(f.lines).filter((x) => x.n).length;
+    const money = f.unknown ? "" : ` · <b>${inr(f.unbacked_value)}</b> of this bill has none`;
+    const head = ok ? `All ${f.items} length line${f.items === 1 ? " has" : "s have"} From–To`
+      : `${f.items - f.unbacked_items} of ${f.items} length line${f.items === 1 ? " has" : "s have"} From–To`;
+    const tail = withE ? "Annexure D (From–To detail) comes with the Download." : (ok ? "" : "Optional: add From–To and Annexure D (From–To detail) comes with the Download.");
+    // the strip FIXES gaps (opens the sheet of the first line without From–To); downloading is only the Download button at the top
+    const add = !ok && !locked && window.MIMeasure ? `<button class="btn" id="bl-mbadd">Add measurements →</button>` : "";
+    return `<div class="bl-mb ${ok ? "ok" : "gap"}" id="bl-mb"><div><b>Measurement backup</b>
+        <small>${head}${ok ? "" : money}${locked ? " · as invoiced" : ""}. ${tail}</small></div>${add}</div>`;
+  }
+  function openMeasure(b, code, onChange) {
+    const l = (b.lines || []).find((x) => x.item_code === code); if (!l || !window.MIMeasure) return;
+    window.MIMeasure.open({ slug: B.slug, service: unitBase(b.ra.service), code, desc: l.desc, unit: l.unit, room: "", onChange });
+  }
+  const noBackupStrip = (ov, lens) => {
+    const nb = ov.no_backup;
+    if (!nb || !(nb.value > 0) || lens === "supply") return "";
+    const worst = ov.ras.filter((r) => r.status === "draft" && r.fromto && r.fromto.unbacked_value > 0).sort((a, b) => b.fromto.unbacked_value - a.fromto.unbacked_value)[0];
+    return `<div class="bl-mb gap bl-nobk" id="bl-nobk"><div><b>${inr(nb.value)} of the open bills has no measurement backup</b>
+        <small>${nb.items} length line${nb.items === 1 ? "" : "s"} (cable, pipe, tray) without From–To. Optional — the bills are not held back.</small></div>
+      ${worst ? `<button class="btn" id="bl-nobkgo" data-ra="${esc(worst.id)}">See which →</button>` : ""}</div>`;
+  };
   function extraDialog(items, o) {
     const sel = new Set(items.map((_, i) => i));
     const srcName = (x) => (x.source === "progress" ? "Done" : x.source === "typed" ? "You typed" : "Challans");
@@ -714,7 +821,7 @@
       ${stages.map((st) => `<div class="n sg">${STAGE[st]} ${b.pct[st] == null ? "" : b.pct[st] + "%"}<br><small>Before</small></div><div class="n"><small>&nbsp;<br>To date</small></div><div class="n"><small>&nbsp;<br>This bill</small></div><div class="n"><small>&nbsp;<br>Amount</small></div>`).join("")}${locked ? "" : "<div></div>"}</div>`;
     const lineRow = (l) => `
       <div class="bl-lr ${B.expanded.has(l.item_code) ? "open" : ""}" data-code="${esc(l.item_code)}" style="grid-template-columns:${cols}">
-        <div class="d" data-l="Line"><span class="t">${esc(l.desc)}</span><small>${l.internal_ref ? "Ref " + esc(l.internal_ref) + " · " : ""}${esc(l.sheet || "")}${l.src_row ? " row " + l.src_row : ""}</small></div>
+        <div class="d" data-l="Line"><span class="t">${esc(l.desc)}</span><small>${l.internal_ref ? "Ref " + esc(l.internal_ref) + " · " : ""}${esc(l.sheet || "")}${l.src_row ? " row " + l.src_row : ""}</small>${ftChip(b, l, locked)}</div>
         <div class="n" data-l="BOQ qty">${qn(l.boq_qty)} <small>${esc(l.unit)}</small></div>
         <div class="n" data-l="Rate">${inr(l.rate, true)}</div>
         ${stages.map((st) => { const c = l[st]; if (!c) return `<div></div><div></div><div></div><div></div>`;
@@ -765,6 +872,7 @@
         ? "Installation is ₹0 in this bill: no installation progress had been logged in Site Progress for this service when it was invoiced. Bill installation later with New RA bill → Installation."
         : "Installation is ₹0 for now: no installation progress is logged in Site Progress for this service yet. It fills in by itself as work is logged — nothing to type here."}</div>` : ""}
       ${b.groups_confirmed ? "" : `<div class="bl-callout soft">Annexure groups were read from your sheet’s own “Cost of… / Total…” rows. Check them once in Billing setup → Annexure groups.</div>`}
+      ${ftStrip(b, locked)}
       <h3 class="bl-h3">Annexure</h3>
       <div class="bl-card bl-scroll"><div class="bl-grid" style="min-width:${520 + stages.length * 260}px">
         <div class="bl-gh" style="grid-template-columns:${gcols}"><div>Sr</div><div>Description</div><div class="n">WO amount</div>
@@ -787,8 +895,19 @@
     $("bl-dl").onclick = async () => { if (B.invSaving) await B.invSaving(); openDownload([ra.id]); };
     if ($("bl-impra")) $("bl-impra").onclick = () => uploadFilled(ra.service, () => showRA(id), id);
     wireInvStrip(ra, id);
+    if ($("bl-mbadd")) $("bl-mbadd").onclick = () => {
+      const gap = (b.lines || []).find((l) => { const f = ftOf(b, l.item_code); return f && f.unbacked > 0.005; });
+      if (!gap) return;
+      const chip = [...s.querySelectorAll("[data-meas]")].find((c) => c.dataset.meas === gap.item_code), row = chip && chip.closest(".bl-lr");
+      if (row && row.scrollIntoView) row.scrollIntoView({ block: "center" });
+      openMeasure(b, gap.item_code, async () => { const y = window.scrollY; await showRA(id); window.scrollTo(0, y); });
+    };
+    s.querySelectorAll("[data-meas]").forEach((el) => el.onclick = (e) => {
+      e.stopPropagation();
+      openMeasure(b, el.dataset.meas, async () => { const y = window.scrollY; await showRA(id); window.scrollTo(0, y); });
+    });
     s.querySelectorAll(".bl-lr").forEach((row) => row.addEventListener("click", (e) => {
-      if (e.target.closest("[data-edit]") || e.target.closest("[data-rm]") || e.target.closest("[data-xback]")) return;
+      if (e.target.closest("[data-edit]") || e.target.closest("[data-rm]") || e.target.closest("[data-xback]") || e.target.closest("[data-meas]")) return;
       const c = row.dataset.code; B.expanded.has(c) ? B.expanded.delete(c) : B.expanded.add(c); row.classList.toggle("open");
     }));
     s.querySelectorAll("[data-edit]").forEach((el) => el.onclick = () => editQty(el.dataset.edit, el.dataset.stage));
@@ -989,7 +1108,7 @@
   // The server builds it (GET .../download); this file only plans and previews it.
   const SHEETS = [["invoice", "Tax Invoice", "Your invoice format, filled in"], ["summary", "Annexure B-Summary BOQ", "Summary of the bill"],
     ["boq", "Annexure B-BOQ", "Line by line"], ["abstract", "Challan Abstract", "RA-wise qty · challan services"], ["challan", "Challan", "Challan-wise qty · challan services"],
-    ["meas", "With supporting backup", "Measurement Sheet at the end · installation bills"]];
+    ["meas", "With supporting backup", "Measurement Sheet at the end (+ From–To detail for Mtr / RMT items) · installation bills"]];
   const SER_ORD = { supply: 0, install: 1, together: 2 };
   const slugSafe = (t) => String(t).replace(/[^A-Za-z0-9._-]+/g, "_");
   const raFile = (r) => `${slugSafe(B.slug)}_${slugSafe(String(r.service).split(WOSEP).join("-"))}_${SERIES[r.series].replace(" + ", "+").replace(/ /g, "")}_RA-${String(r.no).padStart(2, "0")}${r.status === "draft" ? "_DRAFT" : ""}.xlsx`;
@@ -1065,6 +1184,12 @@
         if (c.legacy_ra) warnings.push({ k: "meas", text: `${nm(r)} was invoiced before locations were kept. Its Measurement Sheet shows the totals, with “Location not recorded”.` });
         else if (c.earlier.length) warnings.push({ k: "meas", text: `${nm(r)}: ${c.earlier.length} item${c.earlier.length === 1 ? " was" : "s were"} billed in earlier RAs without locations (${brief(c.earlier.map((e) => e.sr ? e.sr + " " + String(e.desc).slice(0, 28) : String(e.desc).slice(0, 28)), 3)}). That earlier quantity shows as “Location of earlier RAs not recorded”; everything new is shown by location.` });
         if (c.adjusted) warnings.push({ k: "measinfo", text: `${nm(r)}: ${c.adjusted} item${c.adjusted === 1 ? "" : "s"} carr${c.adjusted === 1 ? "ies" : "y"} one adjustment line (quantity capped at the BOQ, or typed by hand), so the sheet always matches the bill.` });
+        const f = c.fromto;
+        if (f) {                                          // length items: is the From-To detail (Annexure D) behind them?
+          if (!f.with_entries) warnings.push({ k: "meas", text: `${nm(r)}: no From–To measurement entered for its ${f.items} length item${f.items === 1 ? "" : "s"}${f.unbacked_value > 0 ? ` (${inr(f.unbacked_value)})` : ""}. The backup then has Annexure C only; add measurements in Site Progress or from the 📏 chip on the RA.` });
+          else if (f.unbacked_items) warnings.push({ k: "meas", text: `${nm(r)}: ${f.unbacked_items} of ${f.items} length item${f.items === 1 ? " has" : "s have"} quantity without From–To${f.unbacked_value > 0 ? ` (${inr(f.unbacked_value)})` : ""}: ${brief(f.gaps.map((g) => (g.sr ? g.sr + " " : "") + String(g.desc).slice(0, 28) + " " + qn(g.unbacked) + " " + g.unit), 3)}. Annexure D lists only the entries.` });
+          else warnings.push({ k: "measinfo", text: `${nm(r)}: all ${f.items} length item${f.items === 1 ? " has" : "s have"} From–To. Annexure D-From-To Detail follows Annexure C.` });
+        }
       });
     }
     if (wantInv) {
@@ -1098,7 +1223,7 @@
     return a.download;
   }
 
-  async function openDownload(pre, keep) {
+  async function openDownload(pre, keep, opt) {
     let ov;
     try { ov = await jget(api("/" + B.slug)); B.ov = ov; } catch (e) { toast(briefErr(e)); return; }
     if (!ov.ras.length) { toast("No RA yet — create an RA bill first."); return; }
@@ -1108,6 +1233,9 @@
     DL.pbrep = {};                                   // per-RA report of the ProjectBase sheet, fetched when it is ticked
     if (!keep) DL.sel = new Set(pre && pre.length ? pre : []);       // nothing is ticked for you: from a draft only that draft, from home nothing
     DL.sel = new Set([...DL.sel].filter((id) => ov.ras.some((r) => r.id === id)));
+    // the supporting backup is ticked for you when the RA you opened it from has measurement entries (it is the whole point of entering them),
+    // or when you came from "Download backup"; otherwise it stays as it always was (off). It never changes a choice you already made.
+    if (!keep && ((opt && opt.meas) || [...DL.sel].some((id) => { const r = ov.ras.find((x) => x.id === id); return r && r.stages.includes("install") && r.fromto && r.fromto.with_entries > 0; }))) DL.sheets.meas = true;
     const allGroups = ov.services.map((s) => ({ s, ras: ov.ras.filter((r) => r.service === s.service).sort((a, b) => a.no - b.no || SER_ORD[a.series] - SER_ORD[b.series]) }));
     const groups = () => allGroups.filter((g) => g.ras.length);           // services with no RA yet are only named, not listed
     const noRa = () => allGroups.filter((g) => !g.ras.length).map((g) => g.s.service);
@@ -1190,7 +1318,7 @@
         <div class="bl-lbl">2 · Sheets in the invoice workbook</div>
         <div class="bl-shs ${DL.invoice ? "" : "off"}">${SHEETS.map(([k, n, d]) => `<label class="bl-ck ${DL.sheets[k] ? "on" : ""}" title="${esc(d)}"><input type="checkbox" data-sh="${k}"${ck(DL.sheets[k])}${DL.invoice ? "" : " disabled"}><span>${esc(n)}</span></label>`).join("")}</div>
         <div class="bl-hint">Challan Abstract and Challan exist only for services whose supply quantity comes from delivery challans.</div>
-        <div class="bl-hint">With supporting backup adds a Measurement Sheet as the last sheet of the workbook, for installation bills: where each quantity was fitted (floor / level / zone), what was billed before and what is new, and boxes for the client to sign. Quantities only, no rates.</div>
+        <div class="bl-hint">With supporting backup adds a Measurement Sheet as the last sheet of the workbook, for installation bills: where each quantity was fitted (floor / level / zone), what was billed before and what is new, and boxes for the client to sign. Quantities only, no rates. For Mtr / RMT items with measurements entered at site, the From–To Detail (the drum readings) follows it.</div>
         <div class="bl-dlq"><div class="bl-lbl">3 · Which RAs</div><div class="bl-qk">
           <button type="button" class="btn" data-q="latest">Latest of each service</button><button type="button" class="btn" data-q="locked">All invoiced</button>
           <button type="button" class="btn" data-q="all">All</button><button type="button" class="btn" data-q="none">Clear</button></div>

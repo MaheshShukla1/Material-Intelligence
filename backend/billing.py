@@ -68,13 +68,14 @@ from pathlib import Path
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Response, UploadFile, File, Form, Query
 
-from . import siteprogress as sp, itemprog, linkage, boq, locqty, projectbase as pbx
+from . import siteprogress as sp, itemprog, linkage, boq, locqty, runlog, projectbase as pbx
 
 router = APIRouter(prefix="/api/billing", tags=["billing"])
 
 STAGES = {"supply": ["supply"], "install": ["install"], "together": ["supply", "install"]}
 STAGE_NAME = {"supply": "Supply", "install": "Installation"}
 SERIES_NAME = {"supply": "Supply", "install": "Installation", "together": "Supply + Installation"}
+OVERALL_STAGES = ("supply", "install")      # the overall annexure reads each Work Order cut into these two
 QUICK_SECTION = "Quick-added (from stock)"
 SEP = " \u203a "            # "Electrical › Only point wiring": the key of one Work Order inside a service
 
@@ -1475,6 +1476,7 @@ def overview(slug: str):
     store = _load(d)
     svcs = _services(d)
     ras, contract, billed, ready_total, notes = [], 0.0, 0.0, 0.0, []
+    nofrom = {"value": 0.0, "items": 0, "drafts": 0}           # open drafts' length lines that have no From-To measurement behind them
     services = []
     for svc in svcs:
         lines = _lines(d, svc)
@@ -1507,6 +1509,9 @@ def overview(slug: str):
             ras.append(_ra_summary(r, r["snap"]["this_total"]) | {"lines": len(r["snap"]["lines"]), "up_to_date": None,
                                                                    "stage_this": _stage_this(r["snap"]),
                                                                    "extra_n": len(r["snap"].get("extra_lines") or [])})
+            ft = _fromto(slug, d, store, r)                # frozen at lock: what the invoiced bill had From-To behind it
+            if ft:
+                ras[-1]["fromto"] = {k: ft[k] for k in _FT_KEYS}
         else:
             b = _bill(slug, d, store, r)
             for w in b["warnings"]:
@@ -1519,6 +1524,12 @@ def overview(slug: str):
             ras.append(_ra_summary(r, b["this_total"]) | {"lines": len(b["lines"]), "up_to_date": None,
                                                           "stage_this": _stage_this(b),
                                                           "over_n": len(b["excess"]), "extra_n": len(b["extra_lines"])})
+            ft = _fromto(slug, d, store, r, b)
+            if ft:                                         # Mtr / RMT lines of an open draft: the ₹ of them that has no From-To behind it
+                ras[-1]["fromto"] = {k: ft[k] for k in _FT_KEYS}
+                nofrom["value"] += ft["unbacked_value"]
+                nofrom["items"] += ft["unbacked_items"]
+                nofrom["drafts"] += 1
     # up-to-date per RA = everything locked up to and including it in its stages (+ own draft)
     for r in ras:
         raw = _ra(store, r["id"])
@@ -1536,7 +1547,7 @@ def overview(slug: str):
             "pb": {k: {"project": v.get("project"), "name": v.get("name"), "at": v.get("at"), "lines": v.get("lines")}
                    for k, v in (store.get("pb") or {}).items() if _pb_file(d, k).exists()},
             "contract_value": contract, "billed": billed, "ready_total": ready_total,
-            "has_boq": bool(svcs)}
+            "has_boq": bool(svcs)} | ({"no_backup": {"value": round(nofrom["value"], 2), "items": nofrom["items"], "drafts": nofrom["drafts"]}} if nofrom["drafts"] else {})
 
 
 @router.get("/{slug}/activity-impact")
@@ -1635,27 +1646,53 @@ def _overall(slug, d, store, base):
         lines = _lines(d, u)
         groups, _ = _groups_for(d, store, u, lines)
         n = len(groups)
+        setup_u = store["setup"].get(u) or {}
         wo, inv, drf = [0.0] * (n + 1), [0.0] * (n + 1), [0.0] * (n + 1)      # last slot = lines in no group
+        # the same amounts cut by stage (Supply / Installation); a stage's share of a group is only known when every
+        # line in it has a % for that stage -- otherwise it stays None ("not set"), never a guessed number
+        s_inv = {st: [0.0] * (n + 1) for st in OVERALL_STAGES}
+        s_drf = {st: [0.0] * (n + 1) for st in OVERALL_STAGES}
+        s_wo = {st: [0.0] * (n + 1) for st in OVERALL_STAGES}
+        s_wo_ok = {st: [True] * (n + 1) for st in OVERALL_STAGES}
         for ln in lines:
             gi = _group_of(groups, ln)
             wo[n if gi is None else gi] += ln["rate"] * ln["boq_qty"]
+            for st in OVERALL_STAGES:
+                p_ = _stage_pct(setup_u, ln["item_code"], st)
+                slot_ = n if gi is None else gi
+                if p_ is None:
+                    s_wo_ok[st][slot_] = False
+                else:
+                    s_wo[st][slot_] += ln["rate"] * ln["boq_qty"] * p_ / 100.0
         ras = []
         for r in sorted([x for x in store["ras"] if x["service"] == u], key=lambda x: (x["no"], x["series"])):
             b = _get_bill(slug, d, store, r)
             tgt = inv if r["status"] == "locked" else drf
+            by_stage_tgt = s_inv if r["status"] == "locked" else s_drf
             for row in b["lines"]:
                 gi = _group_of(groups, row)
                 tgt[n if gi is None else gi] += sum(((row.get(st) or {}).get("amount") or 0.0) for st in STAGES[r["series"]])
+                for st in STAGES[r["series"]]:
+                    by_stage_tgt[st][n if gi is None else gi] += ((row.get(st) or {}).get("amount") or 0.0)
             ras.append({"id": r["id"], "no": r["no"], "series": r["series"], "status": r["status"],
-                        "label": f"{SERIES_NAME[r['series']]} RA {r['no']}", "this_total": b["this_total"]})
+                        "label": f"{SERIES_NAME[r['series']]} RA {r['no']}", "this_total": b["this_total"],
+                        "by_stage": _stage_this(b)})
+        def _stages_of(i):
+            """Supply / Installation cut of one row: the stage's share of the Work Order (None when not known), what is
+            invoiced and what sits in a draft. A group whose Work Order value is typed in the BOQ sheet and differs from
+            rate x qty has no known stage share (cutting it by % would be a guess)."""
+            typed = i < n and groups[i].get("wo") is not None and abs(groups[i]["wo"] - wo[i]) > 0.5
+            return {st: {"wo": (s_wo[st][i] if (s_wo_ok[st][i] and not typed) else None),
+                         "invoiced": s_inv[st][i], "draft": s_drf[st][i]} for st in OVERALL_STAGES}
+
         rows = []
         for i, g in enumerate(groups):
             w = g["wo"] if g.get("wo") is not None else wo[i]
             rows.append({"sr": g.get("sr") or "", "name": g.get("name") or "Items", "wo": w, "invoiced": inv[i],
-                         "draft": drf[i], "todate": inv[i] + drf[i]})
+                         "draft": drf[i], "todate": inv[i] + drf[i], "stages": _stages_of(i)})
         if wo[n] or inv[n] or drf[n]:
             rows.append({"sr": "", "name": "Other items (not in any group)", "wo": wo[n], "invoiced": inv[n],
-                         "draft": drf[n], "todate": inv[n] + drf[n]})
+                         "draft": drf[n], "todate": inv[n] + drf[n], "stages": _stages_of(n)})
         for x in rows:
             x["pct"] = (x["todate"] / x["wo"] * 100.0) if x["wo"] else None
             x["billed"] = abs(x["todate"]) > 1e-9
@@ -1665,21 +1702,179 @@ def _overall(slug, d, store, base):
             top = sorted(ras, key=lambda x: (x["no"], x["status"] == "draft"))[-1]
             latest = {"id": top["id"], "no": top["no"], "status": top["status"], "label": top["label"]}
         meta = store["meta"]
+        ustages = {}
+        for st in OVERALL_STAGES:
+            shares = [x["stages"][st]["wo"] for x in rows]
+            ustages[st] = {"set": _num(setup_u.get(st + "_pct")) is not None, "pct": _num(setup_u.get(st + "_pct")),
+                           "wo": (None if any(v is None for v in shares) else sum(shares)),
+                           "invoiced": sum(x["stages"][st]["invoiced"] for x in rows),
+                           "draft": sum(x["stages"][st]["draft"] for x in rows)}
         units.append({"unit": u, "package": _uname(u), "wo_no": _wo_no(meta, u) or "", "work": (meta.get("work") or {}).get(u) or "",
-                      "wo_value": t_wo, "invoiced": t_inv, "draft": t_drf, "todate": t_inv + t_drf,
+                      "wo_value": t_wo, "invoiced": t_inv, "draft": t_drf, "todate": t_inv + t_drf, "stages": ustages,
                       "pct": ((t_inv + t_drf) / t_wo * 100.0) if t_wo else None,
                       "latest": latest, "ras": ras, "rows": rows, "source": _source(store, u),
                       "set": bool((store["setup"].get(u) or {}).get("mode"))})
     tw, ti, td = (sum(x[k] for x in units) for k in ("wo_value", "invoiced", "draft"))
+    tstages = {}
+    for st in OVERALL_STAGES:
+        shares = [x["stages"][st]["wo"] for x in units]
+        tstages[st] = {"wo": (None if any(v is None for v in shares) else sum(shares)),
+                       "invoiced": sum(x["stages"][st]["invoiced"] for x in units),
+                       "draft": sum(x["stages"][st]["draft"] for x in units)}
     return {"base": base, "split": len(units) > 1 or any(SEP in x["unit"] for x in units), "units": units,
             "totals": {"wo_value": tw, "invoiced": ti, "draft": td, "todate": ti + td,
-                       "pct": ((ti + td) / tw * 100.0) if tw else None}}
+                       "pct": ((ti + td) / tw * 100.0) if tw else None, "stages": tstages}}
 
 
 @router.get("/{slug}/overall/{base}")
 def overall(slug: str, base: str):
     d = sp._need(slug)
     return _overall(slug, d, _load(d), base)
+
+
+def _overall_stage_sheet(wb, o, meta, base, drafts):
+    """Second sheet of the overall annexure: the same rows cut into a Supply block and an Installation block.
+    Sheet 1 is left exactly as it was. Billed to date and Done are formulas, like sheet 1; a figure that is not known
+    (a stage with no % set, or a group value typed in the BOQ sheet) is written as a dash, never as a number."""
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter as L
+    ws = wb.create_sheet("Supply vs Installation")
+    thin = Side(style="thin", color="000000")
+    BOX = Border(left=thin, right=thin, top=thin, bottom=thin)
+    BOLD = Font(name="Calibri", bold=True, size=11)
+    PEACH = PatternFill("solid", fgColor="FCE4D6")
+    TINT = {"supply": PatternFill("solid", fgColor="EBE8FA"), "install": PatternFill("solid", fgColor="DCEFEC")}
+    ws["A1"] = meta.get("client") or ""
+    ws["A1"].font = Font(name="Calibri", bold=True, size=13)
+    ws["A2"], ws["B2"] = "Work", f"{base}, Supply vs Installation annexure"
+    ws["A3"], ws["B3"] = "Contractor", meta.get("contractor") or ""
+    ws["A4"], ws["B4"] = "As on", dt.date.today().strftime("%d.%m.%Y")
+    ws["A5"], ws["B5"] = "Includes", "Invoiced RAs and open drafts" if drafts else "Invoiced RAs only"
+    for r_ in range(2, 6):
+        ws.cell(r_, 1).font = BOLD
+    sub = ["Value", "Invoiced"] + (["In draft"] if drafts else []) + ["Billed to date", "Done %"]
+    w = len(sub)                                          # columns per stage block
+    first = {"supply": 4, "install": 4 + w}               # first column of each block (A Sr, B Description, C Work Order amount)
+    ncol = 3 + 2 * w
+    row = 7
+    totals = []
+
+    def put(r_, c_, v, fmt=None, bold=False, fill=None, right=True):
+        c = ws.cell(r_, c_, v)
+        c.border = BOX
+        if fmt:
+            c.number_format = fmt
+        if bold:
+            c.font = BOLD
+        if fill:
+            c.fill = fill
+        if right and c_ >= 3:
+            c.alignment = Alignment(horizontal="right")
+        return c
+
+    def head(r_, u_stages):
+        for c_ in range(1, 4):
+            ws.cell(r_, c_).fill, ws.cell(r_, c_).border = PEACH, BOX
+        for st, nm in (("supply", "Supply"), ("install", "Installation")):
+            p_ = (u_stages or {}).get(st) or {}
+            lab = nm + (f" · {p_['pct']:g}%" if p_.get("pct") is not None else "")
+            ws.merge_cells(start_row=r_, start_column=first[st], end_row=r_, end_column=first[st] + w - 1)
+            c = ws.cell(r_, first[st], lab)
+            c.font, c.alignment = BOLD, Alignment(horizontal="center")
+            for k in range(w):
+                ws.cell(r_, first[st] + k).fill, ws.cell(r_, first[st] + k).border = TINT[st], BOX
+        for i, h_ in enumerate(["Sr.No.", "Description", "Work Order amount"], start=1):
+            c = ws.cell(r_ + 1, i, h_)
+            c.font, c.fill, c.border = BOLD, PEACH, BOX
+            c.alignment = Alignment(wrap_text=True, horizontal="center", vertical="center")
+        for st in ("supply", "install"):
+            for k, h_ in enumerate(sub):
+                c = ws.cell(r_ + 1, first[st] + k, h_)
+                c.font, c.fill, c.border = BOLD, PEACH, BOX
+                c.alignment = Alignment(wrap_text=True, horizontal="center", vertical="center")
+
+    def stage_cells(r_, st, v, wo_known, unknown, subtotal_of=None):
+        """value / invoiced / [draft] / billed / done of one stage on one row. subtotal_of = (first_row, last_row) -> SUM formulas."""
+        c0 = first[st]
+        col = lambda k: L(c0 + k)
+        n_amt = 1 + (1 if drafts else 0)                  # invoiced (+ draft)
+        bill_col, val_col = col(w - 2), col(0)
+        fills = {"fill": PEACH} if subtotal_of else {}
+        bold = bool(subtotal_of)
+        if unknown:                                       # the stage has no % set: nothing is known, nothing is shown as a number
+            for k in range(w):
+                put(r_, c0 + k, "—", bold=bold, **fills)
+            return
+        if subtotal_of:
+            a, b = subtotal_of
+            put(r_, c0, (f"=SUM({val_col}{a}:{val_col}{b})" if wo_known else "—"), "#,##0.00", bold, **fills)
+            for k in range(1, 1 + n_amt):
+                put(r_, c0 + k, f"=SUM({col(k)}{a}:{col(k)}{b})", "#,##0.00", bold, **fills)
+        else:
+            put(r_, c0, v["wo"] if wo_known else "—")
+            if wo_known:
+                ws.cell(r_, c0).number_format = "#,##0.00"
+            put(r_, c0 + 1, v["invoiced"], "#,##0.00")
+            if drafts:
+                put(r_, c0 + 2, v["draft"], "#,##0.00")
+        amt = "+".join(f"{col(k)}{r_}" for k in range(1, 1 + n_amt))
+        put(r_, c0 + w - 2, "=" + amt, "#,##0.00", bold, **fills)
+        put(r_, c0 + w - 1, f'=IF(ISNUMBER({val_col}{r_}),IF({val_col}{r_}=0,"",{bill_col}{r_}/{val_col}{r_}),"")', "0.0%", bold, **fills)
+
+    for u in o["units"]:
+        title = (f"Work Order: {u['package']}" if u["package"] else f"Work Order: {base}")
+        if u["wo_no"]:
+            title += f" (W/O {u['wo_no']})"
+        ws.cell(row, 1, title).font = BOLD
+        row += 1
+        head(row, u.get("stages"))
+        row += 2
+        first_row = row
+        for x in u["rows"]:
+            put(row, 1, x["sr"])
+            put(row, 2, x["name"])
+            put(row, 3, x["wo"], "#,##0.00")
+            for st in ("supply", "install"):
+                us = (u.get("stages") or {}).get(st) or {}
+                v = x["stages"][st]
+                stage_cells(row, st, v, v["wo"] is not None, not us.get("set") and v["wo"] is None)
+            row += 1
+        last_row = row - 1
+        put(row, 1, None, fill=PEACH)
+        put(row, 2, "Subtotal", bold=True, fill=PEACH)
+        put(row, 3, f"=SUM(C{first_row}:C{last_row})", "#,##0.00", True, PEACH)
+        for st in ("supply", "install"):
+            us = (u.get("stages") or {}).get(st) or {}
+            stage_cells(row, st, None, us.get("wo") is not None, not us.get("set") and us.get("wo") is None, (first_row, last_row))
+        totals.append(row)
+        row += 2
+    # all Work Orders: the unit subtotals added up; a stage that is not known in some Work Order stays a dash
+    put(row, 1, None, fill=PEACH)
+    put(row, 2, f"{base}, all Work Orders", bold=True, fill=PEACH)
+    put(row, 3, "=" + "+".join(f"C{t}" for t in totals), "#,##0.00", True, PEACH)
+    for st in ("supply", "install"):
+        c0 = first[st]
+        unknown = any(not ((u.get("stages") or {}).get(st) or {}).get("set") and ((u.get("stages") or {}).get(st) or {}).get("wo") is None for u in o["units"])
+        wo_known = ((o["totals"].get("stages") or {}).get(st) or {}).get("wo") is not None
+        if unknown:
+            for k in range(w):
+                put(row, c0 + k, "—", bold=True, fill=PEACH)
+            continue
+        for k in range(w - 2):
+            col = L(c0 + k)
+            if k == 0 and not wo_known:
+                put(row, c0, "—", bold=True, fill=PEACH)
+            else:
+                put(row, c0 + k, "=" + "+".join(f"{col}{t}" for t in totals), "#,##0.00", True, PEACH)
+        val_col, bill_col = L(c0), L(c0 + w - 2)
+        put(row, c0 + w - 2, "=" + "+".join(f"{L(c0 + k)}{row}" for k in range(1, w - 2)), "#,##0.00", True, PEACH)
+        put(row, c0 + w - 1, f'=IF(ISNUMBER({val_col}{row}),IF({val_col}{row}=0,"",{bill_col}{row}/{val_col}{row}),"")', "0.0%", True, PEACH)
+    ws.column_dimensions["A"].width = 9
+    ws.column_dimensions["B"].width = 52
+    ws.column_dimensions["C"].width = 20
+    for c_ in range(4, ncol + 1):
+        ws.column_dimensions[L(c_)].width = 10 if (c_ - 4) % w == w - 1 else 17
+    ws.sheet_view.showGridLines = False
 
 
 def overall_xlsx(slug, base, drafts=True):
@@ -1768,6 +1963,7 @@ def overall_xlsx(slug, base, drafts=True):
     for col, w in zip("ABCDEFG", (9, 60, 20, 18, 18, 18, 10)):
         ws.column_dimensions[col].width = w
     ws.sheet_view.showGridLines = False
+    _overall_stage_sheet(wb, o, meta, base, drafts)       # sheet 2: Supply vs Installation (sheet 1 above is unchanged)
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -1860,6 +2056,9 @@ def get_ra(slug: str, ra_id: str):
     ra = _ra(store, ra_id)
     b = _get_bill(slug, d, store, ra)
     b["ra"]["inv_missing"] = _cover_missing(store, ra)
+    ft = _fromto(slug, d, store, ra, b if ra["status"] == "draft" else None)
+    if ft:                                                 # only a bill with length items carries it: any other RA is byte-for-byte what it was
+        b["fromto"] = ft
     return b
 
 
@@ -4455,8 +4654,14 @@ def _write_ra(wb, slug, d, store, ra, names, want):
         _fill_extra_sheet(wb.create_sheet(_extra_sheet_name(names, wb.sheetnames)), extra_rows, stages, bill, service, meta, live)
     if MEAS_KEY in want and "install" in stages:      # the supporting backup goes LAST
         ws_m = wb.create_sheet(_meas_sheet_name(names, wb.sheetnames))
-        _fill_meas_sheet(ws_m, store, d, ra, _meas_items_for_write(slug, d, store, ra, bill, layout), service, live)
-        return ws_m.title
+        items = _meas_items_for_write(slug, d, store, ra, bill, layout)
+        _fill_meas_sheet(ws_m, store, d, ra, items, service, live)
+        made = [ws_m.title]
+        if any(it.get("runs") for it in items):           # Mtr / RMT items with From / To entries: the client's run sheet follows
+            ws_r = wb.create_sheet(_run_sheet_name(names, wb.sheetnames))
+            _fill_run_sheet(ws_r, store, ra, items, service, live)
+            made.append(ws_r.title)
+        return made
     return None
 
 
@@ -4464,15 +4669,19 @@ def _write_ra(wb, slug, d, store, ra, names, want):
 # "Where was each installed quantity fitted?" -- the backup a client certifies. It is built from what the site
 # recorded (locqty.py); a place is never invented. The sheet always ties to the bill: whatever the location
 # records do not explain (a quantity capped at the BOQ, a hand-typed quantity) is one visible Adjustment line.
-def _attach_loc(slug, d, store, ra, bill):
+def _attach_loc(slug, d, store, ra, bill, only=None):
     """Add c["loc"] = {"now", "prev", "mode"} to every Installation cell of `bill` (a LIVE bill of a draft, or the
     bill being locked). `prev` is the location record of the last LOCKED RA that billed the item; when an earlier RA
-    billed it without recording locations, mode is "legacy" -- the sheet then says so instead of guessing."""
+    billed it without recording locations, mode is "legacy" -- the sheet then says so instead of guessing.
+    `only` (a set of item codes) limits it to those lines -- the From-To status of a screen needs just the length items."""
     if "install" not in STAGES[ra["series"]]:
+        return
+    if only is not None and not only:
         return
     service = ra["service"]
     base = _base(service)
     ctx = sp.location_context(d, base)
+    runs_all, info = sp.item_runs_all(d, base), None          # run entries (From / To / drum readings) of the Mtr / RMT items
     done = sorted((r for r in store["ras"] if r["service"] == service and r["status"] == "locked" and r["id"] != ra["id"]
                    and "install" in STAGES[r["series"]] and r.get("snap")), key=lambda r: r["no"], reverse=True)
     for row in bill["lines"]:
@@ -4480,6 +4689,8 @@ def _attach_loc(slug, d, store, ra, bill):
         if not c:
             continue
         code = row["item_code"]
+        if only is not None and code not in only:
+            continue
         mode, prev = "none", None
         if (c.get("prev") or 0) > 1e-9:
             mode = "legacy"
@@ -4492,6 +4703,71 @@ def _attach_loc(slug, d, store, ra, bill):
                     mode, prev = "loc", loc["now"]
                 break
         c["loc"] = {"now": sp.item_location_qty(d, base, code, ctx), "prev": prev, "mode": mode}
+        runs = runs_all.get(str(code)) or {}
+        if any(runlog.active(v) for v in runs.values()):
+            if info is None:
+                info = sp.location_info(d)
+            nq, nord = runlog.key_quantities(c["loc"]["now"])
+            pq, _po = runlog.key_quantities(prev) if prev else (None, None)
+            lines = runlog.sheet_lines(runs, nq, pq, mode, info, nord)
+            if lines:                                         # frozen with the bill, like the location records themselves
+                c["loc"]["runs"] = lines
+
+
+_FT_KEYS = ("items", "unbacked_items", "with_entries", "value", "unbacked_value", "unknown")
+
+
+def _fromto(slug, d, store, ra, bill=None):
+    """How much of an Installation bill's LENGTH quantity (Mtr / RMT items) has From-To measurements behind it -- what the Billing screens tell
+    the person while the bill is still a draft, and what the download dialog says before the backup is downloaded.
+
+    Returns None when the bill has no Installation stage or bills no length item. Otherwise
+      {"lines": {item_code: {"n", "this", "backed", "unbacked", "unbacked_amount"}},   (n = active entries; quantities of THIS bill)
+       "items", "unbacked_items", "with_entries", "value", "unbacked_value", "unknown"}
+    value = the ₹ of the length lines of this bill; unbacked_value = the part of it no entry explains. A line whose ₹ is unknown (its % is not set)
+    is counted in "unknown" and never turned into a number. Nothing is guessed: "backed" is exactly what the Annexure D sheet would print as entries
+    (a locked RA reads the lines frozen into its snapshot, a draft reads the entries now)."""
+    if "install" not in STAGES[ra["series"]]:
+        return None
+    if ra["status"] == "locked":
+        src = _get_bill(slug, d, store, ra, keep_loc=True)
+    else:
+        src = bill if bill is not None else _bill(slug, d, store, ra)
+    rows = [r for r in src["lines"] if runlog.is_run_unit(r.get("unit")) and (r.get("install") or {}).get("this") not in (None, 0)
+            and (r["install"]["this"] or 0) > 0]
+    if not rows:
+        return None
+    if ra["status"] == "locked":
+        work = rows
+    else:                                                  # never write loc into the live bill: it is for the sheets, not the screens
+        work = [{"item_code": r["item_code"], "install": dict(r["install"])} for r in rows]
+        _attach_loc(slug, d, store, ra, {"lines": work}, only={r["item_code"] for r in rows})
+    lines, value, unb_val, unknown, unb_items = {}, 0.0, 0.0, 0, 0
+    for row, w in zip(rows, work):
+        c = row["install"]
+        this = float(c["this"])
+        ent = [l for l in (((w.get("install") or {}).get("loc") or {}).get("runs") or []) if l.get("kind") == "run"]
+        if ent and all(l.get("this") is not None for l in ent):
+            backed = sum(max(0.0, l["this"]) for l in ent)
+        elif ent:                                          # billed before without locations: the split into previous / this is unknown, so only what fits
+            backed = sum(l["qty"] for l in ent)
+        else:
+            backed = 0.0
+        backed = round(min(this, backed), 4)
+        unb = round(this - backed, 4)
+        if unb < 0.005:
+            unb = 0.0
+        amt = c.get("amount")
+        unb_amt = None if amt is None else round(amt * unb / this, 2)
+        if amt is None:
+            unknown += 1
+        else:
+            value += amt
+            unb_val += unb_amt
+        unb_items += 1 if unb else 0
+        lines[row["item_code"]] = {"n": len(ent), "this": round(this, 4), "backed": backed, "unbacked": unb, "unbacked_amount": unb_amt}
+    return {"lines": lines, "items": len(lines), "unbacked_items": unb_items, "with_entries": sum(1 for v in lines.values() if v["n"]),
+            "value": round(value, 2), "unbacked_value": round(unb_val, 2), "unknown": unknown}
 
 
 def _meas_items(d, store, ra, bill, layout):
@@ -4538,6 +4814,7 @@ def _meas_items(d, store, ra, bill, layout):
                     why = "not covered by the location records"
                 it["adj"] = {"label": why, "prev": adj_prev, "this": adj_this, "total": adj_total}
             it["located"] = bool(lines) and loc.get("mode") != "legacy"
+            it["runs"] = loc.get("runs") or []            # From / To / drum-reading lines of a Mtr / RMT item (the run-detail sheet)
         out.append(it)
     return out
 
@@ -4688,10 +4965,18 @@ def measurement_coverage(slug: str, ras: str = ""):
             out.append({"id": ra["id"], "applies": False, "items": 0, "earlier": [], "legacy_ra": False, "adjusted": 0})
             continue
         items = _meas_for(slug, d, store, ra)
-        out.append({"id": ra["id"], "applies": True, "items": len(items),
-                    "earlier": [{"sr": i["sr"], "desc": i["desc"], "qty": i["prev"]} for i in items if not i["tracked"]],
-                    "legacy_ra": any(i.get("norec") for i in items),
-                    "adjusted": sum(1 for i in items if i["adj"])})
+        row = {"id": ra["id"], "applies": True, "items": len(items),
+               "earlier": [{"sr": i["sr"], "desc": i["desc"], "qty": i["prev"]} for i in items if not i["tracked"]],
+               "legacy_ra": any(i.get("norec") for i in items),
+               "adjusted": sum(1 for i in items if i["adj"])}
+        ft = _fromto(slug, d, store, ra)
+        if ft:                                              # length items: how many have From-To, and which do not (the From-To sheet is made from the entries)
+            by = {i["item_code"]: i for i in items if i.get("item_code")}
+            row["fromto"] = {"items": ft["items"], "unbacked_items": ft["unbacked_items"], "value": ft["value"], "unbacked_value": ft["unbacked_value"],
+                             "with_entries": ft["with_entries"],
+                             "gaps": [{"sr": by.get(k, {}).get("sr", ""), "desc": by.get(k, {}).get("desc", ""), "unit": by.get(k, {}).get("unit", ""),
+                                       "unbacked": v["unbacked"], "this": v["this"]} for k, v in ft["lines"].items() if v["unbacked"]][:12]}
+        out.append(row)
     return {"ras": out}
 
 
@@ -4703,6 +4988,141 @@ def _meas_sheet_name(names, taken):
         n = base[:28] + f" {i}"
         i += 1
     return n
+
+
+def _run_sheet_name(names, taken):
+    """'Annexure D-From-To Detail' in the plain layout; else the BOQ tab's own prefix + ' FROM-TO' (never a clash, 31 characters at most)."""
+    base = "Annexure D-From-To Detail" if names["boq"] == "Annexure B-BOQ" else _sheet_safe(names["boq"][:-len("BOQ")].rstrip() + " FROM-TO")
+    n, i, low = base, 2, {x.lower() for x in taken}
+    while n.lower() in low:
+        n = base[:28] + f" {i}"
+        i += 1
+    return n
+
+
+def _fill_run_sheet(ws, store, ra, items, service, live):
+    """Annexure D: the From-To Detail -- for every Mtr / RMT item whose measurements were entered at site, WHERE each length was laid
+    (From, To), the drum readings behind it, its length, and how much of it was billed before / in this bill. Same plain
+    format as Annexure C. Each item ends with the bill's own total (as in Annexure B-BOQ): whatever the run entries do not
+    explain is one visible line, so the sheet always ties to the bill. Quantities only, no rates."""
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    meta = store["meta"]
+    BOLD, NORM = Font(name="Calibri", bold=True, size=11), Font(name="Calibri", size=11)
+    ITAL = Font(name="Calibri", size=11, italic=True)
+    SMALL = Font(name="Calibri", italic=True, size=10, color="595959")
+    thin = Side(style="thin", color="000000")
+    BOX = Border(left=thin, right=thin, top=thin, bottom=thin)
+    GREEN, PEACH = PatternFill("solid", fgColor="C6E0B4"), PatternFill("solid", fgColor="FCE4D6")
+    mid = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    QTY = '#,##0.00;-#,##0.00;"-"'
+    NCOL = 11
+    ws.sheet_view.showGridLines = False
+    for col, wd in zip("ABCDEFGHIJK", (10, 40, 8, 24, 24, 11, 11, 12, 13, 13, 34)):
+        ws.column_dimensions[col].width = wd
+    ws["A1"] = meta.get("client") or ""
+    ws["A1"].font = Font(name="Calibri", bold=True, size=13)
+    for r_, (k, v) in enumerate([("WO. No.", _wo_no(meta, service) or ""), ("Work", f"{_unit_text(service)} works"),
+                                 ("Contractor", meta.get("contractor") or "")], start=2):
+        ws.cell(r_, 1, k).font = BOLD
+        ws.cell(r_, 2, v).font = NORM
+    if live:
+        ws.cell(5, 2, "DRAFT — not invoiced yet, numbers can still change").font = Font(name="Calibri", bold=True, color="A02622")
+    ws["A6"], ws["B6"] = "Annexure D", "From-To Detail — the measurements and drum readings behind the length quantities in Annexure C"
+    ws["A6"].font = ws["B6"].font = BOLD
+    ws.merge_cells("I7:K7")
+    ws["I7"] = f"RA-{ra['no']:02d}"
+    for c_ in "IJK":
+        ws[f"{c_}7"].fill, ws[f"{c_}7"].border = GREEN, BOX
+    ws["I7"].font, ws["I7"].alignment = BOLD, mid
+    heads = ["Sr. No", "Description / Zone", "Unit", "From", "To", "Drum reading START", "Drum reading END", "LENGTH", "PREVIOUS BILL QTY",
+             "THIS BILL QTY", "Remarks"]
+    for j, t in enumerate(heads, start=1):
+        c_ = ws.cell(8, j, t)
+        c_.font, c_.fill, c_.border, c_.alignment = BOLD, PEACH, BOX, mid
+    ws.row_dimensions[8].height = 45
+    r = 9
+
+    def put(row, vals, font=None, fill=None):
+        for j in range(1, NCOL + 1):
+            c_ = ws.cell(row, j)
+            c_.border = BOX
+            c_.font = font or NORM
+            if fill:
+                c_.fill = fill
+        for j, v in vals.items():
+            ws.cell(row, j, v)
+        for j in (6, 7, 8, 9, 10):
+            ws.cell(row, j).number_format = QTY
+
+    wrap = Alignment(wrap_text=True, vertical="top")
+    shown = [it for it in items if it.get("runs")]
+    for it in shown:
+        tracked = it.get("tracked", True)
+        put(r, {1: it["sr"] if it["sr"] != "" else None, 2: it["desc"], 3: it["unit"]}, font=BOLD)
+        ws.cell(r, 1).alignment = Alignment(horizontal="center", vertical="top")
+        ws.cell(r, 2).alignment = wrap
+        ws.cell(r, 3).alignment = Alignment(horizontal="center", vertical="top")
+        r += 1
+        first = r
+        sq = sp_ = st_ = 0.0
+        for l in it["runs"]:
+            put(r, {2: "   " + (f"{l['floor']} — {l['zone']}" if l.get("floor") else l["zone"]), 4: l.get("from") or None, 5: l.get("to") or None,
+                    6: l.get("start"), 7: l.get("end"), 8: l["qty"], 9: l.get("prev"), 10: l.get("this"), 11: l.get("remarks") or None},
+                font=ITAL if l["kind"] != "run" else None)
+            for j in (2, 4, 5, 11):
+                ws.cell(r, j).alignment = wrap
+            ws.cell(r, 11).font = SMALL
+            sq, sp_, st_ = sq + l["qty"], sp_ + (l.get("prev") or 0.0), st_ + (l.get("this") or 0.0)
+            r += 1
+        rest_q = round(it["total"] - sq, 4)
+        rest_p = round(it["prev"] - sp_, 4) if tracked else None
+        rest_t = round(it["this"] - st_, 4) if tracked else None
+        if abs(rest_q) > 0.005 or (tracked and (abs(rest_p) > 0.005 or abs(rest_t) > 0.005)):
+            if rest_q < -0.005:
+                why = "Less: " + ((it.get("adj") or {}).get("label") or "difference to the bill quantity")
+            else:
+                why = "Rest of the item — recorded without From-To detail (see Annexure C)"
+            put(r, {2: "   " + why, 8: rest_q, 9: rest_p, 10: rest_t}, font=ITAL)
+            ws.cell(r, 2).alignment = wrap
+            r += 1
+        last = r - 1
+        put(r, {2: "Total qty in bill (as in Annexure B-BOQ)", 3: it["unit"]}, font=BOLD)
+        ws.cell(r, 2).alignment = Alignment(horizontal="right")
+        ws.cell(r, 3).alignment = Alignment(horizontal="center")
+        if live and last >= first:
+            ws.cell(r, 8, f"=SUM(H{first}:H{last})")
+            ws.cell(r, 9, f"=SUM(I{first}:I{last})" if tracked else it["prev"])
+            ws.cell(r, 10, f"=SUM(J{first}:J{last})" if tracked else it["this"])
+        else:
+            ws.cell(r, 8, it["total"]); ws.cell(r, 9, it["prev"]); ws.cell(r, 10, it["this"])
+        r += 1
+    r += 1
+    ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=NCOL)
+    ws.cell(r, 1, "Note: Each line is one measurement (cable / pipe / tray length) between the two points shown, with the drum readings it was measured by. "
+                  "Length = difference of the two readings. The total of every item is the quantity billed in Annexure B-BOQ and Annexure C. A line struck "
+                  "off at site is not listed.").font = SMALL
+    ws.cell(r, 1).alignment = Alignment(wrap_text=True, vertical="top")
+    ws.row_dimensions[r].height = 30
+    r += 2
+    for a, b, t in ((1, 3, "Prepared by (Contractor)"), (4, 7, "Checked by (Contractor)"), (8, NCOL, "Certified by (Client / Consultant)")):
+        ws.merge_cells(start_row=r, start_column=a, end_row=r, end_column=b)
+        ws.cell(r, a, t).font = BOLD
+        ws.cell(r, a).alignment = mid
+        ws.merge_cells(start_row=r + 1, start_column=a, end_row=r + 3, end_column=b)
+        ws.merge_cells(start_row=r + 4, start_column=a, end_row=r + 4, end_column=b)
+        ws.cell(r + 4, a, "Name / Sign / Date").font = SMALL
+        for rr in range(r, r + 5):
+            for cc in range(a, b + 1):
+                ws.cell(rr, cc).border = Border(left=thin if cc == a else None, right=thin if cc == b else None,
+                                                top=thin if rr in (r, r + 4) else None, bottom=thin if rr in (r, r + 3, r + 4) else None)
+    ws.print_area = f"A1:{chr(64 + NCOL)}{r + 4}"
+    ws.page_setup.orientation, ws.page_setup.paperSize = "landscape", 9
+    ws.page_setup.fitToWidth, ws.page_setup.fitToHeight = 1, 0
+    ws.sheet_properties.pageSetUpPr = __import__("openpyxl").worksheet.properties.PageSetupProperties(fitToPage=True)
+    ws.print_title_rows = "7:8"
+    ws.freeze_panes = "A9"
+    if live:
+        ws.sheet_properties.tabColor = "FFD966"
 
 
 def _extra_sheet_name(names, taken):
@@ -5528,7 +5948,7 @@ def download_files(slug, ra_ids, mode="files", want=None, combined=False, pb=Fal
                 taken |= set(nm.values())
                 made = _write_ra(wb, slug, d, store, r, nm, want)
                 if made:
-                    meas_names.add(made)
+                    meas_names.update(made)
             if not wb.sheetnames:
                 raise HTTPException(400, "Tick at least one sheet.")
             meas = [ws for ws in wb._sheets if ws.title in meas_names]       # the supporting backups close the workbook

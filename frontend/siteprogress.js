@@ -60,6 +60,9 @@
     "EA", "SET", "SETS", "POINT", "POINTS", "UNIT", "UNITS", "NUMBER", "NUMBERS",
     "LOT", "LOTS"]);
   const isCountUnit = (unit) => COUNT_UNITS.has(String(unit || "").trim().toUpperCase());
+  // a length unit (Mtr, Mtrs, RMT, Rmtr, RM ...): its zones can take Runs. Same list as runlog.is_run_unit on the server, which is the authority.
+  const RUN_UNITS = new Set(["mtr", "mtrs", "mts", "rmt", "rmtr", "rmtrs", "rm", "m", "mt", "metre", "metres", "meter", "meters"]);
+  const isRunUnit = (unit) => RUN_UNITS.has(String(unit || "").toLowerCase().replace(/[^a-z]/g, ""));
   const qf = (v, unit) => {
     if (v == null) return "—";
     return isCountUnit(unit) ? Math.round(v).toLocaleString("en-IN")
@@ -1361,6 +1364,7 @@
     $("sp-acts").querySelectorAll("[data-linkedit]").forEach((b) => b.addEventListener("click", () => editItemLink(b.dataset.linkedit)));
     $("sp-acts").querySelectorAll("[data-roomsedit]").forEach((b) => b.addEventListener("click", () => openRoomsModal(b.dataset.roomsedit)));
     $("sp-acts").querySelectorAll("[data-histedit]").forEach((b) => b.addEventListener("click", () => openShortageHistoryPopover(b.dataset.histedit)));
+    $("sp-acts").querySelectorAll("[data-measedit]").forEach((b) => b.addEventListener("click", () => { const it = S._byCode[b.dataset.measedit]; if (it) openMeasureSheet(measOpts(it)); }));
     $("sp-acts").querySelectorAll("[data-overundo]").forEach((b) => b.addEventListener("click", () => backToBoq(b.dataset.overundo)));
     $("sp-acts").querySelectorAll("[data-removeitem]").forEach((b) => b.addEventListener("click", () => removeItemFromActivity(b.dataset.removeitem, b.dataset.removeact)));
     $("sp-acts").querySelectorAll("[data-fx]").forEach((b) => b.addEventListener("click", () => openDrawer(b.dataset.fx)));
@@ -1400,6 +1404,15 @@
     if (!(ex > 0.005)) return "";
     return `<span class="sp-tag rev" data-over="${esc(it.code)}" title="Planned moved to ${esc(qf(it.planned, it.unit))} to match. The BOQ quantity is ${esc(qf(it.boq_planned, it.unit))}. Billing still bills up to the BOQ quantity only.">Over BOQ +${esc(qf(ex, it.unit))} ${esc(it.unit)}</span><button class="sp-linkchip" data-overundo="${esc(it.code)}">Back to BOQ qty</button>`;
   }
+  // Measurement chip of a length item (Mtr / RMT ...): "Add measurement" until the first entry, then how much of the installed quantity the
+  // From / To entries explain. Amber while some of it has no entry behind it, green when all of it has. Never blocks anything.
+  function measChip(it) {
+    if (S.room || !isRunUnit(it.unit)) return "";
+    const m = it.meas, f = (v) => String(Math.round(Number(v) * 100) / 100);
+    if (!m || !m.n) return `<button class="sp-linkchip" data-measedit="${esc(it.code)}" title="Where was it laid? Add From, To and the drum readings, so the bill comes with the client's measurement sheet.">📏 Add measurement</button>`;
+    const full = m.backed >= m.done - 0.01;
+    return `<button class="sp-linkchip ${full ? "on" : "warn"}" data-measedit="${esc(it.code)}" title="${full ? "All of the installed quantity has a measurement behind it." : "Part of the installed quantity has no measurement behind it yet."}">📏 ${m.n} ${m.n === 1 ? "entry" : "entries"} · ${f(m.backed)} of ${f(m.done)} ${esc(it.unit)}</button>`;
+  }
   function rowHTML(it, activity) {
     const rl = realOf(it.code); const alert = rl && rl.verdict === "SHORTAGE";
     const links = rl && rl.links ? rl.links : [];
@@ -1425,6 +1438,7 @@
           ${alert ? `<span class="sp-tag rev">shortage</span>` : ""}
           <button class="sp-linkchip ${linked ? "on" : ""}" data-linkedit="${esc(it.code)}">${linked ? "🔗 linked · edit" : "＋ link stock"}</button>
           ${S.room ? "" : `<button class="sp-linkchip" data-roomsedit="${esc(it.code)}">🏠 ${esc(roomsChipLabel(it.code))}</button>`}
+          ${measChip(it)}
           ${histChip(it.code)}</div></div>
       <div class="sp-bqty">${plannedControlHTML(it)}</div>
       <div class="sp-entry">
@@ -1735,6 +1749,7 @@
     // keeps just the tick -- that is all there is to say. The fetch is
     // best-effort: if it fails or is slow the dialog is exactly what it was.
     let roomPlan = null;
+    let runsInfo = null;   // GET /progress/runs for a length item (Mtr / RMT): the zone links to its measurements exist only when this arrived
     const modalEl = $("sp-modal");
     const isCountItem = isCountUnit(it.unit);
     const fmtQ = (v) => (isCountItem ? Math.round(v) : Math.round(v * 100) / 100);
@@ -1757,6 +1772,23 @@
         c.inp.value = fmtQ(v);
         paintCell(c, v);
       });
+    }
+    // ---- Measurements: a zone whose quantity comes from From / To entries --------------------------------------------------------
+    // The entries themselves live in the item's "Measurement" sheet (the chip on the item row). Here a zone only says so: its number
+    // box is read-only (the quantity is the sum of its entries, typing over it would break that) and a small link opens the sheet at
+    // this zone. A zone without entries looks exactly as it always did.
+    function attachMeasLink(c, rid) {
+      const z = (runsInfo.rooms || {})[rid];
+      const n = z ? z.runs.filter((r) => !r.cancelled).length : 0;
+      if (!n) return;
+      const link = document.createElement("button");
+      link.type = "button"; link.className = "linkbtn sp-measlink"; link.dataset.meas = rid;
+      link.textContent = `📏 ${n} ${n === 1 ? "entry" : "entries"}`;
+      link.onclick = () => openMeasureSheet(measOpts(it), rid);
+      c.cell.classList.add("has-meas");
+      c.cell.appendChild(link);
+      c.inp.readOnly = true;
+      c.inp.title = "This quantity comes from the measurements. Open the measurement sheet to add or cancel one.";
     }
     function applyRoomPlan(plan) {
       if (!plan || !plan.rooms || $("sp-modal") !== modalEl) return;
@@ -1784,6 +1816,7 @@
         const c = { cb, inp, cell, planned: info.planned, done0 };
         cells.push(c);
         paintCell(c, done0);
+        if (runsInfo) attachMeasLink(c, cb.dataset.room);
         // typing = "this is what I'm updating": tick the row, keep the number
         inp.addEventListener("input", () => {
           inp.dataset.touched = "1";
@@ -1933,8 +1966,12 @@
       const zh = $("sp-zhelp");
       if (added && zh && !zh.dataset.area) { zh.dataset.area = "1"; zh.textContent += " Only know the total for a whole floor / level? Switch that area to “Whole …”."; }
     }
-    jget(api("/" + S.slug + "/item-room-plan?service=" + encodeURIComponent(S.service) + "&item_code=" + encodeURIComponent(code)))
-      .then(applyRoomPlan).catch(() => {});
+    const planP = jget(api("/" + S.slug + "/item-room-plan?service=" + encodeURIComponent(S.service) + "&item_code=" + encodeURIComponent(code)));
+    if (isRunUnit(it.unit)) {
+      // a length item also asks for its runs; if that fails the dialog is exactly what it was (no Runs links)
+      Promise.all([planP, jget(api("/" + S.slug + "/progress/runs?service=" + encodeURIComponent(S.service) + "&item_code=" + encodeURIComponent(code))).catch(() => null)])
+        .then(([p, r]) => { runsInfo = r && r.runs_ok ? r : null; applyRoomPlan(p); }).catch(() => {});
+    } else planP.then(applyRoomPlan).catch(() => {});
 
     // remove one quantity group entirely -- reuses the same backend move/
     // clear mechanism a room-tick-then-blank-qty already uses (qty:null
@@ -2790,6 +2827,135 @@
     const close = () => { const x = $("sp-draw"); if (x) x.remove(); };
     $("sp-draw-x").onclick = close; $("sp-draw").addEventListener("click", (e) => { if (e.target.id === "sp-draw") close(); });
   }
+
+  // ---------- Measurement sheet: WHERE a length item (cable, pipe, tray, earthing strip) was laid ----------
+  // The client signs a measurement sheet that says From, To and the drum readings, not only a total. This is the small sheet an engineer
+  // opens from the item's chip: pick the place (one zone, a whole floor / level, or the whole project -- a feeder belongs to no room), type
+  // From, To and either the two drum marks or the length, and Add. The length is ADDED to the item's installed quantity on the server (the same
+  // paths as a typed number), so the % , the DPR and the bill see it; the bill's Annexure D is built from the entries. Optional: nothing is
+  // ever blocked for want of an entry. A cancelled entry stays on record, struck through.
+  // `o` = {slug, service, code, desc, unit, room (the "?room=" query of a drill-down, or ""), onChange(serviceView)}; the Billing screen opens
+  // the same sheet through window.MIMeasure.
+  function measOpts(it) {
+    return { slug: S.slug, service: S.service, code: it.code, desc: it.desc, unit: it.unit, room: roomQ(),
+      onChange: async (svc) => { if (svc) S.svc = svc; await afterSvc(); } };
+  }
+  const MS_MEM = {};   // last place used per item, for the next entry of the same session
+  async function openMeasureSheet(o, preKey) {
+    const url = (suffix) => api("/" + o.slug + "/progress/" + suffix);
+    let data;
+    try { data = await jget(url("runs?service=" + encodeURIComponent(o.service) + "&item_code=" + encodeURIComponent(o.code))); }
+    catch (e) { return toast("Could not open the measurements: " + briefErr(e)); }
+    if (!data.runs_ok) return toast("Measurements are for length items (Mtr, RMT).");
+    const unit = o.unit || data.unit || "", memKey = o.slug + "|" + o.service + "|" + o.code;
+    const form = { where: "", mode: "meter", from: "", to: "", start: "", end: "", qty: "", remarks: "" };
+    const scopeBy = (k) => data.scopes.find((t) => t.key === k);
+    const hasEntries = (t) => t.runs.some((r) => !r.cancelled);
+    const pick = () => {
+      for (const k of [preKey, MS_MEM[memKey]]) { const t = k && scopeBy(k); if (t) return t.key; }
+      const mine = data.scopes.find((t) => t.allowed && hasEntries(t));
+      return (mine || data.scopes.find((t) => t.allowed) || data.scopes[0]).key;
+    };
+    form.where = pick();
+    const num = (v) => { const x = Number(String(v).trim()); return String(v).trim() === "" || isNaN(x) ? null : x; };
+    const fmtR = (v) => String(Math.round(Number(v) * 100) / 100);
+    const len = () => {
+      if (form.mode === "meter") { const a = num(form.start), b = num(form.end); return a === null || b === null || a < 0 || b < 0 || a === b ? null : Math.round(Math.abs(a - b) * 10000) / 10000; }
+      const q = num(form.qty); return q === null || q <= 0 ? null : Math.round(q * 10000) / 10000;
+    };
+    const place = () => scopeBy(form.where) || data.scopes[0];
+    const canAdd = () => len() !== null && form.from.trim() !== "" && form.to.trim() !== "" && place().allowed;
+    const whereHTML = () => {
+      const opt = (t) => `<option value="${esc(t.key)}"${t.key === form.where ? " selected" : ""}>${esc(t.label)}${t.allowed ? "" : " (closed)"}${hasEntries(t) ? " ✓" : ""}</option>`;
+      const proj = data.scopes.filter((t) => t.kind === "project"), areas = data.scopes.filter((t) => t.kind === "area");
+      const groups = {};
+      data.scopes.filter((t) => t.kind === "zone").forEach((t) => { (groups[t.group || dlgLeafPlural(2)] = groups[t.group || dlgLeafPlural(2)] || []).push(t); });
+      return `<optgroup label="Not in one place">${proj.map(opt).join("")}</optgroup>`
+        + (areas.length ? `<optgroup label="${esc(areas[0].group)}">${areas.map(opt).join("")}</optgroup>` : "")
+        + Object.entries(groups).map(([g, ts]) => `<optgroup label="${esc(g)}">${ts.map(opt).join("")}</optgroup>`).join("");
+    };
+    const covHTML = () => {
+      const m = data.summary, pct = m.done > 0 ? Math.min(100, Math.round(m.backed / m.done * 100)) : 0, full = m.n && m.backed >= m.done - 0.01;
+      if (!m.n) return `<div class="sp-mscov"><span>No measurement yet. Installed so far: <b>${fmtR(m.done)} ${esc(unit)}</b></span></div>`;
+      return `<div class="sp-mscov ${full ? "ok" : "part"}"><span><b>${fmtR(m.backed)} of ${fmtR(m.done)} ${esc(unit)}</b> has From–To behind it (${pct}%)</span><i style="--w:${pct}%"></i></div>`;
+    };
+    const entriesHTML = () => {
+      const all = data.scopes.flatMap((t) => t.runs.map((r) => ({ r, t })));
+      all.sort((a, b) => String(b.r.at).localeCompare(String(a.r.at)));
+      if (!all.length) return `<p class="sp-runhint">Entries you add appear here. The bill's “Annexure D-From-To Detail” is made from them.</p>`;
+      return `<div class="sp-runlist">${all.map(({ r, t }) => `<div class="sp-runrow${r.cancelled ? " x" : ""}">
+        <span class="rt">${esc(r.from)} → ${esc(r.to)}<small>${esc(t.label)}${r.remarks ? " · " + esc(r.remarks) : ""}</small>${r.cancelled && r.reason ? `<small>Cancelled: ${esc(r.reason)}</small>` : ""}</span>
+        <span class="rn">${r.start != null ? `${fmtR(r.start)} → ${fmtR(r.end)} · ` : ""}<b>${fmtR(r.qty)} ${esc(unit)}</b></span>
+        <button type="button" class="linkbtn" data-mtoggle="${esc(r.id)}" data-mkey="${esc(t.key)}">${r.cancelled ? "Restore" : "Cancel"}</button></div>`).join("")}</div>`;
+    };
+    const formHTML = () => {
+      const t = len(), p = place();
+      return `<div class="sp-runform">
+        <label class="wide">Where was it laid?<select class="ctl" data-m="where">${whereHTML()}</select></label>
+        <p class="sp-mswhy" data-mswhy${p.allowed ? " hidden" : ""}>${esc(p.why || "")}</p>
+        <div class="sp-runmode"><button type="button" data-mmode="meter" class="${form.mode === "meter" ? "on" : ""}">Meter marks</button><button type="button" data-mmode="qty" class="${form.mode === "qty" ? "on" : ""}">Direct length</button></div>
+        <label>From<input class="ctl" data-m="from" maxlength="80" autocomplete="off" value="${esc(form.from)}"></label>
+        <label>To<input class="ctl" data-m="to" maxlength="80" autocomplete="off" value="${esc(form.to)}"></label>
+        ${form.mode === "meter"
+          ? `<label>Reading start<input class="ctl" data-m="start" type="number" step="any" inputmode="decimal" value="${esc(form.start)}"></label>
+             <label>Reading end<input class="ctl" data-m="end" type="number" step="any" inputmode="decimal" value="${esc(form.end)}"></label>`
+          : `<label>Length (${esc(unit)})<input class="ctl" data-m="qty" type="number" min="0" step="any" inputmode="decimal" value="${esc(form.qty)}"></label>`}
+        <label class="wide">Remarks <small>(optional)</small><input class="ctl" data-m="remarks" maxlength="200" value="${esc(form.remarks)}"></label>
+        <div class="sp-runtot">Length <b data-mtotal>${t === null ? "—" : fmtR(t) + " " + esc(unit)}</b></div>
+        <div class="sp-runact"><button type="button" class="btn primary" data-madd="next"${canAdd() ? "" : " disabled"}>Add &amp; next</button><button type="button" class="btn" data-madd="one"${canAdd() ? "" : " disabled"}>Add</button></div></div>`;
+    };
+    modal(`Measurement · ${esc(o.code)}`, esc(short(o.desc, 90)), `<div data-ms><div data-mscov>${covHTML()}</div><div class="sp-msgrid"><div data-msform>${formHTML()}</div><div data-mslist>${entriesHTML()}</div></div></div>`,
+      async () => closeModal(), "Done", "min(940px,94vw)");
+    const root = $("sp-modal"), q = (sel) => root.querySelector(sel);
+    q("#sp-modal-cancel").hidden = true;
+    const paintAll = () => { q("[data-mscov]").innerHTML = covHTML(); q("[data-msform]").innerHTML = formHTML(); q("[data-mslist]").innerHTML = entriesHTML(); };
+    const refreshForm = () => {
+      const t = len(), tt = q("[data-mtotal]"); if (tt) tt.textContent = t === null ? "—" : fmtR(t) + " " + unit;
+      root.querySelectorAll("[data-madd]").forEach((b) => { b.disabled = !canAdd(); });
+    };
+    const reload = async (res) => {
+      data = await jget(url("runs?service=" + encodeURIComponent(o.service) + "&item_code=" + encodeURIComponent(o.code)));
+      paintAll();
+      if (o.onChange) await o.onChange(res && res.svc);
+    };
+    const scopeBody = (t) => (t.kind === "zone" ? { scope: "zone", room: t.key } : t.kind === "area" ? { scope: "area", area: t.key.slice("~area:".length) } : { scope: "project" });
+    root.addEventListener("input", (e) => {
+      const k = e.target && e.target.dataset && e.target.dataset.m;
+      if (!k || k === "where") return;
+      form[k] = e.target.value; refreshForm();
+    });
+    root.addEventListener("change", (e) => {
+      if (!(e.target && e.target.dataset && e.target.dataset.m === "where")) return;
+      form.where = e.target.value; MS_MEM[memKey] = form.where;
+      q("[data-msform]").innerHTML = formHTML();
+    });
+    root.addEventListener("click", async (e) => {
+      const b = e.target.closest && e.target.closest("button"); if (!b) return;
+      try {
+        if (b.dataset.mmode) { form.mode = b.dataset.mmode; q("[data-msform]").innerHTML = formHTML(); return; }
+        if (b.dataset.madd) {
+          if (!canAdd()) return;
+          const t = place(), next = b.dataset.madd === "next";
+          const body = Object.assign({ service: o.service, item_code: o.code, from: form.from.trim(), to: form.to.trim(), remarks: form.remarks.trim() }, scopeBody(t));
+          if (form.mode === "meter") { body.start = num(form.start); body.end = num(form.end); } else body.qty = num(form.qty);
+          const res = await jpost(api("/" + o.slug + "/progress/runs" + (o.room || "")), body);
+          const keepEnd = form.end, keepTo = form.to.trim(), n = fmtR(body.qty != null ? body.qty : Math.abs(body.start - body.end));
+          MS_MEM[memKey] = form.where;
+          Object.assign(form, { to: "", end: "", qty: "", remarks: "", start: next && form.mode === "meter" ? keepEnd : "", from: next ? keepTo : "" });
+          await reload(res);
+          return toast(`Added ${n} ${unit} · ${t.label}.`);
+        }
+        if (b.dataset.mtoggle) {
+          const t = scopeBy(b.dataset.mkey), run = t && t.runs.find((r) => r.id === b.dataset.mtoggle); if (!run) return;
+          let reason = "";
+          if (!run.cancelled) { reason = window.prompt("Why is this measurement cancelled? (optional)", ""); if (reason === null) return; }
+          const res = await jpost(api("/" + o.slug + "/progress/runs/cancel" + (o.room || "")), Object.assign({ service: o.service, item_code: o.code, run_id: run.id, cancelled: !run.cancelled, reason: reason || "" }, scopeBody(t)));
+          await reload(res);
+        }
+      } catch (err) { toast(briefErr(err)); }
+    });
+  }
+  window.MIMeasure = { open: openMeasureSheet };
 
   // ---------- generic modal ----------
   function modal(title, sub, bodyHTML, onSave, saveLabel, width, extraFooterHTML) {

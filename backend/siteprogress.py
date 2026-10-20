@@ -38,7 +38,7 @@ from pathlib import Path
 import pandas as pd
 from fastapi import APIRouter, File, Form, Header, HTTPException, UploadFile, Response, Query
 
-from . import structure, boq, activity, progress, pnl, linkage, schema, subcat, realtime, itemprog, dpr, shortage_history, clientref, locqty
+from . import structure, boq, activity, progress, pnl, linkage, schema, subcat, realtime, itemprog, dpr, shortage_history, clientref, locqty, runlog
 
 ROOT = Path(__file__).resolve().parent.parent
 PROJECTS = ROOT / "data" / "projects"
@@ -637,6 +637,14 @@ def _service_view_core(d, service, items, used, prog, rooms_cfg, room_qty_groups
             "boq_planned": fv(_boq_planned(c, it.planned_total)),
             "has_room_groups": bool(it.get("has_room_groups", False)),
         })
+
+    # items that have measurement entries (From / To, see runlog.py): what their chip says. Only those items cost anything here.
+    runs_svc = item_runs_all(d, service)
+    metered = [r for r in rows if any(runlog.active(v) for v in (runs_svc.get(r["code"]) or {}).values())]
+    if metered:
+        mctx, minfo = location_context(d, service), location_info(d)
+        for r in metered:
+            r["meas"] = item_meas_summary(d, service, r["code"], mctx, minfo)
 
     # activity % and overall % are the MEAN of member items' % (item-driven)
     # for a normal activity -- but a LABOUR-ONLY activity (no BOQ material at
@@ -1507,6 +1515,181 @@ def set_rooms_progress(slug: str, payload: dict, room: str = None):
         if frac > 0:
             _log_dpr_change(d, svc, rid, code, frac=frac, before=before)
     return _service_view(d, svc, room=room)
+
+
+# ------------------------------------------------------------------ measurements (From / To / drum readings)
+# For a length item (Mtr, RMT ...) the installed quantity is the sum of runs of cable / pipe / tray; the client signs a sheet that lists
+# them. An entry ("measurement") belongs to a zone, to a whole floor / level (an area total) or to the whole project (the item's overall
+# quantity). It is written through the very same Site Progress paths as a typed number (zone: /progress/rooms, area: /progress/area-total,
+# project: /progress/item-qty), so every %, the DPR and the bill see it. runlog.py holds the rules (which places are open, and why a
+# closed one is closed); item_runs.json the entries. Cancelling an entry keeps it on record. See runlog.py.
+def _item_runs(d):
+    return _read_json(d / "item_runs.json", {}) or {}
+
+
+def item_runs_all(d, service):
+    """{item_code: {key: [run, ...]}} of one service, read once (billing walks every line of a bill)."""
+    return _item_runs(d).get(service, {}) or {}
+
+
+def item_runs_of(d, service, code):
+    """{key: [run, ...]} of one item (what the bill's From-To sheet is built from)."""
+    return (_item_runs(d).get(service, {}) or {}).get(str(code)) or {}
+
+
+def _recorded(d, svc, code, rid, plan):
+    node = _item_prog(d).get(svc, {}).get(str(code))
+    return float(plan.get(rid) or 0.0) * itemprog.frac_for(node, rid)
+
+
+def _meas_table(d, svc, code, _ctx=None, _info=None):
+    """runlog.scope_table() of one item, fed from the stores. None when the item is not in this service."""
+    appl, plan, unit = _item_plan(d, svc, code, _ctx)
+    if not appl:
+        return None
+    info = _info or location_info(d)
+    node = _item_prog(d).get(svc, {}).get(str(code)) or {}
+    pools = _item_pools(d).get(svc, {}).get(str(code))
+    runs = item_runs_of(d, svc, code)
+    return {"unit": unit, "appl": appl, "plan": plan, "node": node, "info": info,
+            "table": runlog.scope_table(appl, plan, node, pools, runs, info["loc"], info["name"], info["order"], info["word"])}
+
+
+def item_meas_summary(d, svc, code, _ctx=None, _info=None):
+    """{"n","backed","done"} of an item that has measurement entries (what its chip in Site Progress and Billing says); None otherwise."""
+    if not any(runlog.active(v) for v in item_runs_of(d, svc, code).values()):
+        return None
+    m = _meas_table(d, svc, code, _ctx, _info)
+    return runlog.coverage(m["table"]) if m else None
+
+
+def _scope_of(table, payload):
+    """The place an entry goes: payload {"scope": "zone"|"area"|"project", "room"| "area"}; no "scope" means a zone (the first version)."""
+    kind = str(payload.get("scope") or "zone")
+    if kind == "project":
+        key = runlog.PROJECT
+    elif kind == "area":
+        key = runlog.area_key(str(payload.get("area") or ""))
+    elif kind == "zone":
+        key = str(payload.get("room"))
+    else:
+        raise HTTPException(400, "scope must be zone, area or project")
+    t = next((x for x in table if x["key"] == key), None)
+    if t is None:
+        raise HTTPException(400, {"zone": f"room {payload.get('room')} is not one of this item's rooms with a plan",
+                                  "area": f"{payload.get('area')!r} is not an area of this item", "project": "this item has no rooms"}[kind])
+    return t
+
+
+def _fits(d, svc, code, t, cur, new_done):
+    """A place's plan is a limit (the typed-quantity path would quietly cut a bigger number back to the plan, which would leave an entry the
+    place does not hold). With the plan removed the item's own total is the limit, checked by Site Progress itself."""
+    if t["kind"] != "project" and _is_free(d, svc, code):
+        return                                         # zone / level: Site Progress checks the item's total itself. The project path would RAISE the plan instead, so it is checked here
+    if new_done > float(t["plan"]) + 1e-6:
+        what = {"zone": "this zone", "area": "this " + "level / floor", "project": "this item"}[t["kind"]]
+        raise HTTPException(400, f"{what} is planned at {round(float(t['plan']), 4):g}; {round(cur, 4):g} is recorded, so {round(new_done - cur, 4):g} more "
+                                 "does not fit. Raise the plan first.")
+
+
+def _write_quantity(slug, d, svc, code, t, new_done, room):
+    """Set the place's recorded quantity to new_done through the Site Progress path that already owns that kind of number."""
+    if t["kind"] == "zone":
+        return set_rooms_progress(slug, {"service": svc, "item_code": code, "entries": [{"room": t["key"], "qty": new_done}]}, room=room)
+    if t["kind"] == "area":
+        return set_area_total(slug, {"service": svc, "item_code": code, "rooms": t["rooms"], "qty": new_done}, room=room)
+    plan = float(t["plan"])
+    return set_item_qty(slug, {"service": svc, "item_code": code, "qty": min(new_done, plan) if new_done <= plan + 1e-6 else new_done})
+
+
+def _public(t):
+    return {k: v for k, v in t.items() if k != "rooms" and not k.startswith("_")}
+
+
+@router.get("/{slug}/progress/runs")
+def get_runs(slug: str, service: str, item_code: str):
+    """The measurement entries of one item and the places they can go:
+    {"unit","runs_ok","rooms":{room_id:{"runs","active","done","other"}} (zones that have entries),
+     "scopes":[{"key","kind":"project"|"area"|"zone","label","group","plan","done","allowed","why","writable","runs","active","other"}],
+     "summary":{"n","backed","done"}}.  `other` is the recorded quantity no active entry explains (recorded before, or by a tick / typed number)."""
+    d = _need(slug)
+    m = _meas_table(d, service, item_code)
+    if not m:
+        raise HTTPException(404, "that item is not in this service")
+    tb = m["table"]
+    return {"unit": m["unit"], "runs_ok": runlog.is_run_unit(m["unit"]),
+            "rooms": {t["key"]: {k: t[k] for k in ("runs", "active", "done", "other")} for t in tb if t["kind"] == "zone" and t["runs"]},
+            "scopes": [_public(t) for t in tb], "summary": runlog.coverage(tb)}
+
+
+@router.post("/{slug}/progress/runs")
+def add_run(slug: str, payload: dict, room: str = None):
+    """Add one measurement entry. Body: {"service","item_code","scope"?: "zone" (default) | "area" | "project", "room" (zone) | "area" (the area's
+    name, as GET lists it), "from","to", and either "start"+"end" (drum readings; the length is |start - end|) or "qty", "remarks"?}.
+    The length is ADDED to what that place already has recorded, through the same checks as a typed quantity (a plan is a limit unless it
+    was removed), and only into a place the item allows (see runlog.scope_table). Nothing is saved if any of that fails.
+    Returns {"svc": service view, "zone": that place's entries, "summary": {...}}."""
+    d = _need(slug)
+    svc, code = payload.get("service"), payload.get("item_code")
+    if not svc or code is None:
+        raise HTTPException(400, "service and item_code are required")
+    m = _meas_table(d, svc, code)
+    if not m:
+        raise HTTPException(404, "that item is not in this service")
+    if not runlog.is_run_unit(m["unit"]):
+        raise HTTPException(400, f"measurements are for length items (Mtr, RMT); this item is in {m['unit'] or 'no unit'}")
+    t = _scope_of(m["table"], payload)
+    if not t["allowed"]:
+        raise HTTPException(400, t["why"])
+    try:
+        clean = runlog.clean_run(payload)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    cur = t["_raw"]
+    new_done = round(cur + clean["qty"], 3)
+    _fits(d, svc, code, t, cur, new_done)
+    view = _write_quantity(slug, d, svc, code, t, new_done, room)
+    runs = _item_runs(d)
+    lst = runs.setdefault(svc, {}).setdefault(str(code), {}).setdefault(t["key"], [])
+    lst.append(runlog.new_run(clean))
+    (d / "item_runs.json").write_text(json.dumps(runs, ensure_ascii=False))
+    return {"svc": view, "zone": runlog.view(lst, new_done), "summary": runlog.coverage(_meas_table(d, svc, code)["table"])}
+
+
+@router.post("/{slug}/progress/runs/cancel")
+def cancel_run(slug: str, payload: dict, room: str = None):
+    """Cancel (or restore) one measurement entry. Body: {"service","item_code","scope"?,"room"|"area","run_id","cancelled": true|false (default
+    true), "reason"?}. A cancelled entry stays on record, struck through; the place's quantity goes down (restore: up) by its length, through the
+    same checks as any quantity -- a restore that would not fit the plan, or into a place that has since been closed, is refused and nothing changes."""
+    d = _need(slug)
+    svc, code, run_id = payload.get("service"), payload.get("item_code"), payload.get("run_id")
+    if not svc or code is None or not run_id:
+        raise HTTPException(400, "service, item_code and run_id are required")
+    cancel = payload.get("cancelled", True) is not False
+    m = _meas_table(d, svc, code)
+    if not m:
+        raise HTTPException(404, "that item is not in this service")
+    t = _scope_of(m["table"], payload)
+    runs = _item_runs(d)
+    lst = ((runs.get(svc) or {}).get(str(code)) or {}).get(t["key"])
+    run = next((r for r in lst or [] if r.get("id") == run_id), None)
+    if run is None:
+        raise HTTPException(404, "that measurement is not on record")
+    if bool(run.get("cancelled")) == cancel:
+        raise HTTPException(409, "that measurement is already " + ("cancelled" if cancel else "active"))
+    if cancel and not t["writable"]:
+        raise HTTPException(400, t["wwhy"])
+    if not cancel and not t["allowed"]:
+        raise HTTPException(400, t["why"])
+    cur = t["_raw"]
+    new_done = round(max(0.0, cur - float(run["qty"])) if cancel else cur + float(run["qty"]), 3)
+    if not cancel:
+        _fits(d, svc, code, t, cur, new_done)
+    view = _write_quantity(slug, d, svc, code, t, new_done, room)
+    run["cancelled"] = cancel
+    run["reason"] = str(payload.get("reason") or "").strip()[:200] if cancel else ""
+    (d / "item_runs.json").write_text(json.dumps(runs, ensure_ascii=False))
+    return {"svc": view, "zone": runlog.view(lst, new_done), "summary": runlog.coverage(_meas_table(d, svc, code)["table"])}
 
 
 @router.post("/{slug}/mark-activity-rooms-done")

@@ -544,6 +544,58 @@ body[data-view="inventory"] #leadwrap{display:none !important}
 @supports (height:1dvh){.sp-zones .card.wide{max-height:min(86dvh,calc(100dvh - 24px))}}
 .sp-zones .sheethd,.sp-zones .mact{flex:none}
 .sp-zones .sp-maplist{flex:1 1 auto;min-height:0;max-height:none;overflow-y:auto;overscroll-behavior:contain}
+/* Measurement (From / To / drum readings) of a length item: a zone with entries links to the item's measurement sheet; the sheet itself
+   is the small modal opened from the item's chip. */
+.sp-roomcell.has-meas{grid-template-areas:"name inp" "plan inp" "meas meas"}
+.sp-measlink{grid-area:meas;justify-self:start;font-size:12px;margin:2px 0 0 23px;padding:0}
+.sp-mscov{position:relative;display:block;margin:0 0 12px;padding:9px 12px;border:1px solid var(--line);border-radius:10px;background:var(--panel);font-size:12.5px;color:var(--ink2)}
+.sp-mscov i{display:block;height:4px;margin-top:7px;border-radius:2px;background:var(--line2);overflow:hidden;position:relative}
+.sp-mscov i::after{content:"";position:absolute;inset:0 auto 0 0;width:var(--w,0);background:var(--amber)}
+.sp-mscov.ok i::after{background:var(--green)}
+.sp-mswhy{grid-column:1 / -1;margin:-2px 0 0;padding:7px 10px;border-radius:8px;background:var(--amberbg);color:var(--amber);font-size:12px}
+.sp-mswhy[hidden]{display:none}
+.sp-runform select.ctl{width:100%;min-width:0}
+#sp-modal [data-mslist]{margin-top:14px}
+/* desktop / tablet landscape: the form on the left, the entries on the right; phones stack them (form first) */
+@media (min-width:820px){
+  .sp-msgrid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:20px;align-items:start}
+  #sp-modal [data-mslist]{margin-top:0;max-height:min(58vh,520px);overflow-y:auto}
+}
+.sp-runlist{display:flex;flex-direction:column;margin:0 0 10px;border:1px solid var(--line2);border-radius:8px;overflow:hidden}
+.sp-runrow{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:10px;align-items:center;padding:7px 10px;font-size:12.5px;border-top:1px solid var(--line2)}
+.sp-runrow:first-child{border-top:0}
+.sp-runrow .rt{min-width:0;display:flex;flex-direction:column}
+.sp-runrow small{color:var(--ink3);font-size:11.5px}
+.sp-runrow .rn{font-variant-numeric:tabular-nums;white-space:nowrap;color:var(--ink2)}
+.sp-runrow.x{background:var(--slatebg);color:var(--ink3)}
+.sp-runrow.x .rt,.sp-runrow.x .rn{text-decoration:line-through}
+.sp-runrow.x small{text-decoration:none}
+.sp-runhint{margin:0 0 8px;font-size:12px;color:var(--ink3)}
+.sp-runform{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 10px;align-items:end}
+.sp-runform label{display:flex;flex-direction:column;gap:3px;font-size:12px;font-weight:600;color:var(--ink2);min-width:0}
+.sp-runform label small{font-weight:400;color:var(--ink3)}
+.sp-runform label.wide,.sp-runmode,.sp-runact,.sp-runtot{grid-column:1 / -1}
+.sp-runform .ctl{width:100%;min-width:0}
+.sp-runmode{display:flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;width:max-content;max-width:100%}
+.sp-runmode button{font:inherit;font-size:12.5px;font-weight:600;padding:6px 14px;border:0;background:var(--panel);color:var(--ink2);cursor:pointer}
+.sp-runmode button+button{border-left:1px solid var(--line)}
+.sp-runmode button.on{background:var(--ink);color:#fff}
+.sp-runtot{display:flex;align-items:baseline;justify-content:space-between;padding:6px 10px;background:#f6f4f0;border-radius:8px;font-size:12.5px;color:var(--ink2)}
+.sp-runtot b{font-size:16px;color:var(--ink);font-variant-numeric:tabular-nums}
+.sp-runact{display:flex;gap:8px;flex-wrap:wrap}
+.sp-runact .btn[disabled]{opacity:.45;cursor:not-allowed}
+.sp-roomcell .sp-roomqty input[readonly]{background:var(--slatebg);cursor:not-allowed}
+@media (hover:none),(pointer:coarse){
+  .sp-measlink,.sp-runrow .linkbtn{min-height:44px;padding:0 6px}
+  .sp-runform .ctl{font-size:16px;min-height:44px}
+  .sp-runmode button{min-height:44px}
+  .sp-runact .btn{min-height:44px}
+}
+/* Desktop only: the Zones dialog is wide and horizontal, so the zone cards sit in 3-4 columns instead of one narrow column.
+   Phones and tablets under 1000px keep the width the dialog always had (min(600px,94vw), set in JS). */
+@media (min-width:1000px){
+  .sp-zones .card.wide{width:min(1120px,92vw)!important}
+}
 /* iOS Safari zooms the page on focus when an input is under 16px */
 @media (hover:none),(pointer:coarse){.sp-planbox .sp-qtyrow input{font-size:16px;min-height:44px}}
 @media (hover:none),(pointer:coarse){

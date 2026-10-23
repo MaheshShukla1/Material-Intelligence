@@ -785,7 +785,7 @@
         toast(`Rates read automatically for ${n} items — ${Object.keys(j.auto_rated).join(", ")}`);
       }
       refreshOpen();
-      showQtyModeWizard(j.needs_qty_mode);
+      afterBoqUpload(j);
     } catch (err) { st.textContent = "✕ " + briefErr(err); }
   }
 
@@ -880,7 +880,7 @@
       toast("✓ " + Object.entries(j.services).map(([k, v]) => `${k} (${v})`).join(", "));
       await reloadStateQuiet();
       await loadService();
-      showQtyModeWizard(j.needs_qty_mode);
+      afterBoqUpload(j);
     } catch (err) { toast("Failed: " + briefErr(err)); }
     e.target.value = "";
   }
@@ -2986,6 +2986,55 @@
   function closeModal() { const m = $("sp-modal"); if (m) m.remove(); }
 
   // ---------- BOQ-upload wizard: "per room" vs "already the total" ----------
+  // ---------- "How your BOQ was read" ----------
+  // After every BOQ upload the engineer is told, once, which column was used for Code / Description / Unit / Qty / Rate, how many lines were read
+  // and priced, and (when the sheet has an Amount column) whether Amount really equals Qty x Rate. Where a column is genuinely ambiguous the card
+  // asks, with the sheet's own header words -- nothing is guessed. It never blocks: "Looks right" (or closing it) goes on to the existing
+  // one-time quantity question, if any. An answer without `read` (older server) simply opens no card.
+  function afterBoqUpload(j) {
+    const rd = j && j.read;
+    if (rd && Object.keys(rd).length) showReadCard(rd, () => showQtyModeWizard(j.needs_qty_mode));
+    else showQtyModeWizard(j.needs_qty_mode);
+  }
+  function readBlock(svc, sh, many) {
+    const warn = sh.rated < sh.lines || (sh.issues || []).length || (sh.choices || []).length || (sh.check && sh.check.status === "mismatch");
+    const cols = (sh.columns || []).map((c) => `<span class="sp-rd-col"><i>${esc(c.role)}</i> ← ${esc(c.header)}</span>`).join("");
+    const ck = sh.check || {};
+    const chk = ck.status === "ok" ? `<p class="sp-rd-ck g">✓ Amount ties to Qty × Rate on ${ck.matched} of ${ck.checked} lines.</p>`
+      : ck.status === "mismatch" ? `<p class="sp-rd-ck a">Amount ties to Qty × Rate on ${ck.matched} of ${ck.checked} lines. First that do not: ${(ck.bad || []).map((b) =>
+          `${esc(b.desc)} (sheet ${inr(b.amount)} vs Qty × Rate ${Math.round(b.expected).toLocaleString("en-IN")})`).join("; ")}.</p>`
+      : `<p class="sp-rd-ck">${esc(ck.why || "The rates could not be cross-checked.")}</p>`;
+    const issues = (sh.issues || []).map((t) => `<p class="sp-rd-is">${esc(t)}</p>`).join("");
+    const ask = (sh.choices || []).map((c) => `<div class="sp-rd-ask"><b>Which column is the rate?</b>
+        <select data-rdsel="${esc(sh.sheet)}"><option value="">Choose…</option>${c.headers.map((h) => `<option value="${esc(h)}">${esc(h)}</option>`).join("")}</select>
+        <button type="button" class="btn" data-rdpick="${esc(sh.sheet)}">Use this column</button><span class="sp-rd-err" hidden></span></div>`).join("");
+    return `<div class="sp-rd ${warn ? "warn" : "ok"}"><div class="sp-rd-h"><b>${esc(svc)}${many ? " · " + esc(sh.sheet) : ""}</b>
+        <span>${sh.lines} lines · ${sh.rated} priced${sh.rated ? " · " + inr(sh.value) : ""}</span></div>
+        <div class="sp-rd-cols">${cols}</div>${chk}${issues}${ask}</div>`;
+  }
+  function showReadCard(read, next) {
+    let finished = false;
+    const finish = () => { if (finished) return; finished = true; closeModal(); if (next) next(); };
+    const draw = (rd) => {
+      const body = Object.values(rd).map((r) => r.sheets.map((sh) => readBlock(r.service, sh, r.sheets.length > 1)).join("")).join("");
+      modal("How your BOQ was read", "Check the columns once. Nothing is held back: any rate can still be changed later.", body, async () => finish(), "Looks right", "min(640px,94vw)");
+      const m = $("sp-modal"); m.querySelector(".card").classList.add("sp-rdcard");
+      $("sp-modal-x").onclick = finish; $("sp-modal-cancel").onclick = finish;
+      m.addEventListener("click", (e) => { if (e.target.id === "sp-modal") finish(); });
+      m.querySelectorAll("[data-rdpick]").forEach((b) => b.onclick = async () => {
+        const box = b.closest(".sp-rd-ask"), sel = box.querySelector("select"), err = box.querySelector(".sp-rd-err");
+        if (!sel.value) { err.hidden = false; err.textContent = "Choose a column first."; return; }
+        try {
+          const j = await jpost(api("/" + S.slug + "/boq/column"), { sheet: b.dataset.rdpick, role: "rate", header: sel.value });
+          Object.assign(rd, j.read || {});
+          await reloadStateQuiet(); refreshOpen();
+          draw(rd);
+        } catch (e) { err.hidden = false; err.textContent = "Failed: " + briefErr(e); }
+      });
+    };
+    draw(Object.assign({}, read));
+  }
+
   // Only shown for services the upload flagged as needs_qty_mode -- a
   // ProjectBase-sourced service never reaches here at all (its Design
   // Quantity convention is already known and auto-seeded on upload); this

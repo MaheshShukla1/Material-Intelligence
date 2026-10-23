@@ -1783,7 +1783,8 @@ async def upload_boq(slug: str, file: UploadFile = File(...)):
     dest = d / "boq.xlsx"
     _save_upload(file, dest)
     try:
-        parsed, skipped = boq.parse_workbook(str(dest))
+        # a rate column the engineer chose for a sheet earlier is remembered (boq_columns.json) and used again
+        parsed, skipped = boq.parse_workbook(str(dest), overrides=_read_json(d / "boq_columns.json", {}) or {})
     except Exception as e:
         raise HTTPException(422, f"could not read this BOQ: {e}")
     if not parsed:
@@ -1805,6 +1806,14 @@ async def upload_boq(slug: str, file: UploadFile = File(...)):
                 new_rates += 1
         if new_rates:
             auto_rated[svc] = new_rates
+        # a split-rate sheet (Supply Rate + Installation Rate) also tells each line's installation share; same never-clobber rule
+        if r.get("install_pcts"):
+            all_ip = _read_json(d / "install_pct.json", {}) or {}
+            svc_ip = all_ip.setdefault(svc, {})
+            for code, pct in r["install_pcts"].items():
+                if code not in svc_ip:
+                    svc_ip[code] = pct
+            (d / "install_pct.json").write_text(json.dumps(all_ip, ensure_ascii=False))
 
         if r.get("qty_is_total") is True:
             svc_planned = all_planned.setdefault(svc, {})
@@ -1826,6 +1835,8 @@ async def upload_boq(slug: str, file: UploadFile = File(...)):
         items = r["items"]
         if "rate" in items.columns:
             items = items.drop(columns=["rate"])
+        if "install_share" in items.columns:
+            items = items.drop(columns=["install_share"])
         frames.append(items)
     allitems = pd.concat(frames, ignore_index=True)
     allitems.to_parquet(d / "boq.parquet")
@@ -1862,7 +1873,49 @@ async def upload_boq(slug: str, file: UploadFile = File(...)):
             "skipped": [s["sheet"] for s in skipped],
             "seeded_mapping": seeded,
             "auto_rated": auto_rated,
-            "needs_qty_mode": needs_qty_mode}
+            "needs_qty_mode": needs_qty_mode,
+            "read": {svc: r["report"] for svc, r in parsed.items()}}
+
+
+@router.post("/{slug}/boq/column")
+def choose_boq_column(slug: str, payload: dict):
+    """The engineer's answer to "which column is the rate?" for one sheet of the saved BOQ.
+    Body: {"sheet": str, "role": "rate", "header": the column's header text}.
+    The saved boq.xlsx is read again with that column; the choice is remembered for the sheet (boq_columns.json). Only rates / installation
+    shares that the PREVIOUS reading put there are replaced -- one the engineer typed by hand is never touched."""
+    d = _need(slug)
+    sheet, role, header = payload.get("sheet"), payload.get("role"), payload.get("header")
+    if role != "rate" or not sheet or not header:
+        raise HTTPException(400, "sheet, role ('rate') and header are required")
+    dest = d / "boq.xlsx"
+    if not dest.exists():
+        raise HTTPException(404, "no BOQ has been uploaded for this project")
+    old = _read_json(d / "boq_columns.json", {}) or {}
+    new = {**old, sheet: {**(old.get(sheet) or {}), "rate": header}}
+    try:
+        before, _ = boq.parse_workbook(str(dest), overrides=old)
+        after, _ = boq.parse_workbook(str(dest), overrides=new)
+    except Exception as e:
+        raise HTTPException(422, f"could not read this BOQ: {e}")
+    rep = next((x for r in after.values() for x in r["report"]["sheets"] if x["sheet"] == sheet), None)
+    if rep is None:
+        raise HTTPException(404, f"sheet {sheet!r} is not in this BOQ")
+    got = [c["header"] for c in rep["columns"] if c["role"] == "Rate"]
+    if rep["choices"] or not got or not (boq._htext(got[0]) == boq._htext(header) or boq._canon(got[0]) == boq._canon(header)):
+        raise HTTPException(400, f"{header!r} is not a rate column of sheet {sheet!r}")
+    all_rates = _read_json(d / "rates.json", {}) or {}
+    all_ip = _read_json(d / "install_pct.json", {}) or {}
+    for svc, r in after.items():
+        prev = before.get(svc) or {}
+        for store, key in ((all_rates.setdefault(svc, {}), "rates"), (all_ip.setdefault(svc, {}), "install_pcts")):
+            for code, val in (r.get(key) or {}).items():
+                if code not in store or store[code] == (prev.get(key) or {}).get(code):    # empty, or still what the old reading wrote
+                    store[code] = val
+    (d / "rates.json").write_text(json.dumps(all_rates, ensure_ascii=False))
+    if any(all_ip.values()):
+        (d / "install_pct.json").write_text(json.dumps(all_ip, ensure_ascii=False))
+    (d / "boq_columns.json").write_text(json.dumps(new, ensure_ascii=False))
+    return {"ok": True, "read": {svc: r["report"] for svc, r in after.items()}}
 
 
 @router.post("/{slug}/qty-mode")

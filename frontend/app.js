@@ -320,6 +320,10 @@ async function autoSync() {
     fd.append("link", META.source_link);
     fd.append("lead_time", LEAD);
     fd.append("project", META.project || "");
+    // tells the server this is the silent timer, not the Sync button: if another
+    // tab already refreshed this sheet a moment ago it hands that run back
+    // instead of downloading and parsing the whole sheet again
+    fd.append("auto", "1");
     const r = await fetch("/api/sync-sheet", { method: "POST", body: fd });
     if (!r.ok) return;                          // stay on current data silently
     const j = await r.json();

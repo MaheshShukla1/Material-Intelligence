@@ -3,6 +3,7 @@ import io
 import json
 import re
 import shutil
+import threading
 import uuid
 import datetime as dt
 from functools import lru_cache
@@ -13,6 +14,7 @@ import pandas as pd
 from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 
 from . import engine, health, leadtime, linkage, schema, subcat, toolcat
 
@@ -329,6 +331,20 @@ async def upload(file: UploadFile = File(...),
 
 
 def _process_file(raw, run_id, project, filename, lead_time, asof, source_link):
+    """Build a run from a saved Excel file, then ALWAYS remove that file.
+
+    Nothing reads the raw workbook after the run is built (every screen reads
+    forecast.parquet / meta.json), so keeping it only filled the disk: a 17 MB
+    Google-Sheet export per sync was 2.5 GB after two weeks. It is removed on
+    success and on failure alike. A manual upload can be re-uploaded from the
+    user's own copy; a sheet sync re-downloads."""
+    try:
+        return _build_run(raw, run_id, project, filename, lead_time, asof, source_link)
+    finally:
+        Path(raw).unlink(missing_ok=True)
+
+
+def _build_run(raw, run_id, project, filename, lead_time, asof, source_link):
     """Parse a saved Excel file, build the forecast, and persist the run.
 
     Shared by manual upload and Google-Sheet sync so both go through exactly
@@ -461,11 +477,59 @@ def _fetch_sheet_xlsx(link, dest):
         fh.write(data)
 
 
+# Sheet-sync housekeeping. Every open browser tab on a sheet-backed run used to
+# re-download and re-parse the whole sheet every 10 minutes on its own: with
+# several tabs that is several 17 MB parses (~800 MB peak each) at once, and a
+# new run folder each time. Now one sync per link runs at a time, a silent
+# auto-sync within AUTO_SYNC_REUSE_SECONDS of the last one just returns that
+# run, and only the newest SYNC_RUNS_KEEP runs of a link are kept (the Runs
+# list shows 50 at most, so nothing the UI can show is lost).
+SYNC_RUNS_KEEP = 50
+AUTO_SYNC_REUSE_SECONDS = 8 * 60
+_SYNC_LOCKS: dict = {}
+_SYNC_LOCKS_GUARD = threading.Lock()
+
+
+def _sync_lock(link):
+    with _SYNC_LOCKS_GUARD:
+        return _SYNC_LOCKS.setdefault(link, threading.Lock())
+
+
+def _fresh_synced_run(link, lead_time, project):
+    """Newest run built from this link, if it is recent enough and was built
+    with the same lead time / project name the caller asks for - else None."""
+    for j in all_meta():                         # newest first
+        if j.get("source_link") != link:
+            continue
+        if lead_time != j.get("lead_time"):
+            return None
+        if project and project != j.get("project"):
+            return None
+        try:
+            age = (dt.datetime.now() - dt.datetime.fromisoformat(j["created"])).total_seconds()
+        except (KeyError, ValueError):
+            return None
+        return j if 0 <= age <= AUTO_SYNC_REUSE_SECONDS else None
+    return None
+
+
+def _prune_synced_runs(link, keep=None):
+    keep = SYNC_RUNS_KEEP if keep is None else keep
+    mine = [j for j in all_meta() if j.get("source_link") == link]   # newest first
+    for j in mine[keep:]:
+        shutil.rmtree(RUNS / j["run_id"], ignore_errors=True)
+        for f in UPLOADS.glob(f"{j['run_id']}__*"):
+            f.unlink(missing_ok=True)
+    if len(mine) > keep:
+        load_run.cache_clear()
+
+
 @app.post("/api/sync-sheet")
 def sync_sheet(link: str = Form(...),
                lead_time: int = Form(7),
                project: str = Form(""),
-               asof: str = Form("")):
+               asof: str = Form(""),
+               auto: str = Form("")):
     """Pull the latest data straight from a published Google Sheet and build a
     run from it - no manual download or upload. Same parser, same forecast.
 
@@ -473,11 +537,29 @@ def sync_sheet(link: str = Form(...),
     not overwrite the first. Re-syncing the *same* link reuses that project's
     name, so it updates in place (a new run under the same project) instead of
     piling up unrelated 'Live Sheet' runs.
+
+    `auto` is sent only by the page's silent background refresh. Such a call
+    inside AUTO_SYNC_REUSE_SECONDS of the previous sync of the same link gets
+    that run back (`reused: true`) instead of downloading the sheet again. The
+    Sync button never sends it, so pressing it always pulls fresh data.
     """
     link = link.strip()
     if not link.startswith("http"):
         raise HTTPException(400, "enter a valid https link to the published sheet")
 
+    with _sync_lock(link):
+        if auto and not asof:
+            fresh = _fresh_synced_run(link, lead_time, (project or "").strip())
+            if fresh:
+                f, meta = load_run(fresh["run_id"])
+                return {"run_id": fresh["run_id"], "meta": meta,
+                        "summary": summarise(f), "reused": True}
+        out = _sync_sheet_locked(link, lead_time, project, asof)
+        _prune_synced_runs(link)
+        return out
+
+
+def _sync_sheet_locked(link, lead_time, project, asof):
     run_id = dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4]
     fname = "google-sheet.xlsx"
     raw = UPLOADS / f"{run_id}__{fname}"
@@ -983,4 +1065,35 @@ def index():
     return HTMLResponse(_stamp_assets(html))
 
 
-app.mount("/", StaticFiles(directory=FRONTEND, html=True), name="frontend")
+# The frontend folder also holds test fixtures, real PPE records, dev pages and
+# source copies. Only the files the browser actually needs may be served; any
+# other file is a 404, even though it sits in the same folder.
+_PUBLIC_EXT = {".js", ".css", ".svg", ".png", ".jpg", ".jpeg", ".webp", ".ico",
+               ".woff", ".woff2"}
+
+
+def _is_public_asset(path: str) -> bool:
+    if path in ("", "index.html"):
+        return True
+    parts = [p for p in path.split("/") if p]
+    if not parts or any(p.startswith(".") or p == ".." for p in parts):
+        return False
+    name = parts[-1].lower()
+    if name.startswith("test_"):
+        return False
+    return Path(name).suffix in _PUBLIC_EXT
+
+
+class PublicStaticFiles(StaticFiles):
+    async def get_response(self, path, scope):
+        if not _is_public_asset(path):
+            raise HTTPException(404)
+        return await super().get_response(path, scope)
+
+
+# Only the static files are gzipped (643 KB of JS/CSS -> ~179 KB). API
+# responses are left exactly as they were: exports are already-compressed
+# .xlsx/.zip, and compressing those would only burn CPU and memory.
+app.mount("/", GZipMiddleware(PublicStaticFiles(directory=FRONTEND, html=True),
+                              minimum_size=1024, compresslevel=6),
+          name="frontend")

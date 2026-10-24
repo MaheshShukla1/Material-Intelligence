@@ -103,7 +103,7 @@ async function main() {
   click(ctx.w, m.querySelector("#sp-plan-remove")); await sleep(120);
   ok(ctx.posts.length === 1 && apiPath(ctx.posts[0].url) === "/item-plan-off" && JSON.stringify(ctx.posts[0].body) === JSON.stringify({ service: "HVAC", item_code: TRAY, off: true }),
     `one post to /item-plan-off {off:true}, got ${JSON.stringify(ctx.posts)}`);
-  ok(ctx.asked.length === 0, "removing asks nothing (it is reversible and changes no data)");
+  ok(ctx.asked.length === 1 && /Remove the plan for this item/.test(ctx.asked[0]) && /Nothing already recorded changes/.test(ctx.asked[0]), `removing asks once first, got ${JSON.stringify(ctx.asked)}`);
   m = ctx.d.querySelector("#sp-modal");
   ok(!!m, "the dialog is open again after the change");
   const z = zbox(m, "b3z1");
@@ -115,6 +115,12 @@ async function main() {
   ok(!!m.querySelector("#sp-plan-restore"), "a Restore plan link is there");
   ok(/exactly as typed/.test(m.querySelector("#sp-zhelp").textContent), "help line explains the removed-plan behaviour");
   ok(!/Remove plan for this item/.test(m.textContent), "the remove link is gone while removed");
+
+  // ---- declining the question changes nothing
+  { const c2 = await boot({ free: false, groups: false, rec: {} }, { confirmAnswer: false }); const m2 = await open(c2);
+    c2.posts.length = 0; click(c2.w, m2.querySelector("#sp-plan-remove")); await sleep(120);
+    ok(c2.asked.length === 1 && c2.posts.length === 0, `"Cancel" on the question: nothing posted, got ${JSON.stringify(c2.posts)}`);
+    ok(!!c2.d.querySelector("#sp-modal") && !!c2.d.querySelector("#sp-modal #sp-plan-remove") && !c2.d.querySelector(".sp-freecard"), "and the dialog stays as it was (plan still on)"); }
 
   // ================= 4. a tick does not fill a quantity; a bare tick sends nothing
   toggle(ctx.w, m.querySelector('input[data-room="b3z1"]'), true);

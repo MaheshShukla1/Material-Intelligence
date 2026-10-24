@@ -1877,6 +1877,7 @@
     // share as a limit for THIS item (a zone / Whole takes the typed quantity as typed; the item's own total stays the limit).
     // Nothing recorded changes. Hotel-room items that are planned per room keep the plan and the plain tick.
     async function setPlanOff(off) {
+      if (off && !confirm(`Remove the plan for this item (${code})? Every ${dlgLeafLower()} then takes exactly the quantity you type, and a plain tick no longer counts. Nothing already recorded changes. You can restore the plan from this same dialog.`)) return;
       if (!off && !confirm("Restore the equal-share plan for this item? Quantities already recorded stay as they are.")) return;
       try { S.svc = await jpost(api("/" + S.slug + "/item-plan-off" + roomQ()), { service: S.service, item_code: code, off }); }
       catch (e) { return toast("Failed: " + briefErr(e)); }

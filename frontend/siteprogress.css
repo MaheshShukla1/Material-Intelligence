@@ -171,7 +171,7 @@
 @media (max-width:720px) and (hover:none),(max-width:720px) and (pointer:coarse){
   .sp-brow{grid-template-columns:1fr 56px 40px 40px}
 }
-.sp-bname{grid-area:name;font-size:13px;min-width:0}
+.sp-bname{grid-area:name;font-size:13px;min-width:0;overflow-wrap:anywhere}
 .sp-bname .code{color:var(--ink3);font-size:11px;font-family:ui-monospace,Menlo,monospace;margin-right:6px}
 .sp-bmeta{font-size:11px;color:var(--ink3);margin-top:2px;display:flex;gap:6px;flex-wrap:wrap;align-items:center}
 .sp-tag{background:var(--slatebg);border-radius:5px;padding:1px 7px;font-size:10.5px}

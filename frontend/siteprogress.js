@@ -1431,7 +1431,7 @@
     // control (plannedControlHTML below, via roomQ()) is the correct way
     // to update THIS room specifically. Nothing else about the row changes.
     return `<div class="sp-brow" data-code="${esc(it.code)}">
-      <div class="sp-bname"><span class="code">${esc(it.code)}</span>${esc(short(it.desc))}
+      <div class="sp-bname"><span class="code">${esc(it.code)}</span>${esc(full(it.desc))}
         <div class="sp-bmeta"><span class="sp-tag">${esc(it.sub)}</span>${cons}${roomBadge}
           ${it.quick ? `<span class="sp-tag" title="added straight from the stock register, not the BOQ file">from stock</span>` : ""}
           ${overBoq(it)}
@@ -1703,7 +1703,7 @@
       <button type="button" class="btn" id="sp-unmark-done">Undo done</button>`;
 
     modal(`${dlgLeafPlural(2)} → ${esc(code)}`,
-      `${esc(short(it.desc, 70))} — tick the ${dlgLeafPluralLower(2)} you're updating, then "Mark ticked as done". ✓ = already done.`,
+      `${esc(full(it.desc))} — tick the ${dlgLeafPluralLower(2)} you're updating, then "Mark ticked as done". ✓ = already done.`,
       body, async () => {
         const boxes = [...document.querySelectorAll("#sp-modal input[data-room]")];
         const ids = boxes.filter((c) => c.checked).map((c) => c.dataset.room);
@@ -2134,6 +2134,10 @@
   }
 
   function short(d, m) { d = String(d || "").replace(/^(Supply,?\s*(Installation|Insallation)[^,]*,?\s*(Testing and Commissioning|Commissioing)?[^,]*of\s*)/i, ""); m = m || 58; return d.length > m ? d.slice(0, m) + "…" : d; }
+  // The BOQ line's whole description, no cutting: the same leading "Supply, Installation ... of" clean-up as short(), nothing else. For the places where the
+  // engineer has to be able to tell two near-identical lines apart without opening anything (the item row, the Zones dialog heading); the server already
+  // sends the full text. A BOQ often has lines that differ only at the END ("... with average point wiring 10 m" vs "... 15 m"), exactly the part short() removes.
+  function full(d) { return String(d || "").replace(/^(Supply,?\s*(Installation|Insallation)[^,]*,?\s*(Testing and Commissioning|Commissioing)?[^,]*of\s*)/i, ""); }
 
   // shared local-preview + save plumbing for BOTH controls on a row (the
   // typed qty input, tap-to-edit -- the real/primary one -- and the slider,

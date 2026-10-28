@@ -685,3 +685,12 @@ body[data-view="inventory"] #leadwrap{display:none !important}
 .sp-rd-ask select{font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--panel);max-width:100%}
 .sp-rd-err{color:var(--red);font-size:12px}
 @media (max-width:640px){.sp-rd-ask .btn,.sp-rd-ask select{min-height:44px}.sp-rd-ask select{flex:1 1 100%}}
+
+/* Measurement menu (service toolbar) */
+.sp-menuwrap{position:relative;display:inline-block}
+.sp-menu{position:absolute;top:calc(100% + 6px);left:0;z-index:40;min-width:290px;background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 10px 30px rgba(0,0,0,.14);padding:5px}
+.sp-menu button{display:flex;flex-direction:column;align-items:flex-start;gap:1px;width:100%;text-align:left;border:0;background:none;border-radius:7px;padding:8px 10px;font:inherit;color:var(--ink);cursor:pointer}
+.sp-menu button:hover,.sp-menu button:focus-visible{background:var(--bg)}
+.sp-menu button b{font-weight:600;font-size:13px}
+.sp-menu button span{font-size:12px;color:var(--ink3)}
+@media (hover:none),(pointer:coarse){.sp-menu button{min-height:44px}}

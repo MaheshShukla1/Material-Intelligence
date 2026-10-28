@@ -846,7 +846,7 @@
           </div>
           <p class="sp-unmapped" id="sp-unmapped" hidden></p>
           <div class="sp-secttl"><span>Activities · ${esc(S.service)}${S.room ? ` · <b>${esc(S.roomName)}</b> <button class="linkbtn" id="sp-allrooms">← all ${curLeafPluralLower(2)}</button>` : ` · all ${curLeafPluralLower(2)}`}</span>
-            <span><button class="linkbtn" id="sp-newact">+ New activity</button> &nbsp;·&nbsp; <button class="linkbtn" id="sp-rates">Set rates</button> &nbsp;·&nbsp; <button class="linkbtn" id="sp-linkbtn">Link stock</button> &nbsp;·&nbsp; <button class="linkbtn" id="sp-reboq">Re-upload BOQ</button> &nbsp;·&nbsp; <button class="linkbtn" id="sp-refresh">Refresh</button>
+            <span><button class="linkbtn" id="sp-newact">+ New activity</button> &nbsp;·&nbsp; <button class="linkbtn" id="sp-rates">Set rates</button> &nbsp;·&nbsp; <span class="sp-menuwrap"><button class="linkbtn" id="sp-measgrid" aria-haspopup="menu" aria-expanded="false">Measurement ▾</button></span> &nbsp;·&nbsp; <button class="linkbtn" id="sp-linkbtn">Link stock</button> &nbsp;·&nbsp; <button class="linkbtn" id="sp-reboq">Re-upload BOQ</button> &nbsp;·&nbsp; <button class="linkbtn" id="sp-refresh">Refresh</button>
             <input type="file" id="sp-reboq-file" accept=".xlsx,.xlsm,.xls" hidden></span></div>
           <div id="sp-acts"></div>
         </div>
@@ -856,6 +856,7 @@
     $("sp-refresh").onclick = () => loadService();
     $("sp-linkbtn").onclick = () => ((S.stockView && !S.stockView.current) ? openConnectStock() : openLinkModal());
     $("sp-rates").onclick = () => openRatesModal();
+    $("sp-measgrid").onclick = (e) => openMeasureMenu(e.currentTarget);
     $("sp-newact").onclick = () => newActivity();
     $("sp-reboq").onclick = () => $("sp-reboq-file").click();
     $("sp-reboq-file").onchange = reuploadBoq;
@@ -2961,6 +2962,45 @@
     });
   }
   window.MIMeasure = { open: openMeasureSheet };
+
+  // ---------- Measurement grid (Excel-like sheet, measuregrid.js) ----------
+  // One BOQ line per row, one place (level / zone) per column, a cell = pieces ("10+2+30+7"). Opens from the service toolbar.
+  function openMeasureMenu(btn) {
+    const old = document.getElementById("sp-measmenu"); if (old) { old.remove(); btn.setAttribute("aria-expanded", "false"); return; }
+    const m = document.createElement("div"); m.id = "sp-measmenu"; m.className = "sp-menu"; m.setAttribute("role", "menu");
+    m.innerHTML = `<button role="menuitem" data-go="open"><b>Open measurement grid</b><span>Excel jaisa sheet: BOQ line neeche, ${esc(dlgLeafLower())} saamne</span></button>
+      <button role="menuitem" data-go="export"><b>Export Excel</b><span>Same layout, import section ke saath</span></button>
+      <button role="menuitem" data-go="import"><b>Import Excel</b><span>Bhari hui file wapas, pehle preview</span></button>`;
+    btn.parentNode.appendChild(m); btn.setAttribute("aria-expanded", "true");
+    const off = (ev) => { if (!m.contains(ev.target) && ev.target !== btn) { m.remove(); btn.setAttribute("aria-expanded", "false"); document.removeEventListener("click", off, true); } };
+    setTimeout(() => document.addEventListener("click", off, true), 0);
+    m.onclick = (ev) => { const b = ev.target.closest("[data-go]"); if (!b) return; m.remove(); btn.setAttribute("aria-expanded", "false"); document.removeEventListener("click", off, true); openMeasureGrid(b.dataset.go); };
+  }
+  function measureDataset() {
+    const unitOf = (u) => { const x = String(u || "").toLowerCase(); return /^(mtr|rmt|rm|m|mtrs|meter|metre)$/.test(x) ? "Mtr" : /^(nos|no|each|pt|point|set)$/.test(x) ? "Nos" : (u || "Nos"); };
+    const rows = (S.svc.items || []).filter((i) => i.unit).map((i, k) => ({ id: i.code, code: i.code, name: i.desc, unit: unitOf(i.unit), prev: null }));
+    const groups = []; const st = S.state.structure;
+    const lone = [];
+    (st.children || []).forEach((n) => {
+      if (n.type === "room") lone.push({ id: n.id, name: n.name });
+      else groups.push({ id: n.id, name: n.name, kids: (n.children || []).filter((c) => c.type === "room").map((c) => ({ id: c.id, name: c.name })), open: false });
+    });
+    lone.forEach((k) => groups.push({ id: k.id, name: k.name }));
+    return { id: S.service, name: S.service, label: S.service, groups: groups.filter((g) => !g.kids || g.kids.length), rows, cells: {}, parts: {}, runs: {} };
+  }
+  async function openMeasureGrid(first) {
+    if (!window.MIGrid) { toast("Measurement grid load nahi hua (measuregrid.js)"); return; }
+    const ds = measureDataset();
+    try { const saved = await jget(api("/" + S.slug + "/measure-grid/" + encodeURIComponent(S.service))); Object.assign(ds, { cells: saved.cells || {}, parts: saved.parts || {}, runs: saved.runs || {} }); }
+    catch (e) { /* no saved sheet yet (or the server has no measure-grid endpoint): start empty */ }
+    const g = window.MIGrid.open({
+      datasets: [ds], placesManaged: true, title: ((document.getElementById("sp-proj") && document.getElementById("sp-proj").selectedOptions[0] && document.getElementById("sp-proj").selectedOptions[0].textContent) || S.slug) + " · Measurement", subtitle: S.service + " · " + ds.rows.length + " BOQ lines", pill: "Draft", backLabel: "Site Progress",
+      onSave: (d) => jpost(api("/" + S.slug + "/measure-grid/" + encodeURIComponent(S.service)), { cells: d.cells, parts: d.parts, runs: d.runs }),
+      onClose: () => loadService(),
+    });
+    if (first === "export" || first === "import") { const host = document.getElementById("mg-host"); const b = host && host.shadowRoot.getElementById(first === "export" ? "bExport" : "bImport"); if (b) b.click(); }
+  }
+
 
   // ---------- generic modal ----------
   function modal(title, sub, bodyHTML, onSave, saveLabel, width, extraFooterHTML) {

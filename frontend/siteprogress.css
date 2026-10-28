@@ -232,8 +232,57 @@
 .sp-ovstat.pct{font-weight:700;color:var(--ink)}
 .sp-ovstat.done{font-weight:600;color:var(--green)}
 .sp-ovstat.rem{font-weight:600;color:var(--amber)}
-.sp-unmapped{font-size:12px;color:var(--ink3);margin:8px 2px 0}
-.sp-unmapped b{color:var(--amber)}
+.sp-unmapped{display:flex;align-items:center;gap:16px;margin:0 0 20px;padding:14px 18px;border-radius:14px;
+  background:var(--amberbg);border:1px solid #ebd9a8}
+.sp-unmapped[hidden]{display:none}
+.sp-unm-t{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;font-size:13px;color:#6b4106}
+.sp-unm-t b{font-size:14.5px;font-weight:600;color:#4d2e03}
+.sp-unmapped .btn{flex:none;white-space:nowrap}
+@media(max-width:620px){.sp-unmapped{flex-direction:column;align-items:stretch}.sp-unmapped .btn{min-height:44px}}
+/* coverage bar under the hero: how much of the rated BOQ value is inside the numbers */
+.sp-cover{margin:-8px 0 16px}
+.sp-cover[hidden]{display:none}
+.sp-covbar{display:flex;height:12px;border-radius:99px;overflow:hidden;background:var(--line2)}
+.sp-covbar i{display:block;height:100%}
+.sp-covbar .d{background:var(--green)}
+.sp-covbar .r{background:#b9cfa6}
+.sp-covbar .u{background:repeating-linear-gradient(135deg,#f5dfa0 0 4px,#fbf1da 4px 8px)}
+.sp-cover p{margin:8px 2px 0;font-size:12.5px;color:var(--ink2)}
+.sp-cover b{font-weight:600;color:var(--ink)}
+/* toolbar: three labelled buttons instead of six links */
+.sp-tools{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.sp-tools .btn{text-transform:none;letter-spacing:0;font-size:13px}
+.sp-menu.right{left:auto;right:0;min-width:200px;display:flex;flex-direction:column}
+.sp-menu[hidden]{display:none}
+.sp-menu .sp-amb{margin-left:8px}
+.sp-menu.right button{flex-direction:row;align-items:center;gap:0;text-transform:none;letter-spacing:0;font-size:13px;min-height:38px}
+#sp-more.has-amb::after{content:"";display:inline-block;width:8px;height:8px;margin-left:6px;border-radius:99px;background:#f0a92b;vertical-align:1px}
+/* Add items dialog: source tabs, sticky search + select-all bar */
+.sp-srctabs{display:flex;gap:4px;padding:4px;margin:0 0 12px;border-radius:12px;background:var(--line2);width:max-content;max-width:100%}
+.sp-srctabs button{border:0;background:transparent;border-radius:9px;padding:8px 16px;font:inherit;font-size:13px;font-weight:500;color:var(--ink2);cursor:pointer;min-height:36px}
+.sp-srctabs button.on{background:var(--panel);color:var(--ink);font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.08)}
+.sp-mapbar{position:sticky;top:-6px;z-index:2;background:var(--panel);padding:2px 0 8px;margin-bottom:2px;border-bottom:1px solid var(--line)}
+.sp-mapchips{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 8px}
+.sp-fchip{border:1px solid var(--line);background:var(--panel);border-radius:99px;padding:5px 12px;font:inherit;font-size:12.5px;font-weight:500;color:var(--ink2);cursor:pointer;min-height:32px}
+.sp-fchip.on{background:var(--violetbg);border-color:#c5beee;color:#33297f;font-weight:600}
+.sp-mapsel{display:flex;align-items:center;gap:12px;font-size:12.5px}
+.sp-mapsel label{display:flex;align-items:center;gap:8px;font-weight:600;cursor:pointer}
+.sp-mapsel input{width:16px;height:16px}
+@media (hover:none),(pointer:coarse){.sp-mapsel .sub{display:none}.sp-mapsel label,#sp-mapcnt{white-space:nowrap}}
+@media (hover:none),(pointer:coarse){.sp-maprow{min-height:48px}.sp-maprow input,.sp-mapsel input{width:20px;height:20px}.sp-fchip{min-height:40px}.sp-srctabs button{min-height:44px}}
+/* stock tab: running count, added rows, no double scrollbar */
+.sp-quickcnt{color:var(--green);font-size:13px}
+#sp-quicklist.sp-quicklist{max-height:none;overflow:visible}
+.sp-maprow.sp-just{background:var(--greenbg)}
+.sp-maprow.sp-just [data-quickpick],.sp-maprow.sp-just [data-quickpick-group]{color:var(--green);font-weight:600;text-decoration:none}
+/* "which activity?" picker opened by the banner button */
+.sp-pickact{display:flex;flex-direction:column;gap:8px}
+.sp-pickbtn{display:flex;justify-content:space-between;align-items:center;gap:12px;min-height:48px;padding:10px 14px;border:1px solid var(--line);
+  border-radius:12px;background:var(--panel);font:inherit;color:var(--ink);cursor:pointer;text-align:left}
+.sp-pickbtn:hover,.sp-pickbtn:focus-visible{border-color:#cfcdc6;background:var(--bg)}
+.sp-pickbtn b{font-weight:600;font-size:14px}
+.sp-pickbtn span{font-size:12.5px;color:var(--ink2)}
+.sp-pickbtn.new b{color:var(--violet)}
 
 /* level 2: activities, in a lightly-shaded sub-panel under the open service */
 .sp-ovacts{background:var(--slatebg);border-radius:10px;padding:2px 14px;margin:0 20px 14px}
@@ -694,3 +743,11 @@ body[data-view="inventory"] #leadwrap{display:none !important}
 .sp-menu button b{font-weight:600;font-size:13px}
 .sp-menu button span{font-size:12px;color:var(--ink3)}
 @media (hover:none),(pointer:coarse){.sp-menu button{min-height:44px}}
+
+/* Add items: one button per activity, at the bottom of the activity. Full width on a phone. */
+.sp-addbtn{white-space:nowrap}
+.sp-addfoot{padding-top:12px}
+.sp-addfoot.sp-addnone{padding-top:6px}
+.sp-addfoot .sub{margin:0 0 10px}
+@media(max-width:720px){.sp-addfoot .sp-addbtn{display:flex;width:100%;min-height:48px;justify-content:center}.sp-addfoot .sp-labourlink{margin:8px 0 0!important;width:100%;min-height:44px;justify-content:center}}
+@media(max-width:620px){.sp-secttl{flex-wrap:wrap;row-gap:10px}.sp-tools{width:100%;flex-wrap:nowrap}.sp-tools .btn{min-height:44px;padding:0 10px;white-space:nowrap}}

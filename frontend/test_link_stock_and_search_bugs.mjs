@@ -243,8 +243,8 @@ async function main() {
   // ================= ADD BOQ ITEMS SEARCH =================
 
   // ---- test 5: the search box exists and the full list renders initially ----
-  const addBtn = document.querySelector('[data-map="Wall piping"]');
-  assert.ok(addBtn, "FAIL: '+ Add BOQ items' button missing");
+  const addBtn = document.querySelector('[data-additems="Wall piping"]');
+  assert.ok(addBtn, "FAIL: '+ Add items' button missing");
   addBtn.click();
   await flush(10);
   modalEl = document.getElementById("sp-modal");

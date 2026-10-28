@@ -199,6 +199,7 @@
       n.className = "sp-amb"; n.textContent = String(lost); n.id = "sp-linklost";
       n.title = `${lost} saved link${lost === 1 ? " has" : "s have"} no material in this stock. They stay saved.`;
       b.appendChild(document.createTextNode(" ")); b.appendChild(n);
+      const mb = $("sp-more"); if (mb) mb.classList.add("has-amb");
     }
   }
   // Used by Link stock / + Add item when there is nothing to read from: open the connect dialog right here.
@@ -842,11 +843,13 @@
             <div class="sp-stats">
               <div class="sp-stat"><p class="l">Work done</p><div class="v g" id="sp-done">₹—</div><p class="h" id="sp-doneh"></p></div>
               <div class="sp-stat"><p class="l">Remaining</p><div class="v a" id="sp-rem">₹—</div><p class="h">to finish planned work</p></div>
+              <div class="sp-stat" id="sp-uncwrap" hidden><p class="l">Not counted</p><div class="v a" id="sp-unc">₹—</div><p class="h" id="sp-unch"></p></div>
             </div>
           </div>
-          <p class="sp-unmapped" id="sp-unmapped" hidden></p>
+          <div class="sp-cover" id="sp-cover" hidden><div class="sp-covbar" role="img" id="sp-covbar"><i class="d" id="sp-cv-d"></i><i class="r" id="sp-cv-r"></i><i class="u" id="sp-cv-u"></i></div><p id="sp-cv-t"></p></div>
+          <div class="sp-unmapped" id="sp-unmapped" role="status" hidden><div class="sp-unm-t" id="sp-unm-t"></div><button class="btn primary" id="sp-unm-add">Add to an activity</button></div>
           <div class="sp-secttl"><span>Activities · ${esc(S.service)}${S.room ? ` · <b>${esc(S.roomName)}</b> <button class="linkbtn" id="sp-allrooms">← all ${curLeafPluralLower(2)}</button>` : ` · all ${curLeafPluralLower(2)}`}</span>
-            <span><button class="linkbtn" id="sp-newact">+ New activity</button> &nbsp;·&nbsp; <button class="linkbtn" id="sp-rates">Set rates</button> &nbsp;·&nbsp; <span class="sp-menuwrap"><button class="linkbtn" id="sp-measgrid" aria-haspopup="menu" aria-expanded="false">Measurement ▾</button></span> &nbsp;·&nbsp; <button class="linkbtn" id="sp-linkbtn">Link stock</button> &nbsp;·&nbsp; <button class="linkbtn" id="sp-reboq">Re-upload BOQ</button> &nbsp;·&nbsp; <button class="linkbtn" id="sp-refresh">Refresh</button>
+            <span class="sp-tools"><button class="btn" id="sp-newact">+ New activity</button><span class="sp-menuwrap"><button class="btn" id="sp-measgrid" aria-haspopup="menu" aria-expanded="false">Measurement ▾</button></span><span class="sp-menuwrap"><button class="btn" id="sp-more" aria-haspopup="menu" aria-expanded="false">More ▾</button><div class="sp-menu right" id="sp-moremenu" role="menu" hidden><button role="menuitem" id="sp-rates">Set rates</button><button role="menuitem" id="sp-linkbtn">Link stock</button><button role="menuitem" id="sp-reboq">Re-upload BOQ</button><button role="menuitem" id="sp-refresh">Refresh</button></div></span>
             <input type="file" id="sp-reboq-file" accept=".xlsx,.xlsm,.xls" hidden></span></div>
           <div id="sp-acts"></div>
         </div>
@@ -858,6 +861,13 @@
     $("sp-rates").onclick = () => openRatesModal();
     $("sp-measgrid").onclick = (e) => openMeasureMenu(e.currentTarget);
     $("sp-newact").onclick = () => newActivity();
+    $("sp-more").onclick = (e) => { const m = $("sp-moremenu"); const open = m.hidden; m.hidden = !open; e.currentTarget.setAttribute("aria-expanded", String(open)); };
+    $("sp-moremenu").addEventListener("click", () => { $("sp-moremenu").hidden = true; $("sp-more").setAttribute("aria-expanded", "false"); });
+    if (!window.__spMoreBound) {
+      window.__spMoreBound = true;
+      document.addEventListener("click", (e) => { const m = $("sp-moremenu"), b = $("sp-more"); if (m && !m.hidden && b && e.target !== b && !m.contains(e.target)) { m.hidden = true; b.setAttribute("aria-expanded", "false"); } });
+    }
+    $("sp-unm-add").onclick = () => openUnmappedAdd();
     $("sp-reboq").onclick = () => $("sp-reboq-file").click();
     $("sp-reboq-file").onchange = reuploadBoq;
     const ar = $("sp-allrooms"); if (ar) ar.onclick = () => clearRoom();
@@ -1295,6 +1305,10 @@
   function itemsFor(a) { const bc = S._byCode; return (S.svc.mapping[a] || []).map((c) => bc[c]).filter(Boolean).filter((i) => (i.qty > 0 || i.quick) && i.in_room); }
   function actMoney(a) { let d = 0, r = false; (S.svc.mapping[a] || []).forEach((c) => { const it = S._byCode[c]; if (it && it.rate != null) { d += it.done_val || 0; r = true; } }); return r ? d : null; }
 
+  // One "+ Add items" per activity, at the bottom of the activity (where the two old buttons were). The dialog it opens has the two sources as tabs: From BOQ (default) and From stock register.
+  // A project with no BOQ lines at all has nothing to pick from the BOQ tab, so it opens on the stock tab.
+  function openAddItems(a) { if (!(S.svc.items || []).length) openQuickAddModal(a); else openMapModal(a); }
+
   function renderActs() {
     byCode();
     const acts = S.svc.activities || [];
@@ -1327,8 +1341,8 @@
             <button class="sp-linkchip" data-actroomsedit="${esc(a)}">🏠 ${esc(activityRoomsChipLabel(a))}</button>
           </div>` : `
           ${items.map((it) => rowHTML(it, a)).join("")}
-          <div style="padding-top:12px"><button class="btn" data-map="${esc(a)}">+ Add BOQ items</button>
-            <button class="btn" data-quickadd="${esc(a)}" style="margin-left:8px">+ Add item</button>
+          <div class="sp-addfoot${noItems ? " sp-addnone" : ""}">${noItems ? `<p class="sub">No items in this activity yet. Add them from the BOQ or from the stock register.</p>` : ""}
+            <button class="btn sp-addbtn${noItems ? " primary" : ""}" data-additems="${esc(a)}">+ Add items</button>
             ${noItems && labourSuggested ? `<button class="btn sp-labourlink" data-labouron="${esc(a)}" style="margin-left:8px">or track as labour-only</button>` : ""}</div>`}
         </div>
       </div>`;
@@ -1355,8 +1369,7 @@
     $("sp-acts").querySelectorAll("[data-actroomsedit]").forEach((b) => b.addEventListener("click", () => openActivityRoomsModal(b.dataset.actroomsedit)));
     $("sp-acts").querySelectorAll("[data-labouron]").forEach((b) => b.addEventListener("click", () => setLabourOnly(b.dataset.labouron, true)));
     $("sp-acts").querySelectorAll("[data-labouroff]").forEach((b) => b.addEventListener("click", (e) => { e.stopPropagation(); setLabourOnly(b.dataset.labouroff, false); }));
-    $("sp-acts").querySelectorAll("[data-map]").forEach((b) => b.addEventListener("click", () => openMapModal(b.dataset.map)));
-    $("sp-acts").querySelectorAll("[data-quickadd]").forEach((b) => b.addEventListener("click", () => openQuickAddModal(b.dataset.quickadd)));
+    $("sp-acts").querySelectorAll("[data-additems]").forEach((b) => b.addEventListener("click", () => openAddItems(b.dataset.additems)));
     $("sp-acts").querySelectorAll("[data-actedit]").forEach((b) => b.addEventListener("click", (e) => { e.stopPropagation(); renameActivity(b.dataset.actedit); }));
     $("sp-acts").querySelectorAll("[data-actdel]").forEach((b) => b.addEventListener("click", (e) => { e.stopPropagation(); deleteActivity(b.dataset.actdel); }));
     $("sp-acts").querySelectorAll(".sp-setrate").forEach((b) => b.addEventListener("click", () => setRate(b.dataset.rate)));
@@ -1791,6 +1804,21 @@
       c.inp.readOnly = true;
       c.inp.title = "This quantity comes from the measurements. Open the measurement sheet to add or cancel one.";
     }
+    // A counted item with only a few pieces (5 Nos over 24 zones is handed out as 1, 1, 1, 1, 1, 0, 0 ...): no zone has more than 1, so
+    // there is no quantity box and no "Whole level" switch -- the tick says it all. Say so, instead of a silent tick-only list.
+    function paintFewPiecesHint(plan) {
+      if (!isCountItem || isFree || $("sp-zhelp")) return;
+      const shares = Object.values(plan.rooms || {}).map((i) => (i && i.planned > 0 ? i.planned : 0));
+      const given = shares.filter((v) => v > 0);
+      if (!given.length || given.some((v) => v > 1)) return;
+      const total = given.reduce((a, b) => a + b, 0), n = shares.length;
+      const pb = modalEl.querySelector(".sp-planbox");
+      if (!pb) return;
+      const zh = document.createElement("p");
+      zh.id = "sp-zhelp"; zh.className = "sp-zhelp";
+      zh.textContent = `${fmtQ(total)} ${it.unit} over ${n} ${dlgLeafPluralLower(n)}: each ${dlgLeafLower()} gets 1 or none, so there is no quantity box here. A tick means 1 done in that ${dlgLeafLower()}. To record how many are installed in total, type it in “Installed” on the item row.`;
+      pb.insertAdjacentElement("beforebegin", zh);
+    }
     function applyRoomPlan(plan) {
       if (!plan || !plan.rooms || $("sp-modal") !== modalEl) return;
       roomPlan = plan;
@@ -1837,7 +1865,7 @@
         // ticking/unticking resets the row to "full plan" / "as recorded"
         cb.addEventListener("change", () => { delete inp.dataset.touched; syncCells(); });
       });
-      if (!cells.length) return;
+      if (!cells.length) { paintFewPiecesHint(plan); return; }
       document.querySelectorAll("#sp-modal .sp-roomgroup > div:last-child").forEach((g) => {
         if (g.querySelector(".sp-roomcell")) g.style.gridTemplateColumns = "repeat(auto-fill,minmax(260px,1fr))";
       });
@@ -2317,14 +2345,37 @@
     // with no trace — click "+ New activity" to re-map them.
     const uv = (S.pnl && S.pnl.unmapped_value) || (S.svc && S.svc.pnl_unmapped_value);
     const un = $("sp-unmapped");
+    const uw = $("sp-uncwrap"), cv = $("sp-cover");
     if (un) {
       if (uv && uv.items > 0) {
         un.hidden = false;
-        un.innerHTML = `<b>${uv.items} item${uv.items === 1 ? "" : "s"}</b> not in any activity — ${inr(uv.done_value)} done / ${inr(uv.remaining_value)} remaining not counted above. Add ${uv.items === 1 ? "it" : "them"} to an activity to bring it back in.`;
+        $("sp-unm-t").innerHTML = `<b>${uv.items} BOQ item${uv.items === 1 ? " is" : "s are"} not in any activity</b><span>${inr(uv.done_value)} done / ${inr(uv.remaining_value)} remaining ${uv.items === 1 ? "is" : "are"} not counted in the numbers above. Add ${uv.items === 1 ? "it" : "them"} to an activity to bring ${uv.items === 1 ? "it" : "them"} back in.</span>`;
+        if (uw) { uw.hidden = false; $("sp-unc").textContent = inr(uv.planned_value); $("sp-unch").textContent = `${uv.items} item${uv.items === 1 ? "" : "s"} in no activity`; }
+        // Coverage bar: only when both values are real numbers (never a guess).
+        const cp = t.planned_value, up = uv.planned_value;
+        if (cv && cp != null && up != null && cp + up > 0) {
+          const tot = cp + up, pc = (v) => (100 * (v || 0) / tot).toFixed(1) + "%";
+          $("sp-cv-d").style.width = pc(t.done_value); $("sp-cv-r").style.width = pc(t.remaining_value); $("sp-cv-u").style.width = pc(up);
+          const share = Math.round(100 * cp / tot);
+          $("sp-cv-t").innerHTML = `<b>Only ${share}% of the rated BOQ value</b> is in the numbers above.`;
+          $("sp-covbar").setAttribute("aria-label", `${share} percent of the rated BOQ value is counted`);
+          cv.hidden = false;
+        } else if (cv) cv.hidden = true;
       } else {
-        un.hidden = true;
+        un.hidden = true; if (uw) uw.hidden = true; if (cv) cv.hidden = true;
       }
     }
+  }
+  // The banner's one button: pick the activity, then the existing "Add BOQ items" dialog opens for it.
+  function openUnmappedAdd() {
+    const acts = (S.svc && S.svc.activities) || [];
+    if (!acts.length) { newActivity(); return; }
+    modal("Add items to which activity?", "Pick an activity. The list of BOQ items opens next.",
+      `<div class="sp-pickact">${acts.map((a) => `<button type="button" class="sp-pickbtn" data-pick="${esc(a)}"><b>${esc(a)}</b><span>${((S.svc.mapping || {})[a] || []).length} items</span></button>`).join("")}<button type="button" class="sp-pickbtn new" id="sp-pick-new"><b>+ New activity</b><span>Create one and add the items to it</span></button></div>`,
+      () => closeModal(), "Close");
+    $("sp-modal-save").hidden = true;
+    $("sp-modal").querySelectorAll("[data-pick]").forEach((b) => b.addEventListener("click", () => { const a = b.dataset.pick; closeModal(); openMapModal(a); }));
+    $("sp-pick-new").addEventListener("click", () => { closeModal(); newActivity(); });
   }
 
   // ---------- mapping modal (configure items) ----------
@@ -2335,28 +2386,55 @@
     // then scrolled/filtered out of view. This Set is the single source of
     // truth regardless of what's currently rendered.
     const checked = new Set(S.svc.mapping[a] || []);
+    const startCodes = new Set(checked);
+    const view = { unassigned: false, selOnly: false };
+    const anyAct = new Set();
+    Object.values(S.svc.mapping || {}).forEach((cs) => (cs || []).forEach((c) => anyAct.add(String(c))));
+    let shown = [];
+    const changed = () => checked.size !== startCodes.size || [...checked].some((c) => !startCodes.has(c));
+    const unCount = S.svc.items.filter((it) => !anyAct.has(String(it.code))).length;
+    function paintBar() {
+      const n = checked.size, k = shown.filter((it) => checked.has(it.code)).length;
+      const all = $("sp-mapall");
+      if (all) { all.checked = shown.length > 0 && k === shown.length; all.indeterminate = k > 0 && k < shown.length; }
+      const al = $("sp-mapalllbl"); if (al) al.textContent = `Select all shown (${shown.length})`;
+      const c = $("sp-mapcnt"); if (c) c.textContent = `${n} selected`;
+      const clr = $("sp-mapclr"); if (clr) clr.hidden = n === 0;
+    }
     function renderRows(filter) {
       const f = (filter || "").trim().toLowerCase();
-      const items = S.svc.items.filter((it) => !f
+      shown = S.svc.items.filter((it) => (!f
         || it.code.toLowerCase().includes(f)
         || (it.desc || "").toLowerCase().includes(f)
-        || (it.sub || "").toLowerCase().includes(f));
+        || (it.sub || "").toLowerCase().includes(f))
+        && (!view.unassigned || !anyAct.has(String(it.code)))
+        && (!view.selOnly || checked.has(it.code)));
       const host = document.getElementById("sp-maprows");
       if (!host) return;
-      host.innerHTML = items.length
-        ? items.map((it) => `<label class="sp-maprow"><input type="checkbox" data-c="${esc(it.code)}" ${checked.has(it.code) ? "checked" : ""}>
+      host.innerHTML = shown.length
+        ? shown.map((it) => `<label class="sp-maprow"><input type="checkbox" data-c="${esc(it.code)}" ${checked.has(it.code) ? "checked" : ""}>
             <span class="c">${esc(it.code)}</span><span>${esc(short(it.desc))}</span>
             <span class="sub" style="margin-left:auto;white-space:nowrap">${qf(it.planned, it.unit)} ${esc(it.unit)}</span>
             <span class="sp-tag">${esc(it.sub)}</span></label>`).join("")
-        : `<p class="sp-empty" style="padding:24px;text-align:center">No items match “${esc(filter)}”.</p>`;
+        : `<p class="sp-empty" style="padding:24px;text-align:center">${view.selOnly ? "Nothing selected yet." : view.unassigned && !f ? "Every BOQ item is already in an activity." : `No items match “${esc(filter)}”.`}</p>`;
       host.querySelectorAll("input[data-c]").forEach((cb) => cb.addEventListener("change", () => {
         if (cb.checked) checked.add(cb.dataset.c); else checked.delete(cb.dataset.c);
+        paintBar();
       }));
+      paintBar();
     }
-    const body = `<input class="ctl" id="sp-mapsearch" type="search"
-        placeholder="Search by code, description, or type…" style="width:100%;margin-bottom:12px">
+    const body = `<div class="sp-srctabs" role="tablist"><button type="button" role="tab" aria-selected="true" class="on">From BOQ</button><button type="button" role="tab" aria-selected="false" id="sp-tab-stock">From stock register</button></div>
+      <div class="sp-mapbar">
+        <input class="ctl" id="sp-mapsearch" type="search" placeholder="Search by code, description, or type…" style="width:100%">
+        <div class="sp-mapchips">
+          <button type="button" class="sp-fchip" id="sp-f-un" aria-pressed="false">Not in any activity (${unCount})</button>
+          <button type="button" class="sp-fchip" id="sp-f-sel" aria-pressed="false">Selected only</button>
+        </div>
+        <div class="sp-mapsel"><label><input type="checkbox" id="sp-mapall"> <span id="sp-mapalllbl">Select all shown</span></label>
+          <span style="margin-left:auto"><b id="sp-mapcnt">0 selected</b> <button type="button" class="linkbtn" id="sp-mapclr" hidden>Clear</button></span></div>
+      </div>
       <div id="sp-maprows"></div>`;
-    modal(`Add BOQ items → ${esc(a)}`,
+    modal(`Add items → ${esc(a)}`,
       `Tick the BOQ items this activity installs. Planned qty (BOQ × rooms) is shown; it fills in automatically and can be edited per item afterwards.`,
       body, async () => {
       S.svc = await jpost(api("/" + S.slug + "/mapping" + roomQ()), { service: S.service, activity: a, codes: [...checked] });
@@ -2366,12 +2444,33 @@
       closeModal(); renderMain();
     }, "Save items", "min(760px,96vw)");
     renderRows("");
+    const q = () => document.getElementById("sp-mapsearch").value;
     document.getElementById("sp-mapsearch").addEventListener("input", (e) => renderRows(e.target.value));
+    const chip = (id, key) => $(id).addEventListener("click", (e) => { view[key] = !view[key]; e.currentTarget.classList.toggle("on", view[key]); e.currentTarget.setAttribute("aria-pressed", String(view[key])); renderRows(q()); });
+    chip("sp-f-un", "unassigned"); chip("sp-f-sel", "selOnly");
+    $("sp-mapall").addEventListener("click", (e) => {
+      const on = e.currentTarget.checked;
+      shown.forEach((it) => { if (on) checked.add(it.code); else checked.delete(it.code); });
+      document.querySelectorAll("#sp-maprows input[data-c]").forEach((x) => { x.checked = on; });
+      paintBar();
+    });
+    $("sp-mapclr").addEventListener("click", () => { checked.clear(); renderRows(q()); });
+    $("sp-tab-stock").addEventListener("click", () => {
+      if (changed() && !confirm("You have ticks that are not saved yet. Switch to the stock register and lose them?")) return;
+      closeModal(); openQuickAddModal(a);
+    });
   }
 
   // ---------- quick add: a plannable line straight from stock, no BOQ needed ----------
   async function openQuickAddModal(activity) {
     let data, widen = false;
+    // What was added in THIS dialog session (survives the list re-rendering on search), and how many add-actions that was.
+    const justAdded = new Set(); let nAdded = 0;
+    const paintAdded = () => {
+      const c = $("sp-quickcnt"), sv = $("sp-modal-save");
+      if (c) c.textContent = nAdded ? `✓ ${nAdded} added to ${activity}` : "";
+      if (sv) sv.textContent = nAdded ? `Done (${nAdded} added)` : "Done";
+    };
     const fetchData = async () => {
       try { data = await jget(api("/" + S.slug + "/quick-items/" + encodeURIComponent(S.service) + "/candidates" + (widen ? "?all_services=true" : ""))); }
       catch (e) { toast(briefErr(e)); data = { available: false, materials: [] }; }
@@ -2419,7 +2518,7 @@
         rendered.add(m.name);
         const sibs = (m.batch_siblings || []).filter((s) => byName[s] && !rendered.has(s));
         const groupMembers = [m, ...sibs.map((s) => byName[s])];
-        const anyAlready = groupMembers.some((gm) => gm.already);
+        const anyAlready = groupMembers.some((gm) => gm.already || justAdded.has(gm.name));
         if (sibs.length && !anyAlready) {
           sibs.forEach((s) => rendered.add(s));
           const base = m.name.replace(/\(.*\)\s*$/, "").trim() || m.name;
@@ -2435,10 +2534,10 @@
             <span class="sub">Untick any batch that isn't really the same —</span>${chips}
           </div>`);
         } else {
-          rows.push(`<div class="sp-maprow" data-mat="${esc(m.name)}">
+          rows.push(`<div class="sp-maprow${justAdded.has(m.name) ? " sp-just" : ""}" data-mat="${esc(m.name)}">
             <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(m.name)}${m.other_service ? ` <span class="sub">· from ${esc(m.other_service)}</span>` : ""}</span>
             <span class="sub" style="white-space:nowrap">${esc(m.unit || "")}</span>
-            <button type="button" class="linkbtn" data-quickpick="${esc(m.name)}" style="white-space:nowrap">${m.already ? "✓ added" : "+ Add"}</button>
+            <button type="button" class="linkbtn" data-quickpick="${esc(m.name)}" style="white-space:nowrap">${(m.already || justAdded.has(m.name)) ? "✓ added" : "+ Add"}</button>
           </div>`);
         }
       }
@@ -2458,7 +2557,8 @@
         try {
           S.svc = await jpost(api("/" + S.slug + "/quick-item" + roomQ()), { service: S.service, activity, material });
           b.textContent = "✓ added"; b.disabled = false;
-          const row = b.closest("[data-mat]"); if (row) row.style.opacity = ".55";
+          const row = b.closest("[data-mat]"); if (row) row.classList.add("sp-just");
+          justAdded.add(material); nAdded++; paintAdded();
           toast(`Added "${short(material, 34)}". Same material in another batch/coil size? Use 🔗 linked · edit on this item to add it too.`);
         } catch (e) { b.disabled = false; b.textContent = "+ Add"; toast("Failed: " + briefErr(e)); }
       }));
@@ -2478,8 +2578,9 @@
         try {
           S.svc = await jpost(api("/" + S.slug + "/quick-item" + roomQ()), { service: S.service, activity, materials });
           b.textContent = "✓ added"; b.disabled = false;
-          if (row) row.style.opacity = ".55";
+          if (row) row.classList.add("sp-just");
           if (sibRow) sibRow.style.display = "none";
+          materials.forEach((mt) => justAdded.add(mt)); nAdded++; paintAdded();
           toast(materials.length > 1
             ? `Added, combined across ${materials.length} batches.`
             : `Added "${short(materials[0], 34)}".`);
@@ -2500,12 +2601,17 @@
 
     modal(`Add item from stock → ${esc(activity)}`,
       `Pick a material straight from the ${esc(S.service)} stock register — no BOQ line needed. It's added to this activity at 0 planned quantity (set that with ✎ afterwards, like any item) and linked to that exact stock material immediately. If the same wire/pipe shows up as several rows purely because it arrived in different coil or batch sizes, add one now, then use its own 🔗 linked · edit to add the others — one item, stock combined.`,
-      `<input class="ctl" id="sp-quicksearch" placeholder="Search stock materials…" style="width:100%;margin-bottom:10px">
-       <div id="sp-quicklist" class="sp-maplist">${renderList("")}</div>
+      `<div class="sp-srctabs" role="tablist"><button type="button" role="tab" aria-selected="false" id="sp-tab-boq">From BOQ</button><button type="button" role="tab" aria-selected="true" class="on">From stock register</button></div>
+       <div class="sp-mapbar">
+         <input class="ctl" id="sp-quicksearch" placeholder="Search stock materials…" style="width:100%">
+         <div class="sp-mapsel" style="margin-top:10px"><span class="sub">Tap “+ Add”. The material goes into this activity right away.</span><b id="sp-quickcnt" class="sp-quickcnt" style="margin-left:auto"></b></div>
+       </div>
+       <div id="sp-quicklist" class="sp-maplist sp-quicklist">${renderList("")}</div>
        <div id="sp-quickwidewrap"></div>`,
       async () => { closeModal(); await afterSvc(); }, "Done", "min(680px,94vw)");
     wireList();
     refresh();
+    $("sp-tab-boq").addEventListener("click", async () => { closeModal(); await afterSvc(); openMapModal(activity); });
     $("sp-quicksearch").addEventListener("input", (e) => { $("sp-quicklist").innerHTML = renderList(e.target.value); wireList(); });
   }
 
@@ -2968,9 +3074,9 @@
   function openMeasureMenu(btn) {
     const old = document.getElementById("sp-measmenu"); if (old) { old.remove(); btn.setAttribute("aria-expanded", "false"); return; }
     const m = document.createElement("div"); m.id = "sp-measmenu"; m.className = "sp-menu"; m.setAttribute("role", "menu");
-    m.innerHTML = `<button role="menuitem" data-go="open"><b>Open measurement grid</b><span>Excel jaisa sheet: BOQ line neeche, ${esc(dlgLeafLower())} saamne</span></button>
-      <button role="menuitem" data-go="export"><b>Export Excel</b><span>Same layout, import section ke saath</span></button>
-      <button role="menuitem" data-go="import"><b>Import Excel</b><span>Bhari hui file wapas, pehle preview</span></button>`;
+    m.innerHTML = `<button role="menuitem" data-go="open"><b>Open measurement grid</b><span>Excel-style sheet: BOQ lines down, ${esc(dlgLeafLower())} across</span></button>
+      <button role="menuitem" data-go="export"><b>Export Excel</b><span>Same layout, with an import section</span></button>
+      <button role="menuitem" data-go="import"><b>Import Excel</b><span>Filled file back in, with a preview first</span></button>`;
     btn.parentNode.appendChild(m); btn.setAttribute("aria-expanded", "true");
     const off = (ev) => { if (!m.contains(ev.target) && ev.target !== btn) { m.remove(); btn.setAttribute("aria-expanded", "false"); document.removeEventListener("click", off, true); } };
     setTimeout(() => document.addEventListener("click", off, true), 0);
@@ -2989,7 +3095,7 @@
     return { id: S.service, name: S.service, label: S.service, groups: groups.filter((g) => !g.kids || g.kids.length), rows, cells: {}, parts: {}, runs: {} };
   }
   async function openMeasureGrid(first) {
-    if (!window.MIGrid) { toast("Measurement grid load nahi hua (measuregrid.js)"); return; }
+    if (!window.MIGrid) { toast("Measurement grid did not load (measuregrid.js)"); return; }
     const ds = measureDataset();
     try { const saved = await jget(api("/" + S.slug + "/measure-grid/" + encodeURIComponent(S.service))); Object.assign(ds, { cells: saved.cells || {}, parts: saved.parts || {}, runs: saved.runs || {} }); }
     catch (e) { /* no saved sheet yet (or the server has no measure-grid endpoint): start empty */ }

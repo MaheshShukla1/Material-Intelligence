@@ -340,9 +340,11 @@ async function main() {
   console.log("PASS: editing an item inside a non-first activity keeps that activity open across the re-render");
 
   // ---- test 14: "+ Add item" cross-service widen (explicit opt-in only) ----
-  const addItemBtn = [...document.querySelectorAll("[data-quickadd]")].find((b) => b.dataset.quickadd === "Wall Piping");
-  if (!addItemBtn) throw new Error("FAIL: '+ Add item' button not found for Wall Piping");
+  const addItemBtn = [...document.querySelectorAll("[data-additems]")].find((b) => b.dataset.additems === "Wall Piping");
+  if (!addItemBtn) throw new Error("FAIL: '+ Add items' button not found for Wall Piping");
   addItemBtn.click();
+  await flush(15);
+  document.getElementById("sp-tab-stock").click();   // the stock register is the second tab of the one Add items dialog
   await flush(15);
   let listText = document.getElementById("sp-quicklist").textContent;
   if (!listText.includes("MS CONDUIT 25MM")) throw new Error("FAIL: narrow candidate list should show the in-service material");

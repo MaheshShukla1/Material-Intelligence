@@ -110,8 +110,8 @@ async function main() {
   const slider = dbTesting && dbTesting.querySelector(".sp-labourrange");
   ok(!!slider, "DB Testing shows a progress slider");
   ok(slider && slider.value === "42", `slider initial value reflects act_pct (42), got ${slider && slider.value}`);
-  const addBtn = dbTesting && dbTesting.querySelector("[data-map]");
-  ok(!addBtn, "DB Testing does NOT show '+ Add BOQ items' while labour-only is on");
+  const addBtn = dbTesting && dbTesting.querySelector("[data-additems]");
+  ok(!addBtn, "DB Testing does NOT show '+ Add items' while labour-only is on");
 
   // -------------------------------------------------- click to toggle on
   posts.length = 0;

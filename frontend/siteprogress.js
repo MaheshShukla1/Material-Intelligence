@@ -806,12 +806,14 @@
     // their sum. Each still fails independently exactly as before (S.pnl/
     // S.real quietly fall back to null on error; the main service fetch
     // still throws and shows the error state) -- only the timing changed.
-    const [svcSettled, pnlSettled, realSettled, shortSettled] = await Promise.allSettled([
+    const [svcSettled, pnlSettled, realSettled, shortSettled, whereSettled] = await Promise.allSettled([
       jget(api("/" + S.slug + "/service/" + encodeURIComponent(S.service) + q)),
       jget(pnlUrl()),
       jget(api("/" + S.slug + "/realistic/" + encodeURIComponent(S.service))),
       jget(api("/" + S.slug + "/shortage-items/" + encodeURIComponent(S.service))),
+      S.room ? Promise.resolve(null) : jget(api("/" + S.slug + "/done-where/" + encodeURIComponent(S.service))),   // the "Done where" line; not shown inside a single zone's own view
     ]);
+    S.where = whereSettled.status === "fulfilled" ? whereSettled.value : null;       // a failed read only means no line, never a broken page
     if (svcSettled.status === "rejected") {
       sp.innerHTML = `<div class="sp-empty">${esc(briefErr(svcSettled.reason))}</div>`;
       return;
@@ -849,7 +851,7 @@
           <div class="sp-cover" id="sp-cover" hidden><div class="sp-covbar" role="img" id="sp-covbar"><i class="d" id="sp-cv-d"></i><i class="r" id="sp-cv-r"></i><i class="u" id="sp-cv-u"></i></div><p id="sp-cv-t"></p></div>
           <div class="sp-unmapped" id="sp-unmapped" role="status" hidden><div class="sp-unm-t" id="sp-unm-t"></div><button class="btn primary" id="sp-unm-add">Add to an activity</button></div>
           <div class="sp-secttl"><span>Activities · ${esc(S.service)}${S.room ? ` · <b>${esc(S.roomName)}</b> <button class="linkbtn" id="sp-allrooms">← all ${curLeafPluralLower(2)}</button>` : ` · all ${curLeafPluralLower(2)}`}</span>
-            <span class="sp-tools"><button class="btn" id="sp-newact">+ New activity</button><span class="sp-menuwrap"><button class="btn" id="sp-measgrid" aria-haspopup="menu" aria-expanded="false">Measurement ▾</button></span><span class="sp-menuwrap"><button class="btn" id="sp-more" aria-haspopup="menu" aria-expanded="false">More ▾</button><div class="sp-menu right" id="sp-moremenu" role="menu" hidden><button role="menuitem" id="sp-rates">Set rates</button><button role="menuitem" id="sp-linkbtn">Link stock</button><button role="menuitem" id="sp-reboq">Re-upload BOQ</button><button role="menuitem" id="sp-refresh">Refresh</button></div></span>
+            <span class="sp-tools"><button class="btn" id="sp-newact">+ New activity</button><button class="btn" id="sp-measgrid">Measurement</button><span class="sp-menuwrap"><button class="btn" id="sp-more" aria-haspopup="menu" aria-expanded="false">More ▾</button><div class="sp-menu right" id="sp-moremenu" role="menu" hidden><button role="menuitem" id="sp-rates">Set rates</button><button role="menuitem" id="sp-linkbtn">Link stock</button><button role="menuitem" id="sp-reboq">Re-upload BOQ</button><button role="menuitem" id="sp-refresh">Refresh</button></div></span>
             <input type="file" id="sp-reboq-file" accept=".xlsx,.xlsm,.xls" hidden></span></div>
           <div id="sp-acts"></div>
         </div>
@@ -859,7 +861,7 @@
     $("sp-refresh").onclick = () => loadService();
     $("sp-linkbtn").onclick = () => ((S.stockView && !S.stockView.current) ? openConnectStock() : openLinkModal());
     $("sp-rates").onclick = () => openRatesModal();
-    $("sp-measgrid").onclick = (e) => openMeasureMenu(e.currentTarget);
+    $("sp-measgrid").onclick = () => openMeasureGrid();
     $("sp-newact").onclick = () => newActivity();
     $("sp-more").onclick = (e) => { const m = $("sp-moremenu"); const open = m.hidden; m.hidden = !open; e.currentTarget.setAttribute("aria-expanded", String(open)); };
     $("sp-moremenu").addEventListener("click", () => { $("sp-moremenu").hidden = true; $("sp-more").setAttribute("aria-expanded", "false"); });
@@ -1379,6 +1381,8 @@
     $("sp-acts").querySelectorAll("[data-roomsedit]").forEach((b) => b.addEventListener("click", () => openRoomsModal(b.dataset.roomsedit)));
     $("sp-acts").querySelectorAll("[data-histedit]").forEach((b) => b.addEventListener("click", () => openShortageHistoryPopover(b.dataset.histedit)));
     $("sp-acts").querySelectorAll("[data-measedit]").forEach((b) => b.addEventListener("click", () => { const it = S._byCode[b.dataset.measedit]; if (it) openMeasureSheet(measOpts(it)); }));
+    $("sp-acts").querySelectorAll("[data-wzone]").forEach((b) => b.addEventListener("click", () => openMeasureGrid({ place: b.dataset.wzone, focus: { code: b.dataset.wcode, place: b.dataset.wzone } })));
+    $("sp-acts").querySelectorAll("[data-wopen]").forEach((b) => b.addEventListener("click", () => openMeasureGrid()));
     $("sp-acts").querySelectorAll("[data-overundo]").forEach((b) => b.addEventListener("click", () => backToBoq(b.dataset.overundo)));
     $("sp-acts").querySelectorAll("[data-removeitem]").forEach((b) => b.addEventListener("click", () => removeItemFromActivity(b.dataset.removeitem, b.dataset.removeact)));
     $("sp-acts").querySelectorAll("[data-fx]").forEach((b) => b.addEventListener("click", () => openDrawer(b.dataset.fx)));
@@ -1427,6 +1431,28 @@
     const full = m.backed >= m.done - 0.01;
     return `<button class="sp-linkchip ${full ? "on" : "warn"}" data-measedit="${esc(it.code)}" title="${full ? "All of the installed quantity has a measurement behind it." : "Part of the installed quantity has no measurement behind it yet."}">📏 ${m.n} ${m.n === 1 ? "entry" : "entries"} · ${f(m.backed)} of ${f(m.done)} ${esc(it.unit)}</button>`;
   }
+  // "Done where": under the item, in which levels / zones it has been executed and how much. Read-only (nothing is typed here), from the same
+  // split as the bill's backup sheet. A level with a few zones lists them; a level with many (hotel floors) says "12 of 20 rooms". A whole-level
+  // total is one number for that level, never split into zones. Nothing recorded -> no line at all.
+  function whereHTML(it) {
+    const w = S.where && S.where.items && S.where.items[it.code];
+    if (S.room || !w || !(w.sum > 0)) return "";
+    const u = it.unit || w.unit || "", leaf = (S.where.leaf || "zone"), leaves = leaf + "s";
+    const seg = (a) => {
+      const name = `<button class="sp-wlv" data-wopen="${esc(it.code)}" title="Open the Measurement grid">${esc(a.area || "—")}</button>`;
+      if (a.whole) return `<span class="sp-wseg">${name} <span class="sp-wtxt">whole ${esc(S.where.word || "area")} · <b>${qf(a.q, u)}</b> ${esc(u)}</span></span>`;
+      const strip = a.cells.length && a.cells.length <= 24
+        ? `<span class="sp-wstrip" aria-hidden="true">${a.cells.map((f) => `<i class="${f >= 0.999 ? "f" : f > 0 ? "p" : ""}"></i>`).join("")}</span> ` : "";
+      const few = a.done.length <= 4;
+      const body = few
+        ? a.done.map((z) => `<button class="sp-wz" data-wzone="${esc(z.id)}" data-wcode="${esc(it.code)}" title="${esc(z.name)}: ${esc(qf(z.q, u))} ${esc(u)}. Open it in the Measurement grid">${esc(z.name)} · <b>${qf(z.q, u)}</b></button> `).join("")
+        : `<span class="sp-wtxt">${a.done.length} of ${a.n} ${esc(leaves)} · <b>${qf(a.q, u)}</b> ${esc(u)}</span>`;
+      return `<span class="sp-wseg">${name} ${strip}${body}</span>`;
+    };
+    const rest = w.rest > 0 ? `<span class="sp-wseg"><span class="sp-wtxt" title="Recorded as one overall figure, not by ${esc(leaf)}">Overall, no ${esc(leaf)} · <b>${qf(w.rest, u)}</b> ${esc(u)}</span></span>` : "";
+    if (!w.areas.length && !rest) return "";
+    return `<div class="sp-where" data-where="${esc(it.code)}"><span class="sp-wlbl">Done where${u ? " · " + esc(u) : ""}</span> ${w.areas.map(seg).join(" ")} ${rest}</div>`;
+  }
   function rowHTML(it, activity) {
     const rl = realOf(it.code); const alert = rl && rl.verdict === "SHORTAGE";
     const links = rl && rl.links ? rl.links : [];
@@ -1453,7 +1479,7 @@
           <button class="sp-linkchip ${linked ? "on" : ""}" data-linkedit="${esc(it.code)}">${linked ? "🔗 linked · edit" : "＋ link stock"}</button>
           ${S.room ? "" : `<button class="sp-linkchip" data-roomsedit="${esc(it.code)}">🏠 ${esc(roomsChipLabel(it.code))}</button>`}
           ${measChip(it)}
-          ${histChip(it.code)}</div></div>
+          ${histChip(it.code)}</div>${whereHTML(it)}</div>
       <div class="sp-bqty">${plannedControlHTML(it)}</div>
       <div class="sp-entry">
         <div class="sp-entrymain">
@@ -1858,9 +1884,11 @@
         inp.addEventListener("change", () => {
           let v = Number(inp.value);
           if (inp.value.trim() === "" || isNaN(v) || v < 0) { delete inp.dataset.touched; cb.checked = false; syncCells(); return; }
-          if (!isFree && v > info.planned) { v = info.planned; toast(`Planned here is ${fmtQ(info.planned)} ${it.unit}. To record more, raise the plan first.`); }
+          const typed = v, over = !isFree && v > info.planned;
+          if (over) v = info.planned;
           inp.value = fmtQ(v);
           paintCell(c, v);
+          if (over) { const rm = allRoomsList().find((x) => x.id === cb.dataset.room); offerPlanOff(typed, rm ? rm.name : dlgLeafLower(), info.planned); }
         });
         // ticking/unticking resets the row to "full plan" / "as recorded"
         cb.addEventListener("change", () => { delete inp.dataset.touched; syncCells(); });
@@ -1905,11 +1933,21 @@
     // The "of 54.76 Rmt" on every zone is only the item's total split equally -- nobody typed it. Removing the plan lifts that
     // share as a limit for THIS item (a zone / Whole takes the typed quantity as typed; the item's own total stays the limit).
     // Nothing recorded changes. Hotel-room items that are planned per room keep the plan and the plain tick.
-    async function setPlanOff(off) {
-      if (off && !confirm(`Remove the plan for this item (${code})? Every ${dlgLeafLower()} then takes exactly the quantity you type, and a plain tick no longer counts. Nothing already recorded changes. You can restore the plan from this same dialog.`)) return;
-      if (!off && !confirm("Restore the equal-share plan for this item? Quantities already recorded stay as they are.")) return;
+    // The equal share of a zone is the item's total split equally -- nobody typed it. When a quantity above it is typed, offer the item's own
+    // "remove the plan" (typed quantities count as typed, the item's total stays the limit) right here, instead of only cutting the number.
+    // Not offered when the plan is quantity groups (they have their own Remove) or when the figure is above the item's whole total.
+    function offerPlanOff(typed, where, share) {
+      const cut = () => toast(`Planned here is ${fmtQ(share)} ${it.unit}. To record more, raise the plan first.`);
+      const total = Object.values((roomPlan && roomPlan.rooms) || {}).reduce((a, i) => a + (i && i.planned > 0 ? i.planned : 0), 0);
+      if (isFree || existingGroups.length || !(total > 0) || typed > total + 1e-9) return cut();
+      setPlanOff(true, `You typed ${fmtQ(typed)} ${it.unit} for ${where}, but its equal share of this item is only ${fmtQ(share)} ${it.unit} (the item's ${fmtQ(total)} ${it.unit} split equally; nobody typed it).`)
+        .then((done) => { if (done === false) cut(); });
+    }
+    async function setPlanOff(off, why) {
+      if (off && !confirm(`${why ? why + " Allow any quantity per " + dlgLeafLower() + "? The item's total stays the limit. " : `Remove the plan for this item (${code})? Every ${dlgLeafLower()} then takes exactly the quantity you type, `}and a plain tick no longer counts. Nothing already recorded changes. You can restore the plan from this same dialog.`)) return false;
+      if (!off && !confirm("Restore the equal-share plan for this item? Quantities already recorded stay as they are.")) return false;
       try { S.svc = await jpost(api("/" + S.slug + "/item-plan-off" + roomQ()), { service: S.service, item_code: code, off }); }
-      catch (e) { return toast("Failed: " + briefErr(e)); }
+      catch (e) { toast("Failed: " + briefErr(e)); return false; }
       closeModal();
       await afterSvc();
       openRoomsModal(code, expandToEverything);
@@ -1979,8 +2017,10 @@
         inp.addEventListener("change", () => {
           let v = Number(inp.value);
           if (inp.value.trim() === "" || isNaN(v) || v < 0) { delete inp.dataset.touched; cb.checked = false; syncCells(); return; }
-          if (!isFree && v > sumPlan) { v = sumPlan; toast(`Planned for the whole ${last} is ${fmtQ(sumPlan)} ${unit}. To record more, raise the plan first.`); }
+          const typed = v, over = !isFree && v > sumPlan;
+          if (over) v = sumPlan;
           inp.value = fmtQ(v); paintCell(c, v);
+          if (over) offerPlanOff(typed, `Whole ${last}`, sumPlan);
         });
         cb.addEventListener("change", () => { delete inp.dataset.touched; syncCells(); });
         const setMode = (m) => {
@@ -2159,6 +2199,7 @@
     try { S.pnl = await jget(pnlUrl()); } catch (e) {}
     try { S.real = await jget(api("/" + S.slug + "/realistic/" + encodeURIComponent(S.service))); } catch (e) {}
     try { S.shortageItems = await jget(api("/" + S.slug + "/shortage-items/" + encodeURIComponent(S.service))); } catch (e) {}
+    try { S.where = S.room ? null : await jget(api("/" + S.slug + "/done-where/" + encodeURIComponent(S.service))); } catch (e) { S.where = null; }
     renderMain();
   }
 
@@ -3069,42 +3110,78 @@
   }
   window.MIMeasure = { open: openMeasureSheet };
 
-  // ---------- Measurement grid (Excel-like sheet, measuregrid.js) ----------
-  // One BOQ line per row, one place (level / zone) per column, a cell = pieces ("10+2+30+7"). Opens from the service toolbar.
-  function openMeasureMenu(btn) {
-    const old = document.getElementById("sp-measmenu"); if (old) { old.remove(); btn.setAttribute("aria-expanded", "false"); return; }
-    const m = document.createElement("div"); m.id = "sp-measmenu"; m.className = "sp-menu"; m.setAttribute("role", "menu");
-    m.innerHTML = `<button role="menuitem" data-go="open"><b>Open measurement grid</b><span>Excel-style sheet: BOQ lines down, ${esc(dlgLeafLower())} across</span></button>
-      <button role="menuitem" data-go="export"><b>Export Excel</b><span>Same layout, with an import section</span></button>
-      <button role="menuitem" data-go="import"><b>Import Excel</b><span>Filled file back in, with a preview first</span></button>`;
-    btn.parentNode.appendChild(m); btn.setAttribute("aria-expanded", "true");
-    const off = (ev) => { if (!m.contains(ev.target) && ev.target !== btn) { m.remove(); btn.setAttribute("aria-expanded", "false"); document.removeEventListener("click", off, true); } };
-    setTimeout(() => document.addEventListener("click", off, true), 0);
-    m.onclick = (ev) => { const b = ev.target.closest("[data-go]"); if (!b) return; m.remove(); btn.setAttribute("aria-expanded", "false"); document.removeEventListener("click", off, true); openMeasureGrid(b.dataset.go); };
-  }
-  function measureDataset() {
-    const unitOf = (u) => { const x = String(u || "").toLowerCase(); return /^(mtr|rmt|rm|m|mtrs|meter|metre)$/.test(x) ? "Mtr" : /^(nos|no|each|pt|point|set)$/.test(x) ? "Nos" : (u || "Nos"); };
-    const rows = (S.svc.items || []).filter((i) => i.unit).map((i, k) => ({ id: i.code, code: i.code, name: i.desc, unit: unitOf(i.unit), prev: null }));
-    const groups = []; const st = S.state.structure;
-    const lone = [];
-    (st.children || []).forEach((n) => {
-      if (n.type === "room") lone.push({ id: n.id, name: n.name });
-      else groups.push({ id: n.id, name: n.name, kids: (n.children || []).filter((c) => c.type === "room").map((c) => ({ id: c.id, name: c.name })), open: false });
+  // ---------- Measurement grid: a read-only view of Site Progress's own numbers (measureview.js) ----------
+  // One BOQ line per row, one level / zone per column, with the BOQ qty, the site plan, what is done and what is pending. Nothing is
+  // entered here: quantities are still recorded in Site Progress (zones, measurement entries), so every number matches the item rows, the DPR and the bill.
+  function measurePlaces() {
+    const out = [], lone = [];
+    const roomsOf = (n, prefix) => {
+      let a = [];
+      (n.children || []).forEach((c) => {
+        if (c.type === "room") a.push({ id: c.id, name: prefix ? prefix + " \u25B8 " + c.name : c.name, raw: c.name });
+        else a = a.concat(roomsOf(c, prefix ? prefix + " \u25B8 " + c.name : c.name));
+      });
+      return a;
+    };
+    (((S.state && S.state.structure) || {}).children || []).forEach((n) => {
+      if (n.type === "room") lone.push({ id: n.id, name: n.name, raw: n.name });
+      else out.push({ id: n.id, name: n.name, kids: roomsOf(n, "") });
     });
-    lone.forEach((k) => groups.push({ id: k.id, name: k.name }));
-    return { id: S.service, name: S.service, label: S.service, groups: groups.filter((g) => !g.kids || g.kids.length), rows, cells: {}, parts: {}, runs: {} };
+    lone.forEach((k) => out.push(k));
+    return out.filter((g) => !g.kids || g.kids.length);
   }
-  async function openMeasureGrid(first) {
-    if (!window.MIGrid) { toast("Measurement grid did not load (measuregrid.js)"); return; }
-    const ds = measureDataset();
-    try { const saved = await jget(api("/" + S.slug + "/measure-grid/" + encodeURIComponent(S.service))); Object.assign(ds, { cells: saved.cells || {}, parts: saved.parts || {}, runs: saved.runs || {} }); }
-    catch (e) { /* no saved sheet yet (or the server has no measure-grid endpoint): start empty */ }
-    const g = window.MIGrid.open({
-      datasets: [ds], placesManaged: true, title: ((document.getElementById("sp-proj") && document.getElementById("sp-proj").selectedOptions[0] && document.getElementById("sp-proj").selectedOptions[0].textContent) || S.slug) + " · Measurement", subtitle: S.service + " · " + ds.rows.length + " BOQ lines", pill: "Draft", backLabel: "Site Progress",
-      onSave: (d) => jpost(api("/" + S.slug + "/measure-grid/" + encodeURIComponent(S.service)), { cells: d.cells, parts: d.parts, runs: d.runs }),
-      onClose: () => loadService(),
+  function downloadBlob(blob, name) {
+    const url = URL.createObjectURL(blob), a = document.createElement("a");
+    a.href = url; a.download = name; a.style.display = "none"; document.body.appendChild(a); a.click();
+    setTimeout(() => { a.remove(); URL.revokeObjectURL(url); }, 1500);
+  }
+  async function openMeasureGrid(from) {
+    if (!window.MIView) { toast("Measurement grid did not load (measureview.js)"); return; }
+    const slug = S.slug, enc = encodeURIComponent;
+    const grid = (service, code) => api("/" + slug + "/measure-grid/" + enc(service) + (code ? "?code=" + enc(code) : ""));
+    const wrap = (fn) => async (...a) => { try { return await fn(...a); } catch (err) { throw new Error(briefErr(err)); } };
+    let data;
+    try { data = await jget(grid(S.service)); }
+    catch (err) { toast(briefErr(err)); return; }
+    const sel = document.getElementById("sp-proj");
+    const proj = (sel && sel.selectedOptions[0] && sel.selectedOptions[0].textContent) || slug;
+    let view = null;
+    view = window.MIView.open({
+      title: proj + " \u00B7 Measurement", backLabel: "Site Progress",
+      service: S.service, services: (S.state && S.state.services) || [S.service], groups: measurePlaces(), data,
+      place: from && from.place, focus: from && from.focus,                       // opened from an item's "Done where": that zone, its box selected
+      load: wrap((service, code) => jget(grid(service, code))),
+      // Excel: the file comes from the server (the grid's own layout); an import is only READ there, the grid then saves through the normal route
+      exportFile: wrap(async (service) => {
+        const r = await fetch(api("/" + slug + "/measure-grid/" + enc(service) + "/export"));
+        if (!r.ok) throw Object.assign(new Error("http"), { status: r.status, body: await r.text() });
+        const blob = await r.blob(), cd = (r.headers && r.headers.get && r.headers.get("Content-Disposition")) || "";
+        const m = /filename="([^"]+)"/.exec(cd), name = m ? m[1] : "Measurement_" + service + ".xlsx";
+        downloadBlob(blob, name); return name;
+      }),
+      importPreview: wrap((service, file) => upload(api("/" + slug + "/measure-grid/" + enc(service) + "/import-preview"), file)),
+      loadPlan: wrap((service, code) => jget(api("/" + slug + "/item-room-plan?service=" + enc(service) + "&item_code=" + enc(code)))),
+      // the same two routes the Zones dialog uses, so the item rows, the % complete, the DPR and the bill read the same number
+      save: wrap((service, code, entries) => jpost(api("/" + slug + "/progress/rooms"), { service, item_code: code, entries })),
+      planOff: wrap((service, code) => jpost(api("/" + slug + "/item-plan-off"), { service, item_code: code, off: true })),
+      // the run-list sheet under the grid: the same routes the item's Measurement sheet uses (a length is ADDED to the box, cancelling takes it off)
+      loadRuns: wrap((service, code) => jget(api("/" + slug + "/progress/runs?service=" + enc(service) + "&item_code=" + enc(code)))),
+      addRun: wrap((service, code, p) => jpost(api("/" + slug + "/progress/runs"), Object.assign({ service, item_code: code, scope: "zone" }, p))),
+      cancelRun: wrap((service, code, p) => jpost(api("/" + slug + "/progress/runs/cancel"), Object.assign({ service, item_code: code, scope: "zone" }, p))),
+      // a rename changes the name only: the id stays, so every recorded quantity stays attached to it
+      renamePlace: async (id, name) => {
+        const n = findNode(id); if (!n) throw new Error("This place no longer exists");
+        const old = n.name; n.name = name;
+        try { const r = await jpost(api("/" + slug + "/structure"), { structure: S.state.structure }); S.state.rooms = r.rooms; renderTree(); }
+        catch (err) { n.name = old; throw new Error(briefErr(err)); }
+      },
+      openEntries: (service, row, room) => {
+        if (!row) return;
+        window.MIMeasure.open({ slug, service, code: row.code, desc: row.desc, unit: row.unit, room: "",
+          onChange: async () => { if (view) await view.refreshItem(service, row.code); } }, room);
+      },
+      onClose: (changed) => { if (changed && S.slug === slug) loadService(); }
     });
-    if (first === "export" || first === "import") { const host = document.getElementById("mg-host"); const b = host && host.shadowRoot.getElementById(first === "export" ? "bExport" : "bImport"); if (b) b.click(); }
   }
 
 

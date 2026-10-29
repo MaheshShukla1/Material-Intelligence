@@ -38,7 +38,7 @@ from pathlib import Path
 import pandas as pd
 from fastapi import APIRouter, File, Form, Header, HTTPException, UploadFile, Response, Query
 
-from . import structure, boq, activity, progress, pnl, linkage, schema, subcat, realtime, itemprog, dpr, shortage_history, clientref, locqty, runlog
+from . import structure, boq, activity, progress, pnl, linkage, schema, subcat, realtime, itemprog, dpr, shortage_history, clientref, locqty, runlog, measurexl
 
 ROOT = Path(__file__).resolve().parent.parent
 PROJECTS = ROOT / "data" / "projects"
@@ -1480,7 +1480,7 @@ def set_rooms_progress(slug: str, payload: dict, room: str = None):
     appl_list, plan, _unit = _item_plan(d, svc, code)
     appl = set(appl_list)
     free = _is_free(d, svc, code)
-    todo = []
+    todo, exprs = [], {}
     for e in entries:
         e = e or {}
         rid = str(e.get("room"))
@@ -1494,6 +1494,7 @@ def set_rooms_progress(slug: str, payload: dict, room: str = None):
             raise HTTPException(400, f"quantity for room {rid} must be 0 or more")
         if itemprog.is_count_unit(_unit):
             qty = float(int(qty + 0.5))             # whole things: 5.5 fans is not a quantity
+        exprs[rid] = _clean_expr(e.get("expr"), qty)
         planned = plan.get(rid)
         if planned is None or planned <= 0:
             raise HTTPException(400, f"planned quantity for room {rid} is not set, so a partial quantity "
@@ -1511,10 +1512,52 @@ def set_rooms_progress(slug: str, payload: dict, room: str = None):
     for rid, frac in todo:
         itemprog.set_progress(store, svc, code, frac, room=rid, cap=cap)
     (d / "item_progress.json").write_text(json.dumps(store, ensure_ascii=False))
+    _remember_exprs(d, svc, code, exprs)
     for rid, frac in todo:
         if frac > 0:
             _log_dpr_change(d, svc, rid, code, frac=frac, before=before)
     return _service_view(d, svc, room=room)
+
+
+# ------------------------------------------------------------------ the sum behind a typed quantity (=112+155)
+# A quantity surveyor types =112+155 in a box and the sheet keeps the pieces. The grid does the same: the quantity is stored exactly as before
+# (a fraction of the zone's plan); the sum is only a NOTE next to it in item_exprs.json, remembered with the value it adds up to. The grid shows
+# the note only while that value is still what the box holds, so a number changed anywhere else (Zones dialog, an area total, a measurement
+# entry) can never leave a sum on screen that no longer adds up -- the same way item_pools.json is kept honest (locqty.valid_pools).
+def _item_exprs(d):
+    return _read_json(d / "item_exprs.json", {}) or {}
+
+
+def _clean_expr(raw, qty):
+    """The sum as it will be remembered ("=112+155"), or None when there is nothing to remember: not a sum of numbers, a plain number, or
+    a sum that does not add up to the quantity being saved."""
+    if raw is None or str(raw).strip() == "":
+        return None
+    s = str(raw).strip().replace("\u00D7", "*").replace("x", "*").replace("X", "*").replace(" ", "")
+    s = s if s.startswith("=") else "=" + s
+    if not any(ch in s[1:] for ch in "+*("):
+        return None
+    r = measurexl.parse_qty(s)
+    if r[0] != "ok" or abs(r[1] - float(qty)) > 1e-4 or len(s) > 200:
+        return None
+    return s
+
+
+def _remember_exprs(d, svc, code, exprs):
+    """exprs: {room_id: "=a+b" or None} for the rooms just saved. A room saved without a sum forgets its old one."""
+    if not exprs:
+        return
+    store = _item_exprs(d)
+    node = store.setdefault(svc, {}).setdefault(str(code), {})
+    for rid, e in exprs.items():
+        if e:
+            r = measurexl.parse_qty(e)
+            node[rid] = {"e": e, "v": round(r[1], 4)}
+        else:
+            node.pop(rid, None)
+    if not node:
+        store[svc].pop(str(code), None)
+    (d / "item_exprs.json").write_text(json.dumps(store, ensure_ascii=False))
 
 
 # ------------------------------------------------------------------ measurements (From / To / drum readings)
@@ -1620,6 +1663,313 @@ def get_runs(slug: str, service: str, item_code: str):
     return {"unit": m["unit"], "runs_ok": runlog.is_run_unit(m["unit"]),
             "rooms": {t["key"]: {k: t[k] for k in ("runs", "active", "done", "other")} for t in tb if t["kind"] == "zone" and t["runs"]},
             "scopes": [_public(t) for t in tb], "summary": runlog.coverage(tb)}
+
+
+# ------------------------------------------------------------------ measurement grid (read-only view)
+# One BOQ line per row, one zone per column. Every number here is read from the stores Site Progress already owns (itemprog fractions x
+# plan, item_runs.json); nothing is stored, nothing is computed a second way, so the grid can never disagree with Site Progress or the bill.
+def _qty_is_total(boqdf, planned):
+    """True when the BOQ `qty` column of this service is the WHOLE-PROJECT quantity (what the BOQ itself says), not a per-room figure.
+
+    The upload does not keep that choice, but it leaves a trace: a service whose qty is a total gets a planned figure written for every
+    line (ProjectBase upload, or the 'total' answer of /qty-mode). A per-room service only has planned figures for the few lines an
+    engineer edited by hand. So 'at least 90% of the lines that have a quantity also have a planned figure' means total. Fewer than 5
+    such lines is too little to say, and that counts as 'not known'."""
+    codes = {str(r.item_code) for r in boqdf.itertuples() if itemprog._f(getattr(r, "qty", None)) > 0}
+    if len(codes) < 5:
+        return False
+    return sum(1 for c in codes if c in planned) >= 0.9 * len(codes)
+
+
+def _entry_rows(table, limit=8):
+    """The latest active measurement entries of one item, newest first, each with the place it belongs to."""
+    out = []
+    for t in table:
+        for r in runlog.active(t["runs"]):
+            out.append({"place": (t["group"] + " \u25B8 " + t["label"]) if t["kind"] == "zone" and t["group"] else t["label"], "from": r.get("from"), "to": r.get("to"), "qty": r.get("qty"),
+                        "at": r.get("at"), "remarks": r.get("remarks") or ""})
+    # `at` has a one-second resolution, so two entries made in the same second tie: the one added later (later in its list) comes first
+    out = [e for _, e in sorted(enumerate(out), key=lambda p: (p[1]["at"] or "", p[0]), reverse=True)]
+    return out[:limit]
+
+
+def _zone_locks(table, pools, node, runs_of_item, word):
+    """{room_id: {"kind","why"}} of the zones a number cannot be TYPED into, and why. Three honest reasons, each a rule the Site Progress
+    data already has: the zone has measurement entries (its number is the sum of them: add / cancel them in the Measurement sheet), the
+    zone sits inside a whole-area total (typing one zone would leave that total stale), or the item is measured for the whole project."""
+    pooled = {r: p["area"] for p in locqty.valid_pools(pools, node) for r in p["rooms"]}
+    proj = runlog.active(runs_of_item.get(runlog.PROJECT))
+    out = {}
+    for t in table:
+        if t["kind"] != "zone":
+            continue
+        n = len(runlog.active(t["runs"]))
+        if n:
+            out[t["key"]] = {"kind": "entries", "why": f"{n} measurement entr{'y' if n == 1 else 'ies'} make up this number. Add or cancel them in the item's Measurement sheet."}
+        elif t["key"] in pooled:
+            out[t["key"]] = {"kind": "area", "why": f"{pooled[t['key']]} was recorded as one total, so its zones are not typed one by one. Change it in Zones."}
+        elif proj:
+            out[t["key"]] = {"kind": "project", "why": "This item is measured for the whole project. Change it in the item's Measurement sheet."}
+    return out
+
+
+def _grid_data(d, service, code=None):
+    """The payload of measure_grid(), for a project folder (shared by the grid, its Excel export and its Excel import)."""
+    boqdf = _load_boq(d, service)
+    if boqdf.empty:
+        raise HTTPException(404, f"no BOQ items for service '{service}'")
+    ctx, info = location_context(d, service), location_info(d)
+    prog = _item_prog(d).get(service, {})
+    pools = _item_pools(d).get(service, {})
+    runs = item_runs_all(d, service)
+    basis = _qty_is_total(boqdf, ctx["planned"])
+    free = _item_free(d).get(service, {}) or {}
+    only = None if code is None else str(code)
+    rows, cells, locks, exprs, seen = [], {}, {}, {}, set()
+    saved_exprs = _item_exprs(d).get(service, {}) or {}
+    for r in boqdf.itertuples():
+        code = str(r.item_code)
+        if code in seen or (only is not None and code != only):
+            continue
+        seen.add(code)
+        appl, plan, unit = _item_plan(d, service, code, ctx)
+        table = runlog.scope_table(appl, plan, prog.get(code) or {}, pools.get(code), runs.get(code) or {},
+                                   info["loc"], info["name"], info["order"], info["word"])
+        zones = [t for t in table if t["kind"] == "zone"]
+        done = round(sum(t["_raw"] for t in zones), 4)
+        for t in zones:
+            cells[f"{code}|{t['key']}"] = round(t["_raw"], 4)
+        for rid, lk in _zone_locks(table, pools.get(code), prog.get(code) or {}, runs.get(code) or {}, info["word"]).items():
+            locks[f"{code}|{rid}"] = lk
+        for rid, n in (saved_exprs.get(code) or {}).items():
+            k = f"{code}|{rid}"
+            # only while it still adds up to what the box holds. A zone's quantity is stored as a fraction of its plan rounded to 6 decimals, so the
+            # number read back can differ from the typed one by up to ~5e-7 x plan (143.7 reads back as 143.7001 in a 243.8 plan): that is not a change
+            tol = 2e-4 + 1e-6 * float(plan.get(rid) or 0)
+            if k in cells and k not in locks and abs(cells[k] - n["v"]) < tol:
+                exprs[k] = n["e"]
+        plan_total = round(sum(v for v in plan.values() if v), 4)
+        bq = itemprog._f(getattr(r, "qty", None))
+        boq_qty = round(bq, 4) if basis and bq > 0 else None
+        cov = runlog.coverage(table)
+        desc = getattr(r, "description", None)
+        rows.append({
+            "code": code, "desc": "" if desc is None or desc != desc else str(desc), "unit": unit if unit == unit else None,
+            "boq_qty": boq_qty, "plan": plan_total, "done": done,
+            "pending": None if boq_qty is None else round(max(boq_qty - done, 0.0), 4),
+            "pct": None if boq_qty is None else round(100.0 * done / boq_qty, 1),
+            "plan_above_boq": boq_qty is not None and plan_total > boq_qty + 1e-6,
+            "done_above_boq": boq_qty is not None and done > boq_qty + 1e-6,
+            "runs_ok": runlog.is_run_unit(unit),
+            "count": itemprog.is_count_unit(unit), "free": bool(free.get(code)),
+            "entries": {"n": cov["n"], "backed": cov["backed"], "other": round(max(done - cov["backed"], 0.0), 4),
+                        "latest": _entry_rows(table)},
+        })
+    if only is not None and not rows:
+        raise HTTPException(404, "that item is not in this service")
+    return {"service": service, "basis": "total" if basis else "unknown", "rows": rows, "cells": cells, "locks": locks, "exprs": exprs}
+
+
+@router.get("/{slug}/done-where/{service}")
+def done_where(slug: str, service: str):
+    """WHERE each item of a service has been executed, for the one-line "Done where" under an item on Site Progress. Read-only.
+
+    The figures are locqty.split() of the item -- the same split the bill's backup sheet (Annexure C) prints -- so the row, the grid
+    and the bill cannot disagree. Per item, only when something is recorded:
+      {"unit", "sum", "rest", "areas": [{"area", "n", "q", "whole", "cells", "done"}]}
+      area  : the level / floor / wing-floor the zones sit in, in structure order ("" = a zone without an area)
+      n     : zones of that area the item applies to (a zone whose plan is unknown is not counted: never a guessed share)
+      q     : quantity recorded in that area; whole : it was typed as ONE total for the area, so no per-zone figure is given or invented
+      cells : per applicable zone the fraction of its share that is done (0..1+, for the little strip); empty when `whole`
+      done  : [{"id","name","q"}] only the zones holding a quantity
+      rest  : recorded as an overall total, not by location
+    Items with nothing recorded are left out."""
+    d = _need(slug)
+    ctx = location_context(d, service)
+    if ctx["boq"].empty:
+        raise HTTPException(404, f"no BOQ items for service '{service}'")
+    info = location_info(d)
+    prog, pools = _item_prog(d).get(service, {}), _item_pools(d).get(service, {})
+    items, seen = {}, set()
+    for r in ctx["boq"].itertuples():
+        code = str(r.item_code)
+        if code in seen:
+            continue
+        seen.add(code)
+        appl, plan, unit = _item_plan(d, service, code, ctx)
+        node = prog.get(code) or {}
+        sp = locqty.split(node, appl, plan, pools.get(code), ctx["order"])
+        if sp["sum"] <= 0:
+            continue
+        shown = {}
+        for rid in appl:
+            share = plan.get(rid)
+            if not share or share <= 0:
+                continue
+            a = info["loc"].get(rid, "")
+            e = shown.setdefault(a, {"area": a, "n": 0, "q": 0.0, "whole": False, "cells": [], "done": [], "_o": ctx["order"].get(rid, 10 ** 9)})
+            e["_o"] = min(e["_o"], ctx["order"].get(rid, 10 ** 9))
+            e["n"] += 1
+            q = sp["rooms"].get(rid, 0.0)
+            e["cells"].append(round(q / share, 2))
+            if q > 0:
+                e["q"] += q
+                e["done"].append({"id": rid, "name": info["name"].get(rid, rid), "q": q})
+        for a, pe in sp["pools"].items():                    # a whole-area total: one number for the area, never split into zones
+            e = shown.setdefault(a, {"area": a, "n": 0, "q": 0.0, "whole": True, "cells": [], "done": [], "_o": pe["o"]})
+            e["whole"] = True
+            e["q"] += pe["q"]
+            e["_o"] = min(e["_o"], pe["o"])
+        areas = []
+        for e in sorted(shown.values(), key=lambda x: x["_o"]):
+            e.pop("_o")
+            e["q"] = round(e["q"], 4)
+            e["done"] = [dict(z, q=round(z["q"], 4)) for z in e["done"]]
+            if e["whole"]:
+                e["cells"] = []
+            if e["q"] > 0:
+                areas.append(e)
+        items[code] = {"unit": unit if unit == unit else None, "sum": sp["sum"], "rest": sp["rest"], "areas": areas}
+    return {"service": service, "word": info["word"], "leaf": info["leaf"], "items": items}
+
+
+@router.get("/{slug}/measure-grid/{service}")
+def measure_grid(slug: str, service: str, code: str = None):
+    """Read-only data of the Measurement grid of one service:
+    {"service","basis":"total"|"unknown",
+     "rows":[{"code","desc","unit","boq_qty","plan","done","pending","pct","plan_above_boq","done_above_boq","runs_ok",
+              "entries":{"n","backed","other","latest":[{"place","from","to","qty","at","remarks"}]}}],
+     "cells":{"<item_code>|<room_id>": quantity done in that zone},
+     "locks":{"<item_code>|<room_id>": {"kind","why"}}  (zones a number cannot be typed into, see _zone_locks),
+     "exprs":{"<item_code>|<room_id>": "=112+155"}  (the sum behind a typed quantity, only while it still adds up to the box; see _item_exprs)}
+    Every row also says `count` (a counted unit: whole numbers only) and `free` (the item's per-zone plan was removed). `?code=` returns that
+    one item only (rows, cells, locks), which is how the grid refreshes a line after a save without re-reading the whole service.
+
+    boq_qty is the BOQ's own quantity and is only given when the service's qty column is a whole-project total (see _qty_is_total);
+    otherwise it is null and the grid shows a dash, never a guess. plan is the planned quantity Site Progress works with (the pencil
+    edit, else the BOQ). pending = boq_qty - done (never below 0); null without a boq_qty. A zone the item does not apply to has no
+    cell. `entries.backed` is the part of the installed quantity that measurement entries explain; `other` is the rest (ticks or typed
+    quantities), so the grid can say how much of a number was measured."""
+    d = _need(slug)
+    return _grid_data(d, service, code)
+
+
+def _grid_columns(d):
+    """The places of the grid in sheet order: [{"id","loc","name"}] (loc = the room's level / floor, as the DPR names it)."""
+    info = location_info(d)
+    return [{"id": r, "loc": info["loc"].get(r, ""), "name": info["name"].get(r, r)} for r in _all_room_ids(d)]
+
+
+def _run_lines(d, service, grid, cols):
+    """The From-To lines of the length items for the export's vertical Measurement sheet, in BOQ order then place order: the active entries of each place,
+    and (so the sheet ties to the Measurement sheet) one 'Recorded without From-To detail' line when the place holds more than its entries.
+    Whole-level / whole-project entries are listed under their own name. Cancelled entries are not quantity, so they are not listed."""
+    runs_all = item_runs_all(d, service)
+    pos = {c["id"]: i for i, c in enumerate(cols)}
+    meta = {c["id"]: c for c in cols}
+    out = []
+    for row in grid["rows"]:
+        code = row["code"]
+        per = runs_all.get(code) or {}
+        keys = [k for k in per if runlog.active(per[k])]
+        for k in sorted(keys, key=lambda k: (runlog.kind_of(k) != "zone", pos.get(k, 10 ** 9), str(k))):
+            kind = runlog.kind_of(k)
+            if kind == "zone":
+                c = meta.get(k) or {"loc": "", "name": k}
+                level, place = c["loc"], c["name"]
+            elif kind == "area":
+                level, place = k[len(runlog.AREA):], "Whole level / floor (one total)"
+            else:
+                level, place = "", "Whole project (not located)"
+            act = runlog.active(per[k])
+            rest = None
+            if kind == "zone" and f"{code}|{k}" in grid["cells"]:
+                rest = round(grid["cells"][f"{code}|{k}"] - runlog.active_total(act), 4)
+            if rest is not None and rest > runlog.TOL:
+                out.append({"code": code, "level": level, "place": place, "from": "Recorded without From-To detail", "to": "", "start": None, "end": None, "qty": rest, "remarks": "", "kind": "before"})
+            for r in act:
+                out.append({"code": code, "level": level, "place": place, "from": r.get("from"), "to": r.get("to"), "start": r.get("start"), "end": r.get("end"),
+                            "qty": r.get("qty"), "remarks": r.get("remarks") or "", "kind": "run"})
+    return out
+
+
+@router.get("/{slug}/measure-grid/{service}/export")
+def measure_grid_export(slug: str, service: str):
+    """The grid as an Excel file (layout and rules: measurexl.py). Quantities are what Site Progress holds right now."""
+    d = _need(slug)
+    grid = _grid_data(d, service)
+    st = _read_json(d / "structure.json", {}) or {}
+    cols = _grid_columns(d)
+    try:
+        data = measurexl.build(st.get("name") or slug, service, slug, cols, grid, runs=_run_lines(d, service, grid, cols))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    fname = f"Measurement_{_slugify(slug)}_{_slugify(service)}_{dt.date.today().isoformat()}.xlsx"
+    return Response(content=data, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+
+
+@router.post("/{slug}/measure-grid/{service}/import-preview")
+async def measure_grid_import_preview(slug: str, service: str, file: UploadFile = File(...)):
+    """Read an Excel file made by the export and say, box by box, what importing it WOULD do. Nothing is saved here: the grid applies the
+    changes itself through the normal save (POST /progress/rooms), so a locked box, a plan limit or a whole-number rule is judged exactly as
+    when typing. Returns {"counts","changes":[{code,desc,unit,room,place,cur,new,over_plan}],"skipped":[{code,place,kind,why}],
+    "unknown_items":[code],"unknown_places":[id]}.  kinds: locked, not_in_place, bad. A blank box means "no change"."""
+    d = _need(slug)
+    raw = await file.read()
+    try:
+        parsed = measurexl.read(raw)
+    except measurexl.XlError as e:
+        raise HTTPException(400, str(e))
+    if parsed["service"] and parsed["service"] != service:
+        raise HTTPException(400, f"This file was made for the service '{parsed['service']}', but this grid is '{service}'. Open that service's tab and import it there.")
+    if parsed["slug"] and parsed["slug"] != slug:
+        raise HTTPException(400, "This file was exported from a different project.")
+    grid = _grid_data(d, service)
+    rows = {r["code"]: r for r in grid["rows"]}
+    cols = {c["id"]: c for c in _grid_columns(d)}
+    ctx = location_context(d, service)
+    changes, skipped, unknown_items, unknown_cols, same = [], [], [], set(), 0
+    place = lambda pid: (cols[pid]["loc"] + " \u25B8 " + cols[pid]["name"]) if cols[pid]["loc"] and cols[pid]["loc"] != cols[pid]["name"] else cols[pid]["name"]
+    for fr in parsed["rows"]:
+        code = fr["code"]
+        row = rows.get(code)
+        if row is None:
+            unknown_items.append(code)
+            continue
+        _appl, plan, _unit = _item_plan(d, service, code, ctx)
+        for pid, rawv in fr["cells"].items():
+            if pid not in cols:
+                unknown_cols.add(pid)
+                continue
+            res = measurexl.parse_qty(rawv, row["count"])
+            if res[0] == "blank":
+                continue
+            key = f"{code}|{pid}"
+            if res[0] == "bad":
+                skipped.append({"code": code, "place": place(pid), "kind": "bad", "why": res[1]})
+                continue
+            if key not in grid["cells"]:
+                skipped.append({"code": code, "place": place(pid), "kind": "not_in_place", "why": "This item is not in this place."})
+                continue
+            if key in grid["locks"]:
+                if abs(grid["cells"][key] - res[1]) < 1e-9:
+                    same += 1
+                else:
+                    skipped.append({"code": code, "place": place(pid), "kind": "locked", "why": grid["locks"][key]["why"]})
+                continue
+            if abs(grid["cells"][key] - res[1]) < 1e-9:
+                same += 1
+                continue
+            pl = plan.get(pid)
+            changes.append({"code": code, "desc": row["desc"], "unit": row["unit"], "room": pid, "place": place(pid), "cur": grid["cells"][key], "new": res[1],
+                            "expr": _clean_expr(fr["formulas"].get(pid), res[1]),
+                            "over_plan": bool(not row["free"] and pl is not None and res[1] > pl + 1e-6)})
+    kinds = lambda k: sum(1 for x in skipped if x["kind"] == k)
+    return {"service": service,
+            "counts": {"change": len(changes), "same": same, "over_plan": sum(1 for c in changes if c["over_plan"]), "locked": kinds("locked"),
+                       "bad": kinds("bad"), "not_in_place": kinds("not_in_place"), "unknown_items": len(unknown_items), "unknown_places": len(unknown_cols)},
+            "changes": changes, "skipped": skipped, "unknown_items": unknown_items, "unknown_places": sorted(unknown_cols)}
 
 
 @router.post("/{slug}/progress/runs")

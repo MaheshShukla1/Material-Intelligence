@@ -250,3 +250,19 @@ def test_shortage_history_never_reads_a_run_folder_so_pruning_cannot_change_it()
     src = inspect.getsource(sh)
     for needle in ("RUNS", "open(", "Path(", "read_parquet", "read_text", "os.listdir"):
         assert needle not in src, needle
+
+
+
+# ---- memory: the per-run forecast cache must stay small ---------------------------------
+def test_forecast_frames_of_old_runs_do_not_pile_up_in_memory(env, monkeypatch):
+    """Live server (Railway, billed per GB-minute): every sync adds a run, and load_run() kept up to 128 of
+    their forecast DataFrames for the life of the process (SYNC_RUNS_KEEP = 50 runs per sheet stay on disk,
+    so nothing cleared them). Only the newest run of a project is ever read, so a handful is enough."""
+    client, runs, uploads, src, fetches = env
+    monkeypatch.setattr(api, "SYNC_RUNS_KEEP", 50)
+    for i in range(12):
+        rid = sync(client, project="Hyatt Test")["run_id"]
+        assert client.get(f"/api/run/{rid}").status_code == 200            # the screen opens each new run as it appears
+        time.sleep(1.05)                                                   # meta.created has 1 s resolution
+    assert len(list(runs.iterdir())) == 12                                  # 12 runs on disk, as the live server keeps up to 50
+    assert api.load_run.cache_info().currsize <= 8, api.load_run.cache_info()

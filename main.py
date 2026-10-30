@@ -23,6 +23,11 @@ import uvicorn  # noqa: E402  (import after sys.path is fixed)
 
 def main():
     port = int(os.environ.get("PORT", 8000))
+    try:                              # hand finished memory back to the OS: the host bills RAM per GB-minute (backend/memtrim.py)
+        from backend import memtrim
+        memtrim.start_janitor()
+    except Exception:                 # never let this optional helper stop the app from starting
+        pass
     reload_on = os.environ.get("RELOAD", "0") == "1"
     print(f"\n  Material Intelligence  ->  http://127.0.0.1:{port}")
     print("  Press CTRL+C to stop\n")

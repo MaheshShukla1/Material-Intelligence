@@ -267,7 +267,7 @@ def jsonable(df):
     return json.loads(out.replace({np.nan: None}).to_json(orient="records"))
 
 
-@lru_cache(maxsize=128)
+@lru_cache(maxsize=6)      # each entry is a whole forecast DataFrame held for the life of the process; only the newest runs are ever read
 def load_run(run_id):
     """A run's forecast.parquet/meta.json are written once at upload/sync
     time and never modified afterward (confirmed -- every later route only

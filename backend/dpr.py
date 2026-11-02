@@ -962,6 +962,28 @@ def _pct(v):
     return None if v is None else v
 
 
+def _words(data):
+    """The wording of the client DPR for its three shapes: one day, any other date range, or exactly one week (7 days, data["weekly"]).
+    One day and a free range keep the words they always had; the week uses plain, parallel words (Before this week / This week / To date)."""
+    period = bool(data.get("period"))
+    if data.get("weekly"):
+        return {"title": "WEEKLY PROGRESS REPORT", "when": "Week", "no": "Week No.", "prev": "Before this week", "this": "This week",
+                "mp": "MANPOWER ON SITE THIS WEEK", "mp_tot": "Total man-days", "mp_prev": "Weekly Average", "mp_to": None,
+                "work": "3.  WORK DONE THIS WEEK, AGAINST BOQ  (only BOQ lines worked on this week; quantity = THIS week's work)",
+                "work_this": "THIS WEEK", "loc": "Location worked this week", "none": "No BOQ line was updated in this week.",
+                "plan": "5.  PLAN FOR NEXT WEEK", "kind": "Weekly Progress Report"}
+    return {"title": "DAILY PROGRESS REPORT", "when": "Period" if period else "Date", "no": "DPR No.",
+            "prev": "Up to start of period" if period else "Up to previous day", "this": "This period" if period else "Today",
+            "mp": "MANPOWER ON SITE " + ("IN THIS PERIOD" if period else "TODAY") + "  (nos)",
+            "mp_tot": "Total in period" if period else "Total today",
+            "mp_prev": "Man-days up to start of period" if period else "Man-days up to previous day", "mp_to": "Man-days to date",
+            "work": "3.  WORK DONE " + ("IN THIS PERIOD" if period else "TODAY") + ", AGAINST BOQ  (only BOQ lines worked on" +
+                    (" in this period" if period else " today") + "; quantity = " + ("THIS period's" if period else "THIS day's") + " work)",
+            "work_this": "IN PERIOD" if period else "TODAY", "loc": "Location worked" if period else "Location worked today",
+            "none": "No BOQ line was updated in this " + ("period." if period else "day."), "plan": "5.  PLAN FOR TOMORROW",
+            "kind": "Daily Progress Report"}
+
+
 def sheet_dpr(wb, data):
     """data keys used: project, date_label, weekday, dpr_no, period (bool), client, contractor, prepared_by, scope, services, progress,
     overall, manpower, lines, holdups, plan."""
@@ -969,46 +991,54 @@ def sheet_dpr(wb, data):
     ws.title = "DPR"
     ws.sheet_view.showGridLines = False
     period = data.get("period")
+    W = _words(data)
+    plain = bool(data.get("weekly"))                     # weekly: no colour at all -- white sheet, bold text and thin/medium borders only
+    C_TOT, C_TODAY, C_TODAYH, C_SVC, C_ACT, C_HEAD = (None,) * 6 if plain else (_BAND, _TODAY, _TODAYH, _SLATE2, _BAND, _BAND)
+    T_FILL, T_COL = (None, _SLATE) if plain else (_SLATE, "FFFFFF")      # section bar: fill and text colour
+    _MED = Side(style="medium", color=_SLATE)
     for k, v in {"A": 5, "B": 13, "C": 52, "D": 8, "E": 13, "F": 13, "G": 12, "H": 13, "I": 12, "J": 11, "K": 24, "L": 28}.items():
         ws.column_dimensions[k].width = v
-    _m(ws, "A1:L1", "DAILY PROGRESS REPORT", _F(size=16, bold=True, color="FFFFFF"), _SLATE,
+    _m(ws, "A1:L1", W["title"], _F(size=16, bold=True, color="FFFFFF"), _SLATE,      # the title bar is the one filled part of the weekly sheet
        Alignment(horizontal="center", vertical="center"))
     ws.row_dimensions[1].height = 30
-    _w(ws, "B2", "Project", _F(bold=True), _BAND)
+    _w(ws, "B2", "Project", _F(bold=True), C_HEAD)
     _w(ws, "C2", data["project"], _F(bold=True, size=11))
-    _m(ws, "E2:F2", "Period" if period else "Date", _F(bold=True), _BAND, _CEN)
+    _m(ws, "E2:F2", W["when"], _F(bold=True), C_HEAD, _CEN)
     _m(ws, "G2:H2", data["date_label"] + (f" ({data['weekday']})" if data.get("weekday") else ""), _F(bold=True), None, _CEN)
-    _w(ws, "J2", "DPR No.", _F(bold=True), _BAND, _CEN)
-    _w(ws, "K2", data.get("dpr_no"), _F(bold=True), None, Alignment(horizontal="left", vertical="center"))
-    _w(ws, "B3", "Client", _F(bold=True), _BAND)
+    _w(ws, "J2", W["no"], _F(bold=True), C_HEAD, _CEN)
+    _w(ws, "K2", data.get("week_label") if data.get("weekly") else data.get("dpr_no"), _F(bold=True), None, Alignment(horizontal="left", vertical="center"))
+    _w(ws, "B3", "Client", _F(bold=True), C_HEAD)
     _w(ws, "C3", data.get("client") or "", _F(), None, _LEFT)
-    _m(ws, "E3:F3", "Contractor", _F(bold=True), _BAND, _CEN)
+    _m(ws, "E3:F3", "Contractor", _F(bold=True), C_HEAD, _CEN)
     _m(ws, "G3:H3", data.get("contractor") or "", _F(), None, _CEN)
-    _w(ws, "J3", "Prepared by", _F(bold=True), _BAND, _CEN)
+    _w(ws, "J3", "Prepared by", _F(bold=True), C_HEAD, _CEN)
     _w(ws, "K3", data.get("prepared_by") or "", _F(), None, Alignment(horizontal="left", vertical="center", wrap_text=True))
     if data.get("scope"):
         _m(ws, "B4:L4", "Scope: " + data["scope"], _F(size=9, italic=True, color="555555"), None, _ind(1), border=False)
 
     def section(rr, t):
-        _m(ws, f"A{rr}:L{rr}", t, _F(size=11, bold=True, color="FFFFFF"), _SLATE, Alignment(vertical="center", indent=1))
+        _m(ws, f"A{rr}:L{rr}", t, _F(size=11, bold=True, color=T_COL), T_FILL, Alignment(vertical="center", indent=1))
         ws.row_dimensions[rr].height = 20
+        if plain:
+            for c in ws[f"A{rr}:L{rr}"][0]:
+                c.border = Border(left=c.border.left, right=c.border.right, top=c.border.top, bottom=_MED)
 
     def head(rr, spec, h=32):
         for col, txt in spec.items():
             if ":" in col:
                 a, b = col.split(":")
-                _m(ws, f"{a}{rr}:{b}{rr}", txt, _F(bold=True), _BAND, _CEN)
+                _m(ws, f"{a}{rr}:{b}{rr}", txt, _F(bold=True), C_HEAD, _CEN)
             else:
-                _w(ws, f"{col}{rr}", txt, _F(bold=True), _BAND, _CEN)
+                _w(ws, f"{col}{rr}", txt, _F(bold=True), C_HEAD, _CEN)
         ws.row_dimensions[rr].height = h
 
     svcs = data["services"]
     r = 5
     section(r, "1.  PROGRESS STATUS  (% of contract work complete)")
     r = 6
-    head(r, {"B:D": "Service", "E": "Up to start of period" if period else "Up to previous day",
-             "F": "This period" if period else "Today", "G": "To date"})
-    ws.cell(row=r, column=6).fill = _fill(_TODAYH)
+    head(r, {"B:D": "Service", "E": W["prev"], "F": W["this"], "G": "To date"})
+    if C_TODAYH:
+        ws.cell(row=r, column=6).fill = _fill(C_TODAYH)
     for i, svc in enumerate(svcs):
         rr = r + 1 + i
         p = data["progress"].get(svc) or {}
@@ -1018,18 +1048,21 @@ def sheet_dpr(wb, data):
         _w(ws, f"G{rr}", p.get("todate"), _F(bold=True), None, _RIGHT, "0.0%")
     rr = r + 1 + len(svcs)
     o = data.get("overall") or {}
-    _m(ws, f"B{rr}:D{rr}", "Overall project", _F(bold=True), _BAND, _ind(1))
-    _w(ws, f"E{rr}", o.get("prev"), _F(bold=True), _BAND, _RIGHT, "0.0%")
-    _w(ws, f"F{rr}", o.get("today"), _F(bold=True), _BAND, _RIGHT, "0.0%")
-    _w(ws, f"G{rr}", o.get("todate"), _F(bold=True), _BAND, _RIGHT, "0.0%")
+    _m(ws, f"B{rr}:D{rr}", "Overall project", _F(bold=True), C_TOT, _ind(1))
+    _w(ws, f"E{rr}", o.get("prev"), _F(bold=True), C_TOT, _RIGHT, "0.0%")
+    _w(ws, f"F{rr}", o.get("today"), _F(bold=True), C_TOT, _RIGHT, "0.0%")
+    _w(ws, f"G{rr}", o.get("todate"), _F(bold=True), C_TOT, _RIGHT, "0.0%")
 
     r = rr + 2
-    section(r, "2.  MANPOWER ON SITE " + ("IN THIS PERIOD" if period else "TODAY") + "  (nos)")
+    section(r, "2.  " + W["mp"])
     r += 1
-    head(r, {"B:D": "Service", "E": "Supervisor", "F": "Skilled", "G": "Helper / unskilled",
-             "H": "Total in period" if period else "Total today",
-             "I": "Man-days up to start of period" if period else "Man-days up to previous day", "J": "Man-days to date"}, 44)
+    mp_head = {"B:D": "Service", "E": "Supervisor", "F": "Skilled", "G": "Helper / unskilled", "H": W["mp_tot"], "I": W["mp_prev"]}
+    if W["mp_to"]:
+        mp_head["J"] = W["mp_to"]
+    head(r, mp_head, 44)
     mp = data["manpower"]
+    weekly = bool(data.get("weekly"))
+    mp_cols = "EFGHI" if weekly else "EFGHIJ"
     sums = {k: [] for k in "EFGHIJ"}
     for i, svc in enumerate(svcs):
         rr = r + 1 + i
@@ -1041,43 +1074,50 @@ def sheet_dpr(wb, data):
                 sums[col].append(row[k])
         tot = row.get("total")
         _w(ws, f"H{rr}", tot, _F(bold=True), None, _RIGHT, "0")
-        _w(ws, f"I{rr}", row.get("prev_days"), _F(), None, _RIGHT, "#,##0")
-        todate = row.get("to_date")
-        _w(ws, f"J{rr}", todate, _F(bold=True), None, _RIGHT, "#,##0")
-        for col, v in (("H", tot), ("I", row.get("prev_days")), ("J", todate)):
+        if weekly:                                   # the average head-count per day over the days of the week that have manpower typed
+            _w(ws, f"I{rr}", row.get("avg"), _F(), None, _RIGHT, "0.0")
+            pairs = (("H", tot), ("I", row.get("avg")))
+        else:
+            _w(ws, f"I{rr}", row.get("prev_days"), _F(), None, _RIGHT, "#,##0")
+            todate = row.get("to_date")
+            _w(ws, f"J{rr}", todate, _F(bold=True), None, _RIGHT, "#,##0")
+            pairs = (("H", tot), ("I", row.get("prev_days")), ("J", todate))
+        for col, v in pairs:
             if _isnum(v):
                 sums[col].append(v)
     rr = r + 1 + len(svcs)
-    _m(ws, f"B{rr}:D{rr}", "Total", _F(bold=True), _BAND, _ind(1))
-    for col in "EFGHIJ":
-        _w(ws, f"{col}{rr}", (sum(sums[col]) if sums[col] else None), _F(bold=True), _BAND, _RIGHT, "#,##0")
+    _m(ws, f"B{rr}:D{rr}", "Total", _F(bold=True), C_TOT, _ind(1))
+    for col in mp_cols:
+        if weekly and col == "I":                    # NOT the sum of the services' averages (their typed days can differ): total man-days / days with any manpower typed
+            _w(ws, f"{col}{rr}", data.get("manpower_avg"), _F(bold=True), C_TOT, _RIGHT, "0.0")
+        else:
+            _w(ws, f"{col}{rr}", (sum(sums[col]) if sums[col] else None), _F(bold=True), C_TOT, _RIGHT, "#,##0")
     ws.row_breaks.append(Break(id=rr + 1))
 
     r = rr + 2
-    section(r, "3.  WORK DONE " + ("IN THIS PERIOD" if period else "TODAY") +
-            ", AGAINST BOQ  (only BOQ lines worked on" + (" in this period" if period else " today") +
-            "; quantity = " + ("THIS period's" if period else "THIS day's") + " work)")
+    section(r, W["work"])
     r += 1
     head(r, {"A": "Sr.", "B": "BOQ Ref (client)", "C": "Activity / BOQ item", "D": "Unit", "E": "BOQ qty",
-             "F": "Up to start of period" if period else "Up to previous day", "G": "IN PERIOD" if period else "TODAY",
-             "H": "Cumulative", "I": "Balance", "J": "% complete", "K": "Location worked" if period else "Location worked today",
+             "F": W["prev"], "G": W["work_this"],
+             "H": "Cumulative", "I": "Balance", "J": "% complete", "K": W["loc"],
              "L": "Remarks"})
-    ws.cell(row=r, column=7).fill = _fill(_TODAYH)
+    if C_TODAYH:
+        ws.cell(row=r, column=7).fill = _fill(C_TODAYH)
     r += 1
     sr = 0
     lines = data["lines"]
     if not lines:
-        _m(ws, f"A{r}:L{r}", "No BOQ line was updated in this " + ("period." if period else "day."), _F(italic=True, color="555555"), None, _ind(1))
+        _m(ws, f"A{r}:L{r}", W["none"], _F(italic=True, color="555555"), None, _ind(1))
         r += 1
     last_svc = last_act = last_parent = None
     for ln in lines:
         if ln["service"] != last_svc:
-            _m(ws, f"A{r}:L{r}", str(ln["service"]).upper(), _F(bold=True, color="FFFFFF"), _SLATE2, Alignment(vertical="center", indent=1))
+            _m(ws, f"A{r}:L{r}", str(ln["service"]).upper(), _F(bold=True, size=(11 if plain else 10), color=(_SLATE if plain else "FFFFFF")), C_SVC, Alignment(vertical="center", indent=1))
             ws.row_dimensions[r].height = 18
             r += 1
             last_svc, last_act, last_parent = ln["service"], None, None
         if ln["activity"] != last_act:
-            _m(ws, f"A{r}:L{r}", str(ln["activity"]).upper(), _F(bold=True, color=_SLATE), _BAND, Alignment(vertical="center", indent=1))
+            _m(ws, f"A{r}:L{r}", str(ln["activity"]).upper(), _F(bold=True, color=_SLATE), C_ACT, Alignment(vertical="center", indent=1))
             ws.row_dimensions[r].height = 17
             r += 1
             last_act, last_parent = ln["activity"], None
@@ -1092,7 +1132,7 @@ def sheet_dpr(wb, data):
         _w(ws, f"B{r}", ln.get("ref") or DASH, _F(), None, _CEN)
         _w(ws, f"C{r}", _short(ln["desc"]), _F(), None, _LEFT)
         _w(ws, f"D{r}", unit, _F(), None, _CEN)
-        for col, k, bold, fil in (("E", "boq", False, None), ("F", "prev", False, None), ("G", "today", True, _TODAY),
+        for col, k, bold, fil in (("E", "boq", False, None), ("F", "prev", False, None), ("G", "today", True, C_TODAY),
                                   ("H", "cum", False, None), ("I", "balance", False, None)):
             v = ln.get(k)
             _w(ws, f"{col}{r}", v, _F(bold=bold), fil, _RIGHT, _qty_fmt(unit, v))
@@ -1111,7 +1151,7 @@ def sheet_dpr(wb, data):
         _m(ws, f"A{r}:L{r}", t, _F(), None, _ind(1))
         ws.row_dimensions[r].height = 18
     r += 2
-    section(r, "5.  PLAN FOR TOMORROW")
+    section(r, W["plan"])
     for t in _text_rows(data.get("plan")):
         r += 1
         _m(ws, f"A{r}:L{r}", t, _F(), None, _ind(1))
@@ -1120,7 +1160,7 @@ def sheet_dpr(wb, data):
     _m(ws, f"A{r}:F{r}", "Prepared by (Contractor):", _F(bold=True), None, Alignment(vertical="top", indent=1))
     _m(ws, f"G{r}:L{r}", "Reviewed by (Client / PMC):", _F(bold=True), None, Alignment(vertical="top", indent=1))
     ws.row_dimensions[r].height = 46
-    _print_setup(ws, f"{data['project']} - Daily Progress Report - {data['date_label']} - Page &P of &N")
+    _print_setup(ws, f"{data['project']} - {W['kind']} - {data['date_label']} - Page &P of &N")
     return ws
 
 
@@ -1208,6 +1248,8 @@ def sheet_summary(wb, data, with_amount):
     ws = wb.create_sheet("Summary")
     ws.sheet_view.showGridLines = False
     period = data.get("period")
+    W = _words(data)
+    mp_lab = "Manpower this week" if data.get("weekly") else ("Manpower in period" if period else "Manpower today")
     ncol = 8
     for i, w in enumerate([16, 14, 14, 14, 14, 13, 13, 16], start=1):
         ws.column_dimensions[get_column_letter(i)].width = w
@@ -1226,8 +1268,8 @@ def sheet_summary(wb, data, with_amount):
                  ("Remaining (₹)", val.get("remaining"), '"₹"#,##0'), ("Material waste (₹)", None, '"₹"#,##0')]
     else:
         mp_total = data.get("manpower_total")
-        tiles = [("Progress complete", o.get("todate"), "0.0%"), ("This period" if period else "Today", o.get("today"), "+0.0%"),
-                 ("Manpower in period" if period else "Manpower today", mp_total, "0"),
+        tiles = [("Progress complete", o.get("todate"), "0.0%"), (W["this"], o.get("today"), "+0.0%"),
+                 (mp_lab, mp_total, "0"),
                  ("BOQ lines worked", len(data["lines"]), "0")]
     for i, (lab, v, fmt) in enumerate(tiles):
         c0 = 1 + i * 2
@@ -1239,8 +1281,8 @@ def sheet_summary(wb, data, with_amount):
     if with_amount:
         heads = ["Service", "% complete", "Done (₹)", "Remaining (₹)", "Total (₹)", "Zones done", "In progress", "Pending"]
     else:
-        heads = ["Service", "Up to start of period" if period else "Up to previous day", "This period" if period else "Today",
-                 "To date (% complete)", "Zones done", "In progress", "Pending", "Manpower in period" if period else "Manpower today"]
+        heads = ["Service", W["prev"], W["this"],
+                 "To date (% complete)", "Zones done", "In progress", "Pending", mp_lab]
     for i, h in enumerate(heads, start=1):
         _w(ws, f"{get_column_letter(i)}7", h, _F(bold=True, color="FFFFFF"), _SLATE, _CEN)
     ws.row_dimensions[7].height = 32
@@ -1289,6 +1331,16 @@ def sheet_summary(wb, data, with_amount):
     return ws
 
 
+def _no_colour(ws):
+    """The weekly report is plain: take every fill off a sheet and turn white text (it sat on a dark fill) dark. Borders stay."""
+    for row in ws.iter_rows():
+        for c in row:
+            if c.fill is not None and c.fill.fill_type == "solid":
+                c.fill = PatternFill(fill_type=None)
+                if c.font is not None and c.font.color is not None and c.font.color.rgb in ("00FFFFFF", "FFFFFFFF"):
+                    c.font = Font(name=c.font.name, size=c.font.size, bold=c.font.bold, italic=c.font.italic, color=_SLATE)
+
+
 def build_client_dpr(data, mode=None):
     """mode: None = the DPR sheet only (the client copy) | "without" = + Summary and BOQ progress, percentages only | "with" = the same
     with ₹ amounts (internal). Sheet order: DPR, Summary, BOQ progress."""
@@ -1298,4 +1350,7 @@ def build_client_dpr(data, mode=None):
         with_amount = (mode == "with")
         sheet_summary(wb, data, with_amount)
         sheet_boq_progress(wb, data, with_amount)
+        if data.get("weekly"):
+            for ws in wb.worksheets[1:]:
+                _no_colour(ws)
     return wb

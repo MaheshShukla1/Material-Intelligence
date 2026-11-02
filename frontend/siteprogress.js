@@ -474,6 +474,10 @@
          <span style="color:var(--ink3)">to</span>
          <input class="ctl" id="sp-dpr-end" type="date" value="${today}" style="flex:1">
        </div>
+       <div style="display:flex;gap:8px;align-items:center;font-size:12.5px;margin:-8px 0 16px">
+         <button type="button" id="sp-dpr-week" class="btn" style="font-size:12.5px;padding:4px 12px">Last 7 days</button>
+         <span style="color:var(--ink3)">Exactly 7 days = Weekly Progress Report</span>
+       </div>
        <p style="font-size:13px;color:var(--ink3);margin:0 0 8px">Service</p>
        <div id="sp-dpr-svc" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:20px"></div>
        <p style="font-size:13px;color:var(--ink3);margin:0 0 8px">Summary sheets</p>
@@ -506,6 +510,16 @@
     renderDprSum();
     $("sp-dpr-start").addEventListener("input", renderDprSumHelp);
     $("sp-dpr-end").addEventListener("input", renderDprSumHelp);
+    // "Last 7 days": the 7 days ending on the End date (today if empty) -- a range of exactly 7 days is exported as the weekly report
+    $("sp-dpr-week").onclick = () => {
+      const endEl = $("sp-dpr-end");
+      const end = endEl.value || today;
+      const st = new Date(end + "T00:00:00Z");
+      st.setUTCDate(st.getUTCDate() - 6);
+      $("sp-dpr-start").value = st.toISOString().slice(0, 10);
+      endEl.value = end;
+      renderDprSumHelp();
+    };
     if (!rooms.length) return;
     renderDprFloors(groupEntries);
     refreshDprScopeLine(groupEntries);
@@ -535,7 +549,10 @@
       without: "Adds <b>Summary</b> and <b>BOQ progress</b> (cumulative, against every BOQ line). Percentages only, no \u20b9.",
       with: "Adds <b>Summary</b> and <b>BOQ progress</b> with \u20b9 amounts. Internal use, not for the client.",
     }[dprSum];
-    el.innerHTML = `${txt}<br>File <code>${esc(dprFileName())}</code>`;
+    const st = $("sp-dpr-start"), en = $("sp-dpr-end");
+    const days = st && en && st.value && en.value ? Math.round((new Date(en.value + "T00:00:00Z") - new Date(st.value + "T00:00:00Z")) / 86400000) : -1;
+    const wk = days === 6 ? `<b>Weekly Progress Report</b> (7 days chosen).<br>` : "";
+    el.innerHTML = `${wk}${txt}<br>File <code>${esc(dprFileName())}</code>`;
   }
   function renderDprSum() {
     const box = $("sp-dpr-sum");

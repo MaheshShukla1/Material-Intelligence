@@ -2792,6 +2792,7 @@ def _client_dpr_data(d, slug, start, end, service, rooms_set, floor_names, room_
     full_log = _dpr_log(d)
     log = dpr.filter_by_area(full_log, floors=floor_names, rooms=room_names) if floor_names else full_log
     period = start != end
+    weekly = period and (dt.date.fromisoformat(end) - dt.date.fromisoformat(start)).days == 6   # exactly 7 days chosen = the weekly report
 
     def by_item(entries):
         out = {}
@@ -2901,10 +2902,15 @@ def _client_dpr_data(d, slug, start, end, service, rooms_set, floor_names, room_
             row["total"] = sum(row[k] for k in dpr_roles)
             row["to_date"] = (row["prev_days"] or 0) + row["total"]
             mp_total.append(row["total"])
+            if weekly:                      # Weekly Average = man-days of the week / the days of the week this service HAS manpower typed (days not typed are not counted)
+                row["avg"] = row["total"] / len(today_rows)
         manpower[svc] = row
+    mp_days = {ds for ds in days if start <= ds <= end for svc in services if ((days.get(ds) or {}).get("manpower") or {}).get(svc)}
 
     # DPR number = how many different days have a DPR up to this one (a day with progress logged or manpower typed, plus this day itself)
     seen = {e["date"] for e in full_log if e["date"] <= end} | {ds for ds in days if ds <= end} | {end}
+    # Week No. = how many 7-day blocks have been reported, counting from the first day that has any DPR data, up to the end of this week
+    week_label = f"Week {((dt.date.fromisoformat(end) - dt.date.fromisoformat(min(seen | {start}))).days) // 7 + 1}" if weekly else None
     meta = _dpr_meta(d)
     def fmt_day(ds):
         return dt.date.fromisoformat(ds).strftime("%d-%b-%Y")
@@ -2917,10 +2923,12 @@ def _client_dpr_data(d, slug, start, end, service, rooms_set, floor_names, room_
         scope.append(", ".join(sorted(floor_names)) + (" \u2192 " + ", ".join(sorted(room_names)) if room_names else ""))
     return {"project": (struct or {}).get("name") or slug, "date_label": fmt_day(start) if not period else f"{fmt_day(start)} to {fmt_day(end)}",
             "weekday": None if period else dt.date.fromisoformat(start).strftime("%A"), "period": period,
+            "weekly": weekly, "week_label": week_label,
             "dpr_no": None if period else len(seen), "client": meta.get("client"), "contractor": meta.get("contractor"),
             "prepared_by": meta.get("prepared_by"), "scope": " \u00b7 ".join(scope), "services": [s_ for s_ in services if s_ in progress],
             "progress": progress, "overall": overall, "values": values, "manpower": manpower,
-            "manpower_total": sum(mp_total) if mp_total else None, "lines": lines, "boq_rows": boq_rows,
+            "manpower_total": sum(mp_total) if mp_total else None,
+            "manpower_avg": (sum(mp_total) / len(mp_days)) if (weekly and mp_total and mp_days) else None, "lines": lines, "boq_rows": boq_rows,
             "holdups": texts("holdups"), "plan": texts("plan"), "generated_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M")}
 
 
